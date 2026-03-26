@@ -52,6 +52,8 @@ pub mod tuning;
 pub mod voice;
 pub mod wavetable;
 
+pub mod synth;
+
 pub use error::{NaadError, Result};
 
 /// Flush denormal floating-point values to zero.

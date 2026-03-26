@@ -38,6 +38,7 @@ naad provides every low-level synthesis building block the AGNOS audio stack nee
 | 1 — Hardening | Audit + fix scaffold | WaveFold fix, Phaser validation, SVF coefficient caching, AllpassDelay single-buffer, denormal protection, Oscillator encapsulation, ADSR stored sample_rate, 14 new serde tests, 8 new benchmarks, gain_db constructor |
 | 2 — Primitives | Enhanced oscillator + LFO | 4-point PolyBLEP, HardSync, UnisonOscillator (1-8 voices, stereo), SubOscillator (-1/-2 oct), LFO 6 shapes + bipolar/unipolar modes, SVF buffer methods |
 | 3 — New Modules | Dynamics, EQ, reverb, voice, mod matrix | dsp_util, Compressor/Limiter/NoiseGate, ParametricEq/GraphicEq/DeEsser, Schroeder Reverb, Panning, ParamSmoother, VoiceManager, ModMatrix |
+| 4 — Synthesis | 8 synthesis algorithms | Subtractive, FM (multi-op), Drum (kick/snare/hihat), Formant (vowels), Additive (64 partials), Vocoder, Granular (64 grains), Physical (Karplus-Strong + Waveguide) |
 
 ---
 
@@ -116,7 +117,7 @@ Per CLAUDE.md P(-1) process:
 
 ---
 
-## Phase 4 — Synthesis Algorithms
+## ~~Phase 4 — Synthesis Algorithms~~ COMPLETE
 
 > **Effort**: Large | **Prerequisite**: Phase 3
 > **Goal**: Implement the synthesis algorithm modules from shruti's post-MVP roadmap. These are the engines that dhvani will compose into playable instruments.
