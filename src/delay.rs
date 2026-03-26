@@ -65,7 +65,7 @@ impl DelayLine {
 
 /// Feedback comb filter.
 ///
-/// y[n] = x[n] + feedback * y[n - delay]
+/// y\[n\] = x\[n\] + feedback * y\[n - delay\]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CombFilter {
     /// The delay line.
@@ -93,22 +93,23 @@ impl CombFilter {
     #[inline]
     pub fn process_sample(&mut self, input: f32) -> f32 {
         let delayed = self.delay_line.read(self.delay_samples);
-        let output = input + self.feedback * delayed;
+        let output = input + self.feedback * crate::flush_denormal(delayed);
         self.delay_line.write(output);
         output
     }
 }
 
-/// Allpass delay for use in reverb and phaser networks.
+/// Schroeder allpass delay for use in reverb and phaser networks.
 ///
-/// y[n] = -coefficient * x[n] + x[n - delay] + coefficient * y[n - delay]
+/// Single-buffer implementation: stores `x\[n\] + g * y\[n\]` in the buffer,
+/// halving memory usage compared to a dual-buffer design.
+///
+/// y\[n\] = -g * x\[n\] + x\[n - D\] + g * y\[n - D\]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AllpassDelay {
-    /// The delay line (stores output for feedback).
+    /// Single delay buffer storing the combined signal.
     delay_line: DelayLine,
-    /// Input delay line.
-    input_delay: DelayLine,
-    /// Allpass coefficient.
+    /// Allpass coefficient (clamped to (-1, 1) for stability).
     pub coefficient: f32,
     /// Delay time in samples.
     pub delay_samples: f32,
@@ -120,23 +121,18 @@ impl AllpassDelay {
     pub fn new(delay_samples: usize, coefficient: f32) -> Self {
         Self {
             delay_line: DelayLine::new(delay_samples),
-            input_delay: DelayLine::new(delay_samples),
             coefficient: coefficient.clamp(-0.999, 0.999),
             delay_samples: delay_samples as f32,
         }
     }
 
-    /// Process a single sample.
+    /// Process a single sample through the Schroeder allpass.
     #[inline]
     pub fn process_sample(&mut self, input: f32) -> f32 {
-        let delayed_input = self.input_delay.read(self.delay_samples);
-        let delayed_output = self.delay_line.read(self.delay_samples);
-
-        let output = -self.coefficient * input + delayed_input + self.coefficient * delayed_output;
-
-        self.input_delay.write(input);
-        self.delay_line.write(output);
-
+        let delayed = self.delay_line.read(self.delay_samples);
+        let output = -self.coefficient * input + delayed;
+        // Store x[n] + g * y[n] in the buffer
+        self.delay_line.write(input + self.coefficient * output);
         output
     }
 }

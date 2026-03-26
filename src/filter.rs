@@ -69,6 +69,29 @@ impl BiquadFilter {
     ///
     /// Returns error if frequency or sample_rate is invalid, or q <= 0.
     pub fn new(filter_type: FilterType, sample_rate: f32, frequency: f32, q: f32) -> Result<Self> {
+        Self::with_gain(filter_type, sample_rate, frequency, q, 0.0)
+    }
+
+    /// Create a new biquad filter with gain (for shelf and peak filter types).
+    ///
+    /// # Arguments
+    ///
+    /// * `filter_type` - Type of filter
+    /// * `sample_rate` - Sample rate in Hz
+    /// * `frequency` - Cutoff/center frequency in Hz
+    /// * `q` - Q factor (resonance), must be > 0
+    /// * `gain_db` - Gain in dB (used by LowShelf, HighShelf, Peak)
+    ///
+    /// # Errors
+    ///
+    /// Returns error if frequency or sample_rate is invalid, or q <= 0.
+    pub fn with_gain(
+        filter_type: FilterType,
+        sample_rate: f32,
+        frequency: f32,
+        q: f32,
+        gain_db: f32,
+    ) -> Result<Self> {
         if let Some(e) = error::validate_sample_rate(sample_rate) {
             return Err(e);
         }
@@ -94,7 +117,7 @@ impl BiquadFilter {
             sample_rate,
             frequency,
             q,
-            gain_db: 0.0,
+            gain_db,
         };
         filter.compute_coefficients();
         Ok(filter)
@@ -200,11 +223,12 @@ impl BiquadFilter {
     /// Process a single sample through the filter.
     ///
     /// Uses Direct Form II Transposed for numerical stability.
+    /// State variables are flushed to prevent denormal slowdowns.
     #[inline]
     pub fn process_sample(&mut self, input: f32) -> f32 {
         let output = self.b0 * input + self.z1;
-        self.z1 = self.b1 * input - self.a1 * output + self.z2;
-        self.z2 = self.b2 * input - self.a2 * output;
+        self.z1 = crate::flush_denormal(self.b1 * input - self.a1 * output + self.z2);
+        self.z2 = crate::flush_denormal(self.b2 * input - self.a2 * output);
         output
     }
 
@@ -231,6 +255,7 @@ impl BiquadFilter {
     }
 
     /// Process a buffer of samples in place.
+    #[inline]
     pub fn process_buffer(&mut self, buffer: &mut [f32]) {
         for sample in buffer.iter_mut() {
             *sample = self.process_sample(*sample);
@@ -259,15 +284,20 @@ pub struct SvfOutput {
 
 /// State variable filter with simultaneous LP/HP/BP/Notch outputs.
 ///
-/// Based on the Chamberlin state variable filter topology.
+/// Uses the Cytomic/Simper SVF topology for numerical stability at high
+/// resonance and high frequencies. Coefficients are cached and only
+/// recomputed when parameters change.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateVariableFilter {
-    /// Cutoff frequency in Hz.
-    pub frequency: f32,
-    /// Q factor (resonance).
-    pub q: f32,
-    /// Sample rate in Hz.
-    pub sample_rate: f32,
+    frequency: f32,
+    q: f32,
+    sample_rate: f32,
+    // Cached coefficients
+    g: f32,
+    k: f32,
+    a1: f32,
+    a2: f32,
+    a3: f32,
     // Internal state
     #[serde(skip)]
     ic1eq: f32,
@@ -295,34 +325,88 @@ impl StateVariableFilter {
             });
         }
 
+        let g = (std::f32::consts::PI * frequency / sample_rate).tan();
+        let k = 1.0 / q;
+        let a1 = 1.0 / (1.0 + g * (g + k));
+        let a2 = g * a1;
+        let a3 = g * a2;
+
         Ok(Self {
             frequency,
             q,
             sample_rate,
+            g,
+            k,
+            a1,
+            a2,
+            a3,
             ic1eq: 0.0,
             ic2eq: 0.0,
         })
     }
 
+    /// Returns the current cutoff frequency in Hz.
+    #[inline]
+    #[must_use]
+    pub fn frequency(&self) -> f32 {
+        self.frequency
+    }
+
+    /// Returns the current Q factor.
+    #[inline]
+    #[must_use]
+    pub fn q(&self) -> f32 {
+        self.q
+    }
+
+    /// Returns the sample rate in Hz.
+    #[inline]
+    #[must_use]
+    pub fn sample_rate(&self) -> f32 {
+        self.sample_rate
+    }
+
+    /// Update filter parameters. Coefficients are recalculated only when called.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if frequency or q is invalid.
+    pub fn set_params(&mut self, frequency: f32, q: f32) -> Result<()> {
+        if let Some(e) = error::validate_frequency(frequency, self.sample_rate) {
+            return Err(e);
+        }
+        if q <= 0.0 || !q.is_finite() {
+            return Err(NaadError::InvalidParameter {
+                name: "q".to_string(),
+                reason: "must be > 0".to_string(),
+            });
+        }
+
+        self.frequency = frequency;
+        self.q = q;
+        self.g = (std::f32::consts::PI * frequency / self.sample_rate).tan();
+        self.k = 1.0 / q;
+        self.a1 = 1.0 / (1.0 + self.g * (self.g + self.k));
+        self.a2 = self.g * self.a1;
+        self.a3 = self.g * self.a2;
+        Ok(())
+    }
+
     /// Process a sample and return all four filter outputs simultaneously.
+    ///
+    /// State variables are flushed to prevent denormal slowdowns.
     #[inline]
     pub fn process_sample(&mut self, input: f32) -> SvfOutput {
-        let g = (std::f32::consts::PI * self.frequency / self.sample_rate).tan();
-        let k = 1.0 / self.q;
-        let a1 = 1.0 / (1.0 + g * (g + k));
-        let a2 = g * a1;
-        let a3 = g * a2;
-
         let v3 = input - self.ic2eq;
-        let v1 = a1 * self.ic1eq + a2 * v3;
-        let v2 = self.ic2eq + a2 * self.ic1eq + a3 * v3;
+        let v1 = self.a1 * self.ic1eq + self.a2 * v3;
+        let v2 = self.ic2eq + self.a2 * self.ic1eq + self.a3 * v3;
 
-        self.ic1eq = 2.0 * v1 - self.ic1eq;
-        self.ic2eq = 2.0 * v2 - self.ic2eq;
+        self.ic1eq = crate::flush_denormal(2.0 * v1 - self.ic1eq);
+        self.ic2eq = crate::flush_denormal(2.0 * v2 - self.ic2eq);
 
         let low_pass = v2;
         let band_pass = v1;
-        let high_pass = input - k * v1 - v2;
+        let high_pass = input - self.k * v1 - v2;
         let notch = low_pass + high_pass;
 
         SvfOutput {
@@ -330,6 +414,22 @@ impl StateVariableFilter {
             high_pass,
             band_pass,
             notch,
+        }
+    }
+
+    /// Process a single sample returning only the low-pass output.
+    ///
+    /// More efficient when only one output is needed.
+    #[inline]
+    pub fn process_sample_lowpass(&mut self, input: f32) -> f32 {
+        self.process_sample(input).low_pass
+    }
+
+    /// Process a buffer of samples, writing low-pass output in-place.
+    #[inline]
+    pub fn process_buffer_lowpass(&mut self, buffer: &mut [f32]) {
+        for sample in buffer.iter_mut() {
+            *sample = self.process_sample(*sample).low_pass;
         }
     }
 

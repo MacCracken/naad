@@ -1,12 +1,14 @@
 //! Integration tests for naad.
 
-use naad::envelope::Adsr;
-use naad::filter::{BiquadFilter, FilterType};
-use naad::modulation::FmSynth;
+use naad::delay::{AllpassDelay, CombFilter, DelayLine};
+use naad::effects::{Chorus, Distortion, DistortionType, Flanger, Phaser};
+use naad::envelope::{Adsr, EnvelopeSegment, MultiStageEnvelope};
+use naad::filter::{BiquadFilter, FilterType, StateVariableFilter};
+use naad::modulation::{FmSynth, Lfo, LfoShape, RingModulator};
 use naad::noise::{NoiseGenerator, NoiseType};
 use naad::oscillator::{Oscillator, Waveform};
 use naad::tuning;
-use naad::wavetable::Wavetable;
+use naad::wavetable::{MorphWavetable, Wavetable, WavetableOscillator};
 
 /// Test that a 440 Hz sine wave has the correct period.
 ///
@@ -96,19 +98,17 @@ fn polyblep_saw_anti_aliased() {
 #[test]
 fn adsr_sustain_holds() {
     let mut env = Adsr::new(0.001, 0.001, 0.6, 0.1).unwrap();
-    let sample_rate = 44100.0;
-
     env.gate_on();
 
     // Run through attack and decay (about 88 samples for 2ms total)
     for _ in 0..500 {
-        env.next_value(sample_rate);
+        env.next_value();
     }
 
     // Now we should be at sustain — check that it holds steady
     let mut sustain_values = Vec::new();
     for _ in 0..1000 {
-        sustain_values.push(env.next_value(sample_rate));
+        sustain_values.push(env.next_value());
     }
 
     for &v in &sustain_values {
@@ -233,9 +233,9 @@ fn serde_roundtrip_oscillator() {
     let osc = Oscillator::new(Waveform::Saw, 440.0, 44100.0).unwrap();
     let json = serde_json::to_string(&osc).unwrap();
     let back: Oscillator = serde_json::from_str(&json).unwrap();
-    assert_eq!(osc.waveform, back.waveform);
-    assert!((osc.frequency - back.frequency).abs() < f32::EPSILON);
-    assert!((osc.sample_rate - back.sample_rate).abs() < f32::EPSILON);
+    assert_eq!(osc.waveform(), back.waveform());
+    assert!((osc.frequency() - back.frequency()).abs() < f32::EPSILON);
+    assert!((osc.sample_rate() - back.sample_rate()).abs() < f32::EPSILON);
 }
 
 #[test]
@@ -338,4 +338,127 @@ fn serde_roundtrip_tuning_table() {
     let back: tuning::TuningTable = serde_json::from_str(&json).unwrap();
     assert_eq!(table.name, back.name);
     assert!((table.a4_hz - back.a4_hz).abs() < f32::EPSILON);
+}
+
+// --- Additional serde roundtrip tests (M8-M9) ---
+
+#[test]
+fn serde_roundtrip_multi_stage_envelope() {
+    let segments = vec![
+        EnvelopeSegment {
+            target: 1.0,
+            duration: 0.01,
+        },
+        EnvelopeSegment {
+            target: 0.0,
+            duration: 0.05,
+        },
+    ];
+    let env = MultiStageEnvelope::new(segments).unwrap();
+    let json = serde_json::to_string(&env).unwrap();
+    let back: MultiStageEnvelope = serde_json::from_str(&json).unwrap();
+    assert_eq!(env.segments.len(), back.segments.len());
+}
+
+#[test]
+fn serde_roundtrip_svf() {
+    let svf = StateVariableFilter::new(1000.0, 0.707, 44100.0).unwrap();
+    let json = serde_json::to_string(&svf).unwrap();
+    let back: StateVariableFilter = serde_json::from_str(&json).unwrap();
+    assert!((svf.frequency() - back.frequency()).abs() < f32::EPSILON);
+    assert!((svf.q() - back.q()).abs() < f32::EPSILON);
+}
+
+#[test]
+fn serde_roundtrip_lfo() {
+    let lfo = Lfo::new(LfoShape::Sine, 5.0, 44100.0).unwrap();
+    let json = serde_json::to_string(&lfo).unwrap();
+    let back: Lfo = serde_json::from_str(&json).unwrap();
+    assert!((lfo.depth - back.depth).abs() < f32::EPSILON);
+}
+
+#[test]
+fn serde_roundtrip_ring_modulator() {
+    let rm = RingModulator::new(Waveform::Sine, 300.0, 44100.0).unwrap();
+    let json = serde_json::to_string(&rm).unwrap();
+    let _back: RingModulator = serde_json::from_str(&json).unwrap();
+}
+
+#[test]
+fn serde_roundtrip_chorus() {
+    let chorus = Chorus::new(3, 0.5, 10.0, 2.0, 0.5, 44100.0).unwrap();
+    let json = serde_json::to_string(&chorus).unwrap();
+    let back: Chorus = serde_json::from_str(&json).unwrap();
+    assert!((chorus.mix - back.mix).abs() < f32::EPSILON);
+}
+
+#[test]
+fn serde_roundtrip_flanger() {
+    let flanger = Flanger::new(0.5, 2.0, 0.5, 0.5, 0.5, 44100.0).unwrap();
+    let json = serde_json::to_string(&flanger).unwrap();
+    let back: Flanger = serde_json::from_str(&json).unwrap();
+    assert!((flanger.mix - back.mix).abs() < f32::EPSILON);
+}
+
+#[test]
+fn serde_roundtrip_phaser() {
+    let phaser = Phaser::new(6, 0.5, 200.0, 2000.0, 0.7, 0.5, 44100.0).unwrap();
+    let json = serde_json::to_string(&phaser).unwrap();
+    let back: Phaser = serde_json::from_str(&json).unwrap();
+    assert!((phaser.mix - back.mix).abs() < f32::EPSILON);
+}
+
+#[test]
+fn serde_roundtrip_distortion() {
+    let dist = Distortion::new(DistortionType::WaveFold, 3.0, 0.8);
+    let json = serde_json::to_string(&dist).unwrap();
+    let back: Distortion = serde_json::from_str(&json).unwrap();
+    assert!((dist.mix - back.mix).abs() < f32::EPSILON);
+}
+
+#[test]
+fn serde_roundtrip_delay_line() {
+    let dl = DelayLine::new(1024);
+    let json = serde_json::to_string(&dl).unwrap();
+    let _back: DelayLine = serde_json::from_str(&json).unwrap();
+}
+
+#[test]
+fn serde_roundtrip_comb_filter() {
+    let comb = CombFilter::new(100, 0.5);
+    let json = serde_json::to_string(&comb).unwrap();
+    let back: CombFilter = serde_json::from_str(&json).unwrap();
+    assert!((comb.feedback - back.feedback).abs() < f32::EPSILON);
+}
+
+#[test]
+fn serde_roundtrip_allpass_delay() {
+    let ap = AllpassDelay::new(100, 0.7);
+    let json = serde_json::to_string(&ap).unwrap();
+    let back: AllpassDelay = serde_json::from_str(&json).unwrap();
+    assert!((ap.coefficient - back.coefficient).abs() < f32::EPSILON);
+}
+
+#[test]
+fn serde_roundtrip_wavetable_oscillator() {
+    let wt = Wavetable::from_harmonics(4, &[1.0, 0.5, 0.33, 0.25], 1024).unwrap();
+    let wto = WavetableOscillator::new(wt, 440.0, 44100.0).unwrap();
+    let json = serde_json::to_string(&wto).unwrap();
+    let _back: WavetableOscillator = serde_json::from_str(&json).unwrap();
+}
+
+#[test]
+fn serde_roundtrip_morph_wavetable() {
+    let t1 = Wavetable::from_harmonics(2, &[1.0, 0.5], 512).unwrap();
+    let t2 = Wavetable::from_harmonics(2, &[0.5, 1.0], 512).unwrap();
+    let mwt = MorphWavetable::new(vec![t1, t2], 440.0, 44100.0).unwrap();
+    let json = serde_json::to_string(&mwt).unwrap();
+    let _back: MorphWavetable = serde_json::from_str(&json).unwrap();
+}
+
+#[test]
+fn serde_roundtrip_noise_generator() {
+    let ng = NoiseGenerator::new(NoiseType::Pink, 42);
+    let json = serde_json::to_string(&ng).unwrap();
+    let _back: NoiseGenerator = serde_json::from_str(&json).unwrap();
 }

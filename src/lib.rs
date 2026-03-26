@@ -25,7 +25,7 @@
 //!
 //! // Generate a sample
 //! env.gate_on();
-//! let sample = osc.next_sample() * env.next_value(44100.0);
+//! let sample = osc.next_sample() * env.next_value();
 //! let filtered = filter.process_sample(sample);
 //! ```
 //!
@@ -45,3 +45,16 @@ pub mod tuning;
 pub mod wavetable;
 
 pub use error::{NaadError, Result};
+
+/// Flush denormal floating-point values to zero.
+///
+/// Denormal (subnormal) floats cause 10-100x slowdowns on x86 processors.
+/// Call this on filter state variables and feedback paths to prevent
+/// performance degradation when signals decay to near-zero.
+#[inline]
+#[must_use]
+pub fn flush_denormal(x: f32) -> f32 {
+    // A float is denormal if its exponent bits are all zero but mantissa is non-zero.
+    // Threshold: f32::MIN_POSITIVE (1.175e-38) is the smallest normal f32.
+    if x.abs() < f32::MIN_POSITIVE { 0.0 } else { x }
+}

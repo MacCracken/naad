@@ -150,6 +150,7 @@ impl NoiseGenerator {
     }
 
     /// Fill a buffer with noise samples.
+    #[inline]
     pub fn fill_buffer(&mut self, buffer: &mut [f32]) {
         for sample in buffer.iter_mut() {
             *sample = self.next_sample();

@@ -74,7 +74,7 @@ impl Chorus {
             delay_lines.push(DelayLine::new(max_delay));
             // Spread LFO phases across voices
             let mut lfo = Oscillator::new(Waveform::Sine, rate.max(0.01), sample_rate)?;
-            lfo.phase = i as f32 / num_voices as f32;
+            lfo.set_phase(i as f32 / num_voices as f32);
             lfos.push(lfo);
         }
 
@@ -221,6 +221,11 @@ impl Phaser {
             return Err(e);
         }
 
+        // Validate frequency range: must be positive and below Nyquist
+        let nyquist = sample_rate * 0.5;
+        let min_f = min_freq.max(20.0).min(nyquist);
+        let max_f = max_freq.max(min_f).min(nyquist);
+
         let stages = num_stages.max(2);
         let lfo = Oscillator::new(Waveform::Sine, rate.max(0.01), sample_rate)?;
 
@@ -228,8 +233,8 @@ impl Phaser {
             allpass_states: vec![0.0; stages],
             lfo,
             num_stages: stages,
-            min_freq,
-            max_freq,
+            min_freq: min_f,
+            max_freq: max_f,
             feedback: feedback.clamp(-0.99, 0.99),
             mix: mix.clamp(0.0, 1.0),
             sample_rate,
@@ -245,8 +250,8 @@ impl Phaser {
         let t = (lfo_val + 1.0) * 0.5; // 0..1
         let freq = self.min_freq * (self.max_freq / self.min_freq).powf(t);
 
-        // Compute allpass coefficient from frequency
-        let w = std::f32::consts::PI * freq / self.sample_rate;
+        // Compute allpass coefficient from frequency (bilinear transform)
+        let w = (std::f32::consts::PI * freq / self.sample_rate).min(0.99);
         let coeff = (1.0 - w) / (1.0 + w);
 
         let mut output = input + self.feedback * self.prev_output;
@@ -294,18 +299,21 @@ impl Distortion {
             DistortionType::SoftClip => driven.tanh(),
             DistortionType::HardClip => driven.clamp(-1.0, 1.0),
             DistortionType::WaveFold => {
-                // Triangle wave folding
-                let mut x = driven;
-                // Fold into -1..1 range
-                while x > 1.0 || x < -1.0 {
-                    if x > 1.0 {
-                        x = 2.0 - x;
-                    }
-                    if x < -1.0 {
-                        x = -2.0 - x;
+                // Analytical triangle-wave folding: maps any finite value into -1..1
+                // by reflecting at the boundaries. Handles NaN/Inf safely.
+                if !driven.is_finite() {
+                    0.0
+                } else {
+                    // Shift so fold boundaries align: x in [0, 4) maps to triangle
+                    let x = driven + 1.0; // shift range so -1 maps to 0
+                    let period = 4.0_f32;
+                    let t = x.rem_euclid(period); // always in [0, 4)
+                    if t < 2.0 {
+                        t - 1.0 // rising: 0->-1, 1->0, 2->1
+                    } else {
+                        3.0 - t // falling: 2->1, 3->0, 4->-1
                     }
                 }
-                x
             }
         };
 

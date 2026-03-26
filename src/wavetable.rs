@@ -145,6 +145,7 @@ impl WavetableOscillator {
     }
 
     /// Fill a buffer with wavetable samples.
+    #[inline]
     pub fn fill_buffer(&mut self, buffer: &mut [f32]) {
         for sample in buffer.iter_mut() {
             *sample = self.next_sample();
@@ -178,6 +179,14 @@ impl MorphWavetable {
             return Err(NaadError::InvalidParameter {
                 name: "tables".to_string(),
                 reason: "must have at least one wavetable".to_string(),
+            });
+        }
+        // Validate all tables have the same size for correct morphing
+        let first_len = tables[0].samples.len();
+        if tables.iter().any(|t| t.samples.len() != first_len) {
+            return Err(NaadError::InvalidParameter {
+                name: "tables".to_string(),
+                reason: "all wavetables must have the same number of samples".to_string(),
             });
         }
         if let Some(e) = error::validate_sample_rate(sample_rate) {

@@ -34,8 +34,10 @@ pub struct Adsr {
     pub sustain_level: f32,
     /// Release time in seconds.
     pub release_time: f32,
+    /// Sample rate in Hz.
+    sample_rate: f32,
     /// Current envelope state.
-    pub state: EnvelopeState,
+    state: EnvelopeState,
     /// Current output value.
     current_value: f32,
     /// Value at the start of the release phase.
@@ -53,6 +55,22 @@ impl Adsr {
     ///
     /// Returns error if any time is negative or sustain is out of range.
     pub fn new(attack: f32, decay: f32, sustain: f32, release: f32) -> Result<Self> {
+        Self::with_sample_rate(attack, decay, sustain, release, 44100.0)
+    }
+
+    /// Create a new ADSR envelope with an explicit sample rate.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if any time is negative, sustain is out of range,
+    /// or sample_rate is invalid.
+    pub fn with_sample_rate(
+        attack: f32,
+        decay: f32,
+        sustain: f32,
+        release: f32,
+        sample_rate: f32,
+    ) -> Result<Self> {
         if attack < 0.0 {
             return Err(NaadError::InvalidParameter {
                 name: "attack".to_string(),
@@ -77,17 +95,28 @@ impl Adsr {
                 reason: "must be >= 0".to_string(),
             });
         }
+        if sample_rate <= 0.0 || !sample_rate.is_finite() {
+            return Err(NaadError::InvalidSampleRate { sample_rate });
+        }
 
         Ok(Self {
             attack_time: attack,
             decay_time: decay,
             sustain_level: sustain,
             release_time: release,
+            sample_rate,
             state: EnvelopeState::Idle,
             current_value: 0.0,
             release_start_value: 0.0,
             stage_samples: 0.0,
         })
+    }
+
+    /// Returns the current envelope state.
+    #[inline]
+    #[must_use]
+    pub fn state(&self) -> EnvelopeState {
+        self.state
     }
 
     /// Trigger the envelope (note on).
@@ -109,13 +138,14 @@ impl Adsr {
     ///
     /// Returns a value between 0.0 and 1.0.
     #[inline]
-    pub fn next_value(&mut self, sample_rate: f32) -> f32 {
+    pub fn next_value(&mut self) -> f32 {
+        let sr = self.sample_rate;
         match self.state {
             EnvelopeState::Idle => {
                 self.current_value = 0.0;
             }
             EnvelopeState::Attack => {
-                let attack_samples = self.attack_time * sample_rate;
+                let attack_samples = self.attack_time * sr;
                 if attack_samples <= 0.0 {
                     self.current_value = 1.0;
                     self.state = EnvelopeState::Decay;
@@ -131,7 +161,7 @@ impl Adsr {
                 }
             }
             EnvelopeState::Decay => {
-                let decay_samples = self.decay_time * sample_rate;
+                let decay_samples = self.decay_time * sr;
                 if decay_samples <= 0.0 {
                     self.current_value = self.sustain_level;
                     self.state = EnvelopeState::Sustain;
@@ -149,7 +179,7 @@ impl Adsr {
                 self.current_value = self.sustain_level;
             }
             EnvelopeState::Release => {
-                let release_samples = self.release_time * sample_rate;
+                let release_samples = self.release_time * sr;
                 if release_samples <= 0.0 {
                     self.current_value = 0.0;
                     self.state = EnvelopeState::Idle;
@@ -189,6 +219,8 @@ pub struct EnvelopeSegment {
 pub struct MultiStageEnvelope {
     /// The segments of the envelope.
     pub segments: Vec<EnvelopeSegment>,
+    /// Sample rate in Hz.
+    sample_rate: f32,
     /// Current segment index.
     current_segment: usize,
     /// Current output value.
@@ -202,21 +234,34 @@ pub struct MultiStageEnvelope {
 }
 
 impl MultiStageEnvelope {
-    /// Create a new multi-stage envelope.
+    /// Create a new multi-stage envelope (defaults to 44100 Hz sample rate).
     ///
     /// # Errors
     ///
     /// Returns error if segments is empty.
     pub fn new(segments: Vec<EnvelopeSegment>) -> Result<Self> {
+        Self::with_sample_rate(segments, 44100.0)
+    }
+
+    /// Create a new multi-stage envelope with an explicit sample rate.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if segments is empty or sample_rate is invalid.
+    pub fn with_sample_rate(segments: Vec<EnvelopeSegment>, sample_rate: f32) -> Result<Self> {
         if segments.is_empty() {
             return Err(NaadError::InvalidParameter {
                 name: "segments".to_string(),
                 reason: "must have at least one segment".to_string(),
             });
         }
+        if sample_rate <= 0.0 || !sample_rate.is_finite() {
+            return Err(NaadError::InvalidSampleRate { sample_rate });
+        }
 
         Ok(Self {
             segments,
+            sample_rate,
             current_segment: 0,
             current_value: 0.0,
             segment_start_value: 0.0,
@@ -236,7 +281,7 @@ impl MultiStageEnvelope {
 
     /// Generate the next envelope value.
     #[inline]
-    pub fn next_value(&mut self, sample_rate: f32) -> f32 {
+    pub fn next_value(&mut self) -> f32 {
         if !self.active {
             return 0.0;
         }
@@ -247,7 +292,7 @@ impl MultiStageEnvelope {
         }
 
         let seg = &self.segments[self.current_segment];
-        let seg_samples = seg.duration * sample_rate;
+        let seg_samples = seg.duration * self.sample_rate;
 
         if seg_samples <= 0.0 {
             self.current_value = seg.target;
@@ -296,10 +341,10 @@ mod tests {
         env.gate_on();
         // Run through attack + decay
         for _ in 0..1000 {
-            env.next_value(44100.0);
+            env.next_value();
         }
         // Should be at sustain level
-        let val = env.next_value(44100.0);
+        let val = env.next_value();
         assert!(
             (val - 0.7).abs() < 0.01,
             "sustain should hold at 0.7, got {val}"
@@ -310,10 +355,10 @@ mod tests {
     fn test_adsr_release_to_zero() {
         let mut env = Adsr::new(0.0, 0.0, 1.0, 0.01).unwrap();
         env.gate_on();
-        env.next_value(44100.0);
+        env.next_value();
         env.gate_off();
         for _ in 0..2000 {
-            env.next_value(44100.0);
+            env.next_value();
         }
         assert!(!env.is_active());
     }
@@ -345,7 +390,7 @@ mod tests {
         env.trigger();
         assert!(env.is_active());
         for _ in 0..5000 {
-            env.next_value(44100.0);
+            env.next_value();
         }
         assert!(!env.is_active());
     }

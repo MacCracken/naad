@@ -180,7 +180,7 @@ impl TuningTable {
         // A4's own ratio in the table is ratios[9] (A is degree 9)
         let a4_ratio = self.ratios[a4_degree as usize];
 
-        self.a4_hz * (ratio / a4_ratio) * 2.0f32.powi(octave - (a4_degree as i32).div_euclid(12))
+        self.a4_hz * (ratio / a4_ratio) * 2.0f32.powi(octave - a4_degree.div_euclid(12))
     }
 }
 
