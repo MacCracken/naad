@@ -34,14 +34,22 @@
 //! - `logging` — Enable tracing-subscriber for structured logging output
 
 pub mod delay;
+pub mod dsp_util;
+pub mod dynamics;
 pub mod effects;
 pub mod envelope;
+pub mod eq;
 pub mod error;
 pub mod filter;
+pub mod mod_matrix;
 pub mod modulation;
 pub mod noise;
 pub mod oscillator;
+pub mod panning;
+pub mod reverb;
+pub mod smoothing;
 pub mod tuning;
+pub mod voice;
 pub mod wavetable;
 
 pub use error::{NaadError, Result};

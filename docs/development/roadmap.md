@@ -37,6 +37,7 @@ naad provides every low-level synthesis building block the AGNOS audio stack nee
 | 0 — Scaffold | Initial synthesis primitives | Oscillator (PolyBLEP), Wavetable + MorphWavetable, ADSR + MultiStageEnvelope, BiquadFilter + SVF, LFO + FM + RingMod, DelayLine + Comb + Allpass, Chorus + Flanger + Phaser + Distortion, Noise (White/Pink/Brown), Tuning (ET/JI/Pythagorean), Error types, benchmarks, integration tests |
 | 1 — Hardening | Audit + fix scaffold | WaveFold fix, Phaser validation, SVF coefficient caching, AllpassDelay single-buffer, denormal protection, Oscillator encapsulation, ADSR stored sample_rate, 14 new serde tests, 8 new benchmarks, gain_db constructor |
 | 2 — Primitives | Enhanced oscillator + LFO | 4-point PolyBLEP, HardSync, UnisonOscillator (1-8 voices, stereo), SubOscillator (-1/-2 oct), LFO 6 shapes + bipolar/unipolar modes, SVF buffer methods |
+| 3 — New Modules | Dynamics, EQ, reverb, voice, mod matrix | dsp_util, Compressor/Limiter/NoiseGate, ParametricEq/GraphicEq/DeEsser, Schroeder Reverb, Panning, ParamSmoother, VoiceManager, ModMatrix |
 
 ---
 
@@ -77,7 +78,7 @@ Per CLAUDE.md P(-1) process:
 
 ---
 
-## Phase 3 — New Primitive Modules
+## ~~Phase 3 — New Primitive Modules~~ COMPLETE (Traditional)
 
 > **Effort**: Large | **Prerequisite**: Phase 2
 > **Goal**: Add the missing synthesis primitives that shruti-instruments and shruti-dsp currently provide inline.
