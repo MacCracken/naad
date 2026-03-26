@@ -101,16 +101,29 @@ impl AdditiveSynth {
             });
         }
         self.fundamental = freq;
+        // Re-check Nyquist: zero out partials whose frequency now exceeds Nyquist
+        let nyquist = self.sample_rate / 2.0;
+        for p in &mut self.partials {
+            if freq * p.frequency_ratio >= nyquist {
+                p.amplitude = 0.0;
+            }
+        }
         Ok(())
     }
 
     /// Configure an individual partial by index.
     ///
+    /// Amplitude is clamped to 0.0 if the partial frequency exceeds Nyquist.
     /// Does nothing if `index` is out of range.
     pub fn set_partial(&mut self, index: usize, freq_ratio: f32, amplitude: f32) {
         if let Some(p) = self.partials.get_mut(index) {
             p.frequency_ratio = freq_ratio;
-            p.amplitude = amplitude.clamp(0.0, 1.0);
+            let nyquist = self.sample_rate / 2.0;
+            if self.fundamental * freq_ratio >= nyquist {
+                p.amplitude = 0.0;
+            } else {
+                p.amplitude = amplitude.clamp(0.0, 1.0);
+            }
         }
     }
 
@@ -154,6 +167,12 @@ impl AdditiveSynth {
         for s in buffer.iter_mut() {
             *s = self.next_sample();
         }
+    }
+
+    /// Returns true if any partials have non-zero amplitude.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.partials.iter().any(|p| p.amplitude > 0.0)
     }
 }
 

@@ -135,6 +135,15 @@ impl KarplusStrong {
         }
     }
 
+    /// Returns true if the string is still vibrating (output above threshold).
+    ///
+    /// Checks the most recent output from the delay line. Once the
+    /// plucked string has decayed below the threshold, this returns false.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.damping_prev.abs() > 1e-6
+    }
+
     /// Returns the fundamental frequency.
     #[must_use]
     pub fn frequency(&self) -> f32 {
@@ -253,6 +262,16 @@ impl Waveguide {
     /// Set the junction reflection coefficient.
     pub fn set_junction_coeff(&mut self, coeff: f32) {
         self.junction_coeff = coeff.clamp(0.0, 1.0);
+    }
+
+    /// Returns true if the waveguide still has energy above threshold.
+    ///
+    /// Checks the current state of both delay lines at the read position.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        let fwd = self.forward_delay.read(self.delay_samples);
+        let bwd = self.backward_delay.read(self.delay_samples);
+        (fwd + bwd).abs() > 1e-6
     }
 }
 

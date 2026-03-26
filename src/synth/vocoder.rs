@@ -109,8 +109,14 @@ impl Vocoder {
             let center = (log_low + step * i as f32).exp();
             // Clamp to Nyquist safety.
             let center = center.min(sample_rate * 0.49);
-            // Q = center / bandwidth; use moderate Q for musical results.
-            let q = 4.0;
+            // Q scales with band spacing for consistent bandwidth coverage.
+            // For N logarithmically-spaced bands, Q ≈ 1/(exp(step)-1) ensures
+            // adjacent bands overlap at their -3dB points.
+            let q = if step > 0.0 {
+                (1.0 / (step.exp() - 1.0)).clamp(1.0, 20.0)
+            } else {
+                4.0 // single band fallback
+            };
 
             let analysis_filter = BiquadFilter::new(FilterType::BandPass, sample_rate, center, q)?;
             let synthesis_filter = BiquadFilter::new(FilterType::BandPass, sample_rate, center, q)?;

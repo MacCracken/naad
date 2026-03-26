@@ -210,14 +210,22 @@ impl GranularEngine {
             };
             let window_val = grain.window.value(t);
 
-            // Read from source with linear interpolation.
+            // Read from source with cubic hermite interpolation.
             let read_pos =
                 grain.source_position + grain.current_sample as f32 * grain.playback_rate;
             let read_pos = read_pos.rem_euclid(src_len as f32);
-            let idx0 = read_pos.floor() as usize % src_len;
-            let idx1 = (idx0 + 1) % src_len;
+            let idx1 = read_pos.floor() as usize % src_len;
+            let idx0 = if idx1 == 0 { src_len - 1 } else { idx1 - 1 };
+            let idx2 = (idx1 + 1) % src_len;
+            let idx3 = (idx1 + 2) % src_len;
             let frac = read_pos - read_pos.floor();
-            let sample = self.source[idx0] * (1.0 - frac) + self.source[idx1] * frac;
+            let sample = crate::dsp_util::hermite_interpolate(
+                self.source[idx0],
+                self.source[idx1],
+                self.source[idx2],
+                self.source[idx3],
+                frac,
+            );
 
             sum += sample * window_val * grain.amplitude;
 
@@ -236,6 +244,12 @@ impl GranularEngine {
         for s in buffer.iter_mut() {
             *s = self.next_sample();
         }
+    }
+
+    /// Returns true if any grains are currently active or the source is loaded.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        !self.source.is_empty() && self.grains.iter().any(|g| g.active)
     }
 
     /// Spawn a new grain in the next available slot.

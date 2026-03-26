@@ -39,6 +39,7 @@ naad provides every low-level synthesis building block the AGNOS audio stack nee
 | 2 — Primitives | Enhanced oscillator + LFO | 4-point PolyBLEP, HardSync, UnisonOscillator (1-8 voices, stereo), SubOscillator (-1/-2 oct), LFO 6 shapes + bipolar/unipolar modes, SVF buffer methods |
 | 3 — New Modules | Dynamics, EQ, reverb, voice, mod matrix, acoustics | dsp_util, Compressor/Limiter/NoiseGate, ParametricEq/GraphicEq/DeEsser, Schroeder Reverb, Panning, ParamSmoother, VoiceManager, ModMatrix + goonj acoustics (room/convolution/binaural/FDN/analysis/ambisonics) |
 | 4 — Synthesis | 8 synthesis algorithms | Subtractive, FM (multi-op), Drum (kick/snare/hihat), Formant (vowels), Additive (64 partials), Vocoder, Granular (64 grains), Physical (Karplus-Strong + Waveguide) |
+| 5 — Polish | Performance + features + docs | Feature gates (synthesis/acoustics/logging/full), deferred audit fixes (Nyquist, is_active, hermite, Q scaling), 20 benchmarks, allocation audit (clean), SIMD-ready docs, VERSION 0.5.0 |
 
 ---
 
@@ -136,7 +137,7 @@ Per CLAUDE.md P(-1) process:
 
 ---
 
-## Phase 5 — Performance + Polish
+## ~~Phase 5 — Performance + Polish~~ COMPLETE
 
 > **Effort**: Medium | **Prerequisite**: Phase 4
 > **Goal**: Optimize hot paths, SIMD-ready patterns, comprehensive benchmarks, documentation.
@@ -163,10 +164,11 @@ Per CLAUDE.md P(-1) process:
 
 | # | Item | Effort | Notes |
 |---|------|--------|-------|
-| 6A | **dhvani integration smoke test** | Medium | Build a minimal dhvani prototype that wires naad primitives into an audio graph. Validate API ergonomics. |
+| 6A | **dhvani integration smoke test** | Medium | Build a minimal dhvani prototype that wires naad primitives into an audio graph. Validate API ergonomics. Use `dsp_util::fft_magnitudes` for spectral metering. |
 | 6B | **shruti migration proof** | Medium | Demonstrate that shruti-instruments can replace inline synthesis code with naad types. Document migration path. |
 | 6C | **API stability audit** | Small | Review all public types for forward compatibility. Ensure `#[non_exhaustive]` on all enums. Ensure no leaky abstractions. |
-| 6D | **Version 1.0.0 gate** | Small | All phases complete, all tests pass, all benchmarks baselined, CHANGELOG updated, VERSION bumped. |
+| 6D | **Partitioned FFT convolution** | Medium | Replace O(N) direct convolution in `acoustics::convolution` with overlap-save partitioned FFT using `hisab::num::fft`. Makes long IRs real-time viable. |
+| 6E | **Version 1.0.0 gate** | Small | All phases complete, all tests pass, all benchmarks baselined, CHANGELOG updated, VERSION bumped. |
 
 ---
 
@@ -174,18 +176,43 @@ Per CLAUDE.md P(-1) process:
 
 How each synthesis engine from shruti's post-MVP roadmap maps to naad modules:
 
-| Shruti Engine | naad Module(s) | dhvani Role |
-|--------------|----------------|-------------|
-| Subtractive synth | `oscillator` + `filter` + `envelope` + `modulation` + `voice` + `synth::subtractive` | Compose into InstrumentNode |
-| FM synth | `oscillator` + `envelope` + `synth::fm` | Compose into InstrumentNode |
-| Additive synth | `synth::additive` + `envelope` | Compose into InstrumentNode |
-| Wavetable synth | `wavetable` + `envelope` + `filter` + `modulation` | Compose into InstrumentNode |
-| Physical modeling | `synth::physical` + `delay` + `filter` + `noise` | Compose into InstrumentNode |
-| Granular synth | `synth::granular` + `envelope` + `effects` | Compose into InstrumentNode |
-| Vocoder | `synth::vocoder` + `filter` + `envelope` | Compose into InstrumentNode |
-| Drum synth | `synth::drum` + `oscillator` + `noise` + `filter` + `envelope` | Compose into InstrumentNode |
-| Sampler engine | (sample playback lives in dhvani — needs I/O) | dhvani owns this |
-| Voice synth | `synth::formant` + `synth::vocoder` + `filter` | Compose into InstrumentNode |
+| Shruti Engine | naad Module(s) | dhvani Role | hisab Opportunity |
+|--------------|----------------|-------------|-------------------|
+| Subtractive synth | `oscillator` + `filter` + `envelope` + `modulation` + `voice` + `synth::subtractive` | Compose into InstrumentNode | — |
+| FM synth | `oscillator` + `envelope` + `synth::fm` | Compose into InstrumentNode | — |
+| Additive synth | `synth::additive` + `envelope` | Compose into InstrumentNode | H3: DCT compression |
+| Wavetable synth | `wavetable` + `envelope` + `filter` + `modulation` | Compose into InstrumentNode | H2: B-spline interpolation |
+| Physical modeling | `synth::physical` + `delay` + `filter` + `noise` | Compose into InstrumentNode | H1: RK4 analog modeling |
+| Granular synth | `synth::granular` + `envelope` + `effects` | Compose into InstrumentNode | — |
+| Vocoder | `synth::vocoder` + `filter` + `envelope` | Compose into InstrumentNode | H8: FFT-based vocoder |
+| Drum synth | `synth::drum` + `oscillator` + `noise` + `filter` + `envelope` | Compose into InstrumentNode | — |
+| Sampler engine | (sample playback lives in dhvani — needs I/O) | dhvani owns this | — |
+| Voice synth | `synth::formant` + `synth::vocoder` + `filter` | Compose into InstrumentNode | H6: Catmull-Rom envelopes |
+
+---
+
+## Post-1.0 — Deeper hisab Integration
+
+> These items deepen naad's use of hisab beyond the current FFT/Vec3 usage.
+> Each is a natural extension of an existing module.
+
+| # | Item | hisab Feature | naad Module | Notes |
+|---|------|--------------|-------------|-------|
+| H1 | **RK4 analog circuit modeling** | `num::ode::rk4()` | `synth::physical` | Use ODE solver for more accurate analog circuit models (Moog ladder filter, diode clipper). Currently uses direct DSP equations. |
+| H2 | **B-spline wavetable interpolation** | `calc::splines::bspline_eval()` | `wavetable` | Higher-quality interpolation than cubic hermite for smooth wavetable scanning. Reduces aliasing in `MorphWavetable`. |
+| H3 | **DCT for additive compression** | `num::dct()` / `num::idct()` | `synth::additive` | Spectral compression/decompression for efficient partial storage and resynthesis from spectral data. |
+| H4 | **Matrix FDN parameters** | `num::linalg` (eigenvalue, Hadamard) | `acoustics::fdn_reverb` | Compute FDN feedback matrix directly instead of delegating to goonj. Orthogonal matrix design for color-free reverb. |
+| H5 | **Polynomial filter approximation** | `num::linalg::least_squares_poly()` | `filter` | Fit polynomial approximations to expensive filter transfer functions for faster runtime evaluation. |
+| H6 | **Catmull-Rom envelope curves** | `calc::splines::catmull_rom()` | `envelope` | Smooth non-linear envelope shapes beyond linear segments. Catmull-Rom through user-placed control points. |
+| H7 | **Newton-Raphson pitch detection** | `num::roots::newton_raphson()` | `dsp_util` (new) | Accurate pitch detection via autocorrelation peak refinement. Useful for tuners, pitch correction. |
+| H8 | **Spectral analysis suite** | `num::fft()` + `num::dct()` | `dsp_util` | STFT spectrogram, chromagram, onset detection — spectral analysis primitives for composition tools (svara). |
+
+### Current hisab usage
+
+| hisab Module | naad Usage | Since |
+|---|---|---|
+| `Vec3` | Room/source/listener positions | Phase 3 (acoustics) |
+| `Complex` + `num::fft()` | `fft_magnitudes()`, `power_spectrum()` | Phase 5 |
 
 ---
 
@@ -202,4 +229,4 @@ How each synthesis engine from shruti's post-MVP roadmap maps to naad modules:
 
 ---
 
-*Last Updated: 2026-03-26*
+*Last Updated: 2026-03-26 — Phases 0-5 complete, Phase 6 + post-1.0 planned*

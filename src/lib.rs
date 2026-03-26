@@ -7,6 +7,17 @@
 //! Part of the AGNOS ecosystem. Consumed by **dhvani** (sound engine) and
 //! **svara** (music composition).
 //!
+//! ## Architecture
+//!
+//! All processing methods work on contiguous `&mut [f32]` slices. Hot-path
+//! methods (`next_sample`, `process_sample`) are `#[inline]` for cross-crate
+//! optimization. Buffer methods (`fill_buffer`, `process_buffer`) iterate
+//! over slices, enabling SIMD auto-vectorization when compiled with
+//! appropriate target features (`-C target-cpu=native`).
+//!
+//! dhvani (the sound engine) handles buffer alignment and SIMD dispatch.
+//! naad provides the scalar reference implementations.
+//!
 //! ## Quick Start
 //!
 //! ```rust
@@ -31,8 +42,11 @@
 //!
 //! ## Feature Flags
 //!
-//! - `logging` — Enable tracing-subscriber for structured logging output
+//! - `default` — All core primitives (oscillators, filters, envelopes, effects, dynamics, EQ, reverb, voice, mod matrix, panning, smoothing, tuning, noise, delay, wavetable, dsp_util)
+//! - `synthesis` — Synthesis algorithm modules (subtractive, FM, drum, formant, additive, vocoder, granular, physical modeling)
 //! - `acoustics` — Room simulation, convolution reverb, binaural, FDN, analysis, ambisonics (via goonj)
+//! - `logging` — Enable tracing-subscriber for structured logging output
+//! - `full` — All features enabled
 
 pub mod delay;
 pub mod dsp_util;
@@ -53,6 +67,7 @@ pub mod tuning;
 pub mod voice;
 pub mod wavetable;
 
+#[cfg(feature = "synthesis")]
 pub mod synth;
 
 #[cfg(feature = "acoustics")]

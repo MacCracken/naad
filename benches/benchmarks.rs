@@ -175,8 +175,82 @@ fn distortion_wavefold_1024(c: &mut Criterion) {
     });
 }
 
+fn compressor_1024(c: &mut Criterion) {
+    c.bench_function("compressor_1024", |b| {
+        let mut comp = naad::dynamics::Compressor::new(-20.0, 4.0, 0.01, 0.1, 44100.0);
+        let buffer = [0.5f32; 1024];
+        b.iter(|| {
+            for &s in black_box(&buffer) {
+                black_box(comp.process_sample(s));
+            }
+        });
+    });
+}
+
+fn reverb_1024(c: &mut Criterion) {
+    c.bench_function("reverb_1024", |b| {
+        let mut rev = naad::reverb::Reverb::new(0.8, 0.3, 10.0, 1.0, 44100.0).unwrap();
+        let buffer = [0.5f32; 1024];
+        b.iter(|| {
+            for &s in black_box(&buffer) {
+                black_box(rev.process_sample(s));
+            }
+        });
+    });
+}
+
+fn parametric_eq_1024(c: &mut Criterion) {
+    c.bench_function("parametric_eq_4band_1024", |b| {
+        let mut eq = naad::eq::ParametricEq::new(44100.0);
+        eq.add_band(FilterType::Peak, 250.0, 1.0, 3.0).unwrap();
+        eq.add_band(FilterType::Peak, 1000.0, 1.0, -2.0).unwrap();
+        eq.add_band(FilterType::Peak, 4000.0, 1.0, 1.5).unwrap();
+        eq.add_band(FilterType::HighShelf, 8000.0, 0.707, -1.0)
+            .unwrap();
+        let buffer = [0.5f32; 1024];
+        b.iter(|| {
+            for &s in black_box(&buffer) {
+                black_box(eq.process_sample(s));
+            }
+        });
+    });
+}
+
+#[cfg(feature = "synthesis")]
+fn subtractive_synth_1024(c: &mut Criterion) {
+    c.bench_function("subtractive_synth_1024", |b| {
+        let mut synth = naad::synth::subtractive::SubtractiveSynth::new(
+            naad::oscillator::Waveform::Saw,
+            440.0,
+            2000.0,
+            0.707,
+            44100.0,
+        )
+        .unwrap();
+        synth.note_on();
+        let mut buffer = [0.0f32; 1024];
+        b.iter(|| {
+            synth.fill_buffer(black_box(&mut buffer));
+            black_box(&buffer);
+        });
+    });
+}
+
+#[cfg(feature = "synthesis")]
+fn karplus_strong_1024(c: &mut Criterion) {
+    c.bench_function("karplus_strong_1024", |b| {
+        let mut ks = naad::synth::physical::KarplusStrong::new(440.0, 0.99, 0.5, 44100.0).unwrap();
+        ks.pluck();
+        let mut buffer = [0.0f32; 1024];
+        b.iter(|| {
+            ks.fill_buffer(black_box(&mut buffer));
+            black_box(&buffer);
+        });
+    });
+}
+
 criterion_group!(
-    benches,
+    core_benches,
     oscillator_sine_1024,
     oscillator_saw_polyblep_1024,
     biquad_filter_1024,
@@ -191,5 +265,16 @@ criterion_group!(
     chorus_1024,
     phaser_1024,
     distortion_wavefold_1024,
+    compressor_1024,
+    reverb_1024,
+    parametric_eq_1024,
 );
-criterion_main!(benches);
+
+#[cfg(feature = "synthesis")]
+criterion_group!(synth_benches, subtractive_synth_1024, karplus_strong_1024,);
+
+#[cfg(feature = "synthesis")]
+criterion_main!(core_benches, synth_benches);
+
+#[cfg(not(feature = "synthesis"))]
+criterion_main!(core_benches);
