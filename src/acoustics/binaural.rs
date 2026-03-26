@@ -5,6 +5,7 @@
 //! spatialized stereo output.
 
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use goonj::binaural::{HrtfDataset, HrtfPair, generate_binaural_ir};
 use goonj::impulse::IrConfig;
@@ -84,6 +85,10 @@ impl BinauralProcessor {
         let right_ir = binaural.right;
         let ir_len = left_ir.len().max(right_ir.len()).max(1);
 
+        debug!(
+            azimuth,
+            elevation, ir_len, sample_rate, "binaural processor created"
+        );
         Ok(Self {
             left_ir,
             right_ir,
@@ -129,6 +134,30 @@ impl BinauralProcessor {
         self.position = (self.position + 1) % buf_len;
 
         (left_out, right_out)
+    }
+
+    /// Rebuild the binaural processor after deserialization.
+    ///
+    /// IRs and buffers are skipped during serde. Call this to regenerate
+    /// them from the stored azimuth/elevation/sample_rate.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if IR generation fails.
+    pub fn rebuild(&mut self) -> Result<()> {
+        let new = Self::new(self.azimuth, self.elevation, self.sample_rate)?;
+        self.left_ir = new.left_ir;
+        self.right_ir = new.right_ir;
+        self.left_buffer = new.left_buffer;
+        self.right_buffer = new.right_buffer;
+        self.position = 0;
+        Ok(())
+    }
+
+    /// Returns true if the processor has loaded IRs (false after deserialization).
+    #[must_use]
+    pub fn is_loaded(&self) -> bool {
+        !self.left_ir.is_empty()
     }
 }
 

@@ -3,6 +3,11 @@
 //! Applies a pre-computed impulse response to an audio stream via direct
 //! time-domain convolution. Can load an IR from a raw buffer or generate
 //! one from a goonj room simulation.
+//!
+//! **Performance note**: This uses direct O(N) convolution per sample, where
+//! N is the IR length. For real-time use with long IRs (>1000 samples),
+//! consider partitioned FFT convolution in dhvani instead. This module is
+//! suitable for short IRs or offline processing.
 
 use serde::{Deserialize, Serialize};
 
@@ -117,10 +122,27 @@ impl ConvolutionReverb {
         input * (1.0 - self.mix) + wet * self.mix
     }
 
+    /// Rebuild the convolution reverb with a new IR (e.g., after deserialization).
+    ///
+    /// The IR and input buffer are skipped during serde. Call this after
+    /// deserializing to restore functionality.
+    pub fn rebuild_from_ir(&mut self, ir: Vec<f32>) {
+        let len = ir.len().max(1);
+        self.input_buffer = vec![0.0; len];
+        self.position = 0;
+        self.ir = ir;
+    }
+
     /// Returns the length of the impulse response in samples.
     #[must_use]
     pub fn ir_len(&self) -> usize {
         self.ir.len()
+    }
+
+    /// Returns true if the reverb has a loaded IR (false after deserialization).
+    #[must_use]
+    pub fn is_loaded(&self) -> bool {
+        !self.ir.is_empty()
     }
 }
 

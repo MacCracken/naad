@@ -4,6 +4,7 @@
 //! The FDN itself is reconstructed on deserialization from stored parameters.
 
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use goonj::fdn::{Fdn, fdn_config_for_room};
 
@@ -18,8 +19,12 @@ pub struct FdnReverb {
     /// The inner FDN processor (skipped in serde — reconstructed from params).
     #[serde(skip)]
     fdn: Option<Fdn>,
-    /// Number of delay lines.
-    num_delays: usize,
+    /// Room length in meters (drives delay line lengths).
+    room_length: f32,
+    /// Room width in meters.
+    room_width: f32,
+    /// Room height in meters.
+    room_height: f32,
     /// Target RT60 in seconds.
     target_rt60: f32,
     /// Sample rate in Hz.
@@ -29,18 +34,25 @@ pub struct FdnReverb {
 }
 
 impl FdnReverb {
-    /// Create a new FDN reverb.
+    /// Create a new FDN reverb with configurable virtual room dimensions.
     ///
-    /// Internally creates an 8-delay-line FDN using a synthetic shoebox room
-    /// whose dimensions are derived from `num_delays` and `target_rt60`.
+    /// The room dimensions control the delay line lengths (larger rooms =
+    /// longer delays = spacier reverb). Target RT60 controls the decay time.
     ///
     /// # Errors
     ///
     /// Returns [`NaadError::ComputationError`] if parameters are out of range.
-    pub fn new(num_delays: usize, target_rt60: f32, sample_rate: u32, mix: f32) -> Result<Self> {
-        if num_delays == 0 {
+    pub fn new(
+        room_length: f32,
+        room_width: f32,
+        room_height: f32,
+        target_rt60: f32,
+        sample_rate: u32,
+        mix: f32,
+    ) -> Result<Self> {
+        if room_length <= 0.0 || room_width <= 0.0 || room_height <= 0.0 {
             return Err(NaadError::ComputationError {
-                message: "num_delays must be > 0".into(),
+                message: "room dimensions must be positive".into(),
             });
         }
         if target_rt60 <= 0.0 || !target_rt60.is_finite() {
@@ -54,12 +66,24 @@ impl FdnReverb {
             });
         }
 
-        let config = fdn_config_for_room(10.0, 8.0, 3.0, target_rt60, sample_rate);
+        debug!(
+            room_length,
+            room_width, room_height, target_rt60, sample_rate, "FDN reverb created"
+        );
+        let config = fdn_config_for_room(
+            room_length,
+            room_width,
+            room_height,
+            target_rt60,
+            sample_rate,
+        );
         let fdn = Fdn::new(&config);
 
         Ok(Self {
             fdn: Some(fdn),
-            num_delays,
+            room_length,
+            room_width,
+            room_height,
             target_rt60,
             sample_rate,
             mix: mix.clamp(0.0, 1.0),
@@ -73,7 +97,13 @@ impl FdnReverb {
     pub fn process_sample(&mut self, input: f32) -> f32 {
         // Lazily reconstruct Fdn after deserialization
         if self.fdn.is_none() {
-            let config = fdn_config_for_room(10.0, 8.0, 3.0, self.target_rt60, self.sample_rate);
+            let config = fdn_config_for_room(
+                self.room_length,
+                self.room_width,
+                self.room_height,
+                self.target_rt60,
+                self.sample_rate,
+            );
             self.fdn = Some(Fdn::new(&config));
         }
 
@@ -112,7 +142,7 @@ mod tests {
 
     #[test]
     fn test_fdn_produces_reverb_tail() {
-        let mut fdn = FdnReverb::new(8, 1.0, 48000, 1.0).unwrap();
+        let mut fdn = FdnReverb::new(10.0, 8.0, 3.0, 1.0, 48000, 1.0).unwrap();
         // Feed an impulse
         fdn.process_sample(1.0);
         // Check for reverb tail
@@ -129,7 +159,7 @@ mod tests {
 
     #[test]
     fn test_fdn_output_finite() {
-        let mut fdn = FdnReverb::new(8, 0.5, 48000, 1.0).unwrap();
+        let mut fdn = FdnReverb::new(10.0, 8.0, 3.0, 0.5, 48000, 1.0).unwrap();
         fdn.process_sample(1.0);
         for _ in 0..5000 {
             let out = fdn.process_sample(0.0);
@@ -140,14 +170,14 @@ mod tests {
 
     #[test]
     fn test_fdn_invalid_params() {
-        assert!(FdnReverb::new(0, 1.0, 48000, 1.0).is_err());
-        assert!(FdnReverb::new(8, -1.0, 48000, 1.0).is_err());
-        assert!(FdnReverb::new(8, 1.0, 0, 1.0).is_err());
+        assert!(FdnReverb::new(0.0, 8.0, 3.0, 1.0, 48000, 1.0).is_err());
+        assert!(FdnReverb::new(10.0, 8.0, 3.0, -1.0, 48000, 1.0).is_err());
+        assert!(FdnReverb::new(10.0, 8.0, 3.0, 1.0, 0, 1.0).is_err());
     }
 
     #[test]
     fn test_serde_roundtrip() {
-        let fdn = FdnReverb::new(8, 1.5, 48000, 0.7).unwrap();
+        let fdn = FdnReverb::new(10.0, 8.0, 3.0, 1.5, 48000, 0.7).unwrap();
         let json = serde_json::to_string(&fdn).unwrap();
         let mut back: FdnReverb = serde_json::from_str(&json).unwrap();
         assert!((fdn.mix - back.mix).abs() < f32::EPSILON);

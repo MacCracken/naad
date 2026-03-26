@@ -5,6 +5,7 @@
 //! reverb on incoming audio samples.
 
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use goonj::impulse::{IrConfig, generate_ir};
 use goonj::room::AcousticRoom;
@@ -95,6 +96,10 @@ impl RoomReverb {
         let ir = broadband.samples;
 
         let ir_len = ir.len().max(1);
+        debug!(
+            ir_len,
+            config.length, config.width, config.height, "room reverb created"
+        );
         Ok(Self {
             config,
             impulse_response: ir,
