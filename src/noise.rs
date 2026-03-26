@@ -182,10 +182,7 @@ mod tests {
         let mut ngen = NoiseGenerator::new(NoiseType::White, 42);
         for _ in 0..10000 {
             let s = ngen.next_sample();
-            assert!(
-                (-1.0..=1.0).contains(&s),
-                "white noise out of range: {s}"
-            );
+            assert!((-1.0..=1.0).contains(&s), "white noise out of range: {s}");
         }
     }
 
@@ -194,10 +191,7 @@ mod tests {
         let mut ngen = NoiseGenerator::new(NoiseType::Pink, 42);
         for _ in 0..10000 {
             let s = ngen.next_sample();
-            assert!(
-                (-2.0..=2.0).contains(&s),
-                "pink noise out of range: {s}"
-            );
+            assert!((-2.0..=2.0).contains(&s), "pink noise out of range: {s}");
         }
     }
 
@@ -206,10 +200,7 @@ mod tests {
         let mut ngen = NoiseGenerator::new(NoiseType::Brown, 42);
         for _ in 0..10000 {
             let s = ngen.next_sample();
-            assert!(
-                (-1.0..=1.0).contains(&s),
-                "brown noise out of range: {s}"
-            );
+            assert!((-1.0..=1.0).contains(&s), "brown noise out of range: {s}");
         }
     }
 

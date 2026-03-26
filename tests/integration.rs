@@ -155,10 +155,7 @@ fn biquad_lp_minus_3db_at_cutoff() {
 #[test]
 fn equal_temperament_a4_c4() {
     let a4 = tuning::midi_to_freq(69);
-    assert!(
-        (a4 - 440.0).abs() < 0.01,
-        "A4 should be 440 Hz, got {a4}"
-    );
+    assert!((a4 - 440.0).abs() < 0.01, "A4 should be 440 Hz, got {a4}");
 
     let c4 = tuning::midi_to_freq(60);
     assert!(
@@ -168,10 +165,7 @@ fn equal_temperament_a4_c4() {
 
     // Verify A3 is half of A4
     let a3 = tuning::midi_to_freq(57);
-    assert!(
-        (a3 - 220.0).abs() < 0.1,
-        "A3 should be 220 Hz, got {a3}"
-    );
+    assert!((a3 - 220.0).abs() < 0.1, "A3 should be 220 Hz, got {a3}");
 }
 
 /// Test that FM synthesis produces sidebands.

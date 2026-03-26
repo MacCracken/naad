@@ -84,12 +84,7 @@ impl FmSynth {
     /// # Errors
     ///
     /// Returns error if frequencies or sample_rate are invalid.
-    pub fn new(
-        carrier_freq: f32,
-        mod_freq: f32,
-        mod_index: f32,
-        sample_rate: f32,
-    ) -> Result<Self> {
+    pub fn new(carrier_freq: f32, mod_freq: f32, mod_index: f32, sample_rate: f32) -> Result<Self> {
         if let Some(e) = error::validate_sample_rate(sample_rate) {
             return Err(e);
         }

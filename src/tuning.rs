@@ -93,18 +93,18 @@ impl TuningTable {
             TuningSystem::JustIntonation => (
                 "Just Intonation".to_string(),
                 [
-                    1.0,        // Unison
+                    1.0,         // Unison
                     16.0 / 15.0, // Minor second
-                    9.0 / 8.0,  // Major second
-                    6.0 / 5.0,  // Minor third
-                    5.0 / 4.0,  // Major third
-                    4.0 / 3.0,  // Perfect fourth
+                    9.0 / 8.0,   // Major second
+                    6.0 / 5.0,   // Minor third
+                    5.0 / 4.0,   // Major third
+                    4.0 / 3.0,   // Perfect fourth
                     45.0 / 32.0, // Tritone
-                    3.0 / 2.0,  // Perfect fifth
-                    8.0 / 5.0,  // Minor sixth
-                    5.0 / 3.0,  // Major sixth
-                    9.0 / 5.0,  // Minor seventh
-                    15.0 / 8.0, // Major seventh
+                    3.0 / 2.0,   // Perfect fifth
+                    8.0 / 5.0,   // Minor sixth
+                    5.0 / 3.0,   // Major sixth
+                    9.0 / 5.0,   // Minor seventh
+                    15.0 / 8.0,  // Major seventh
                 ],
             ),
             TuningSystem::Pythagorean => (
@@ -112,15 +112,15 @@ impl TuningTable {
                 [
                     1.0,           // Unison
                     256.0 / 243.0, // Minor second
-                    9.0 / 8.0,    // Major second
-                    32.0 / 27.0,  // Minor third
-                    81.0 / 64.0,  // Major third
-                    4.0 / 3.0,    // Perfect fourth
+                    9.0 / 8.0,     // Major second
+                    32.0 / 27.0,   // Minor third
+                    81.0 / 64.0,   // Major third
+                    4.0 / 3.0,     // Perfect fourth
                     729.0 / 512.0, // Tritone
-                    3.0 / 2.0,    // Perfect fifth
-                    128.0 / 81.0, // Minor sixth
-                    27.0 / 16.0,  // Major sixth
-                    16.0 / 9.0,   // Minor seventh
+                    3.0 / 2.0,     // Perfect fifth
+                    128.0 / 81.0,  // Minor sixth
+                    27.0 / 16.0,   // Major sixth
+                    16.0 / 9.0,    // Minor seventh
                     243.0 / 128.0, // Major seventh
                 ],
             ),
@@ -221,10 +221,7 @@ mod tests {
     fn test_octave() {
         let a4 = midi_to_freq(69);
         let a5 = midi_to_freq(81);
-        assert!(
-            (a5 / a4 - 2.0).abs() < 0.01,
-            "octave should be 2:1 ratio"
-        );
+        assert!((a5 / a4 - 2.0).abs() < 0.01, "octave should be 2:1 ratio");
     }
 
     #[test]

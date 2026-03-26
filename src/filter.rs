@@ -68,12 +68,7 @@ impl BiquadFilter {
     /// # Errors
     ///
     /// Returns error if frequency or sample_rate is invalid, or q <= 0.
-    pub fn new(
-        filter_type: FilterType,
-        sample_rate: f32,
-        frequency: f32,
-        q: f32,
-    ) -> Result<Self> {
+    pub fn new(filter_type: FilterType, sample_rate: f32, frequency: f32, q: f32) -> Result<Self> {
         if let Some(e) = error::validate_sample_rate(sample_rate) {
             return Err(e);
         }
@@ -365,16 +360,12 @@ mod tests {
 
     #[test]
     fn test_highpass_blocks_dc() {
-        let mut filter =
-            BiquadFilter::new(FilterType::HighPass, 44100.0, 1000.0, 0.707).unwrap();
+        let mut filter = BiquadFilter::new(FilterType::HighPass, 44100.0, 1000.0, 0.707).unwrap();
         let mut output = 0.0;
         for _ in 0..1000 {
             output = filter.process_sample(1.0);
         }
-        assert!(
-            output.abs() < 0.01,
-            "HP should block DC, got {output}"
-        );
+        assert!(output.abs() < 0.01, "HP should block DC, got {output}");
     }
 
     #[test]

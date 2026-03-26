@@ -32,10 +32,7 @@ fn main() {
     osc.fill_buffer(&mut buffer);
 
     // Find peak amplitude
-    let peak = buffer
-        .iter()
-        .map(|s| s.abs())
-        .fold(0.0f32, f32::max);
+    let peak = buffer.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
 
     println!();
     println!("Generated {:.0} samples (1 second)", sample_rate);

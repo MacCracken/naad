@@ -71,10 +71,7 @@ impl Wavetable {
         }
 
         // Normalize to -1..1
-        let max_abs = samples
-            .iter()
-            .map(|s| s.abs())
-            .fold(0.0f32, f32::max);
+        let max_abs = samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
         if max_abs > 0.0 {
             for sample in &mut samples {
                 *sample /= max_abs;

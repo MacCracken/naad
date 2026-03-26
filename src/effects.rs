@@ -250,22 +250,6 @@ impl Phaser {
         let coeff = (1.0 - w) / (1.0 + w);
 
         let mut output = input + self.feedback * self.prev_output;
-
-        // Cascade of first-order allpass filters
-        for state in &mut self.allpass_states {
-            let temp = output;
-            output = *state + coeff * (output - *state);
-            // This is a simplified allpass: y = coeff*(x - y_prev) + x_prev
-            let allpass_out = coeff * temp + *state * (1.0 - coeff * coeff)
-                / (1.0 + coeff.abs()).max(0.001);
-            *state = temp;
-            output = allpass_out + coeff * (temp - *state);
-            *state = temp;
-        }
-
-        // Simplified allpass cascade: just use the standard formula
-        // Reset and do it properly
-        output = input + self.feedback * self.prev_output;
         for state in &mut self.allpass_states {
             let x = output;
             output = *state - coeff * x;

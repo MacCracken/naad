@@ -1,6 +1,6 @@
 //! Criterion benchmarks for naad synthesis primitives.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 use naad::envelope::Adsr;
 use naad::filter::{BiquadFilter, FilterType};
@@ -32,8 +32,7 @@ fn oscillator_saw_polyblep_1024(c: &mut Criterion) {
 
 fn biquad_filter_1024(c: &mut Criterion) {
     c.bench_function("biquad_filter_1024", |b| {
-        let mut filter =
-            BiquadFilter::new(FilterType::LowPass, 44100.0, 1000.0, 0.707).unwrap();
+        let mut filter = BiquadFilter::new(FilterType::LowPass, 44100.0, 1000.0, 0.707).unwrap();
         let mut buffer = [0.5f32; 1024];
         b.iter(|| {
             filter.process_buffer(black_box(&mut buffer));
@@ -67,7 +66,9 @@ fn fm_synthesis_1024(c: &mut Criterion) {
 
 fn wavetable_1024(c: &mut Criterion) {
     c.bench_function("wavetable_1024", |b| {
-        let table = Wavetable::from_harmonics(8, &[1.0, 0.5, 0.33, 0.25, 0.2, 0.167, 0.143, 0.125], 2048).unwrap();
+        let table =
+            Wavetable::from_harmonics(8, &[1.0, 0.5, 0.33, 0.25, 0.2, 0.167, 0.143, 0.125], 2048)
+                .unwrap();
         let mut osc = WavetableOscillator::new(table, 440.0, 44100.0).unwrap();
         let mut buffer = [0.0f32; 1024];
         b.iter(|| {

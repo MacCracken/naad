@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{self, NaadError, Result};
+use crate::error::{self, Result};
 use crate::noise;
 
 /// Waveform type for an oscillator.
@@ -96,9 +96,7 @@ impl Oscillator {
         }
 
         let noise_gen = match waveform {
-            Waveform::WhiteNoise => {
-                Some(noise::NoiseGenerator::new(noise::NoiseType::White, 42))
-            }
+            Waveform::WhiteNoise => Some(noise::NoiseGenerator::new(noise::NoiseType::White, 42)),
             Waveform::PinkNoise => Some(noise::NoiseGenerator::new(noise::NoiseType::Pink, 42)),
             Waveform::BrownNoise => Some(noise::NoiseGenerator::new(noise::NoiseType::Brown, 42)),
             _ => None,
@@ -213,10 +211,7 @@ mod tests {
         let mut osc = Oscillator::new(Waveform::Saw, 440.0, 44100.0).unwrap();
         for _ in 0..1000 {
             let s = osc.next_sample();
-            assert!(
-                (-1.5..=1.5).contains(&s),
-                "saw sample out of range: {s}"
-            );
+            assert!((-1.5..=1.5).contains(&s), "saw sample out of range: {s}");
         }
     }
 
