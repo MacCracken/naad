@@ -18,12 +18,14 @@ naad provides every low-level synthesis building block the AGNOS audio stack nee
 | Dynamics (compressor, limiter, gate) | Preset management, UI parameter mapping |
 | EQ, reverb, delay, chorus, panning | Step sequencer, drum patterns |
 | Synthesis algorithms (granular, physical modeling, additive, vocoder, formant) | Instrument traits, plugin hosting |
-| dB/amplitude math, interpolation, denormal flush | File I/O (WAV, FLAC, SFZ, SF2) |
+| Acoustics (convolution reverb, room sim, binaural, ambisonics — via goonj) | File I/O (WAV, FLAC, SFZ, SF2) |
+| dB/amplitude math, interpolation, denormal flush | |
 
 ### Dependency Policy
 
 - `serde` + `thiserror` + `tracing` (already present)
 - `hisab` for linear algebra / numerical methods (when needed for FFT, matrix ops, interpolation)
+- `goonj` for acoustics (feature-gated: `acoustics`) — room simulation, impulse responses, binaural, ambisonics
 - No audio I/O crates. No async. No allocator tricks. Pure computation.
 
 ---
@@ -80,6 +82,8 @@ Per CLAUDE.md P(-1) process:
 > **Effort**: Large | **Prerequisite**: Phase 2
 > **Goal**: Add the missing synthesis primitives that shruti-instruments and shruti-dsp currently provide inline.
 
+### Traditional Primitives (no external deps)
+
 | # | Item | Effort | Notes |
 |---|------|--------|-------|
 | 3A | **Voice manager** | Medium | Polyphony modes (poly/mono/legato), voice stealing (oldest/quietest/lowest), per-voice state. MIDI 2.0 per-note expression fields (pitch bend, pressure, brightness). |
@@ -94,6 +98,20 @@ Per CLAUDE.md P(-1) process:
 | 3J | **Gain smoothing** | Small | EMA-based parameter smoother. Configurable smoothing time. For click-free parameter changes. |
 | 3K | **De-esser** | Small | Bandpass sidechain detection + compression in sibilance range (~4-8 kHz). |
 | 3L | **dsp_util module** | Small | `amplitude_to_db`, `db_to_amplitude`, `normalize`, `hard_limit`, `soft_clip_tanh`, interpolation helpers (linear, cubic, hermite). Shared free functions. |
+
+### Advanced Acoustics (feature-gated, `goonj` dependency)
+
+> `goonj` (1.0.0) — acoustics engine for sound propagation, room simulation, and impulse response generation.
+> These items are behind the `acoustics` feature flag: `naad = { features = ["acoustics"] }`.
+
+| # | Item | Effort | Notes |
+|---|------|--------|-------|
+| 3M | **Convolution reverb** | Medium | IR-based reverb via `goonj::impulse::generate_ir()`. Room dimensions + materials as parameters. Partitioned convolution for real-time use. |
+| 3N | **Room simulation reverb** | Medium | Virtual room acoustics using `goonj` ray tracing. Expose room geometry, surface materials, source/listener position. |
+| 3O | **Binaural processing** | Medium | HRTF-based spatialization via `goonj::binaural::generate_binaural_ir()`. Headphone-optimized 3D positioning. |
+| 3P | **Acoustic analysis utilities** | Small | Expose `goonj::analysis` metrics (C50, C80, D50, STI, RT60) as measurement tools for reverb quality assessment. |
+| 3Q | **FDN reverb (goonj-backed)** | Medium | Use `goonj::fdn::Fdn` as an alternative to the traditional Schroeder reverb (3H). Room-derived FDN parameters. |
+| 3R | **Ambisonics encoding** | Medium | B-format encoding/decoding via `goonj::ambisonics::BFormatIr`. First-order ambisonics for spatial reverb sends. |
 
 ---
 

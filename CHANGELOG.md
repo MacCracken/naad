@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - Phase 2: Primitive Enhancements
 
+### Fixed (Phase 2 Audit)
+
+- **Critical**: `UnisonOscillator` produced 0 Hz after deserialization — `ratios_dirty` now defaults to `true`, `detune_ratios` defaults to `[1.0; 8]` via serde defaults
+- **Critical**: `UnisonOscillator` Triangle/Pulse/noise waveforms silently produced saw — replaced match fallback with `stateless_waveform_sample()` helper supporting all waveforms
+- **High**: `Lfo` S&H `rng_state` reset to 0 after deserialization (xorshift(0)=0 forever) — serde default now returns 42
+- **High**: `Lfo` S&H output 0.0 for entire first cycle — PRNG now initialized at construction, `sh_value` defaults to 0.5 after deser
+- **High**: `SubOscillator::set_base_frequency` mutated state before validation — validation now runs first
+- **Medium**: `UnisonOscillator` detune spread was 2x the parameter value — removed erroneous `* 2.0` multiplier; `detune_cents=10` now means 10 cents total spread
+- **Medium**: `process_sample_lowpass` doc incorrectly claimed efficiency gain — corrected to "convenience method"
+- **Low**: `SubOscillator::set_octave` silently discarded errors — now returns `Result<()>`
+- Added `#[must_use]` on `Lfo::next_value`, `#[inline]` on `fill_buffer_stereo`
+- Added serde roundtrip tests verifying `UnisonOscillator` and `Lfo` S&H work after deserialization
+
 ### Added
 
 - **4-point PolyBLEP** — upgraded from 2-point to 4-point polynomial with cubic refinement; better aliasing suppression at high frequencies

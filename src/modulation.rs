@@ -33,6 +33,16 @@ pub enum LfoMode {
     Unipolar,
 }
 
+fn default_sh_value() -> f32 {
+    // Non-zero initial S&H value so first cycle isn't silent
+    0.5
+}
+
+fn default_rng_state() -> u32 {
+    // Must be non-zero or xorshift produces 0 forever
+    42
+}
+
 /// Low-frequency oscillator for modulation.
 ///
 /// Supports 6 waveform shapes with bipolar or unipolar output modes.
@@ -51,10 +61,10 @@ pub struct Lfo {
     /// Modulation depth (amplitude scaling, 0.0 to 1.0).
     pub depth: f32,
     /// Current sample-and-hold value.
-    #[serde(skip)]
+    #[serde(skip, default = "default_sh_value")]
     sh_value: f32,
     /// PRNG state for sample-and-hold.
-    #[serde(skip)]
+    #[serde(skip, default = "default_rng_state")]
     rng_state: u32,
 }
 
@@ -75,6 +85,13 @@ impl Lfo {
             });
         }
 
+        // Initialize S&H with first random value so first cycle isn't silent
+        let mut rng = 42u32;
+        rng ^= rng << 13;
+        rng ^= rng >> 17;
+        rng ^= rng << 5;
+        let initial_sh = (rng as f32 / u32::MAX as f32) * 2.0 - 1.0;
+
         Ok(Self {
             shape,
             frequency,
@@ -82,8 +99,8 @@ impl Lfo {
             phase: 0.0,
             mode: LfoMode::Bipolar,
             depth: 1.0,
-            sh_value: 0.0,
-            rng_state: 42,
+            sh_value: initial_sh,
+            rng_state: rng,
         })
     }
 
@@ -107,6 +124,7 @@ impl Lfo {
 
     /// Generate the next modulation value (scaled by depth).
     #[inline]
+    #[must_use]
     pub fn next_value(&mut self) -> f32 {
         let raw = self.raw_sample();
 

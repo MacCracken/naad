@@ -462,3 +462,47 @@ fn serde_roundtrip_noise_generator() {
     let json = serde_json::to_string(&ng).unwrap();
     let _back: NoiseGenerator = serde_json::from_str(&json).unwrap();
 }
+
+#[test]
+fn serde_roundtrip_lfo_sh_works_after_deser() {
+    let lfo = Lfo::new(LfoShape::SampleAndHold, 10.0, 44100.0).unwrap();
+    let json = serde_json::to_string(&lfo).unwrap();
+    let mut back: Lfo = serde_json::from_str(&json).unwrap();
+    // S&H should produce non-zero output after deserialization
+    let val = back.next_value();
+    assert!(val.is_finite());
+    // After enough samples, S&H should produce varying values
+    let mut seen_different = false;
+    let first = val;
+    for _ in 0..50000 {
+        let v = back.next_value();
+        if (v - first).abs() > 0.01 {
+            seen_different = true;
+            break;
+        }
+    }
+    assert!(
+        seen_different,
+        "S&H LFO should produce varying values after deser"
+    );
+}
+
+#[test]
+fn serde_roundtrip_unison_works_after_deser() {
+    use naad::oscillator::UnisonOscillator;
+    let uni = UnisonOscillator::new(Waveform::Saw, 440.0, 4, 10.0, 44100.0).unwrap();
+    let json = serde_json::to_string(&uni).unwrap();
+    let mut back: UnisonOscillator = serde_json::from_str(&json).unwrap();
+    // Should produce non-zero output after deserialization
+    let mut has_nonzero = false;
+    for _ in 0..100 {
+        if back.next_sample().abs() > 0.01 {
+            has_nonzero = true;
+            break;
+        }
+    }
+    assert!(
+        has_nonzero,
+        "UnisonOscillator should produce output after deser"
+    );
+}

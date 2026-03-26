@@ -294,6 +294,49 @@ impl Oscillator {
     }
 }
 
+/// Generate a single waveform sample from phase and phase increment (no state mutation).
+///
+/// Used by `UnisonOscillator` to avoid duplicating waveform logic per voice.
+/// Does not support noise waveforms or triangle integration (stateless).
+#[inline]
+fn stateless_waveform_sample(waveform: Waveform, t: f32, dt: f32) -> f32 {
+    match waveform {
+        Waveform::Sine => (t * std::f32::consts::TAU).sin(),
+        Waveform::Saw => {
+            let naive = 2.0 * t - 1.0;
+            naive - polyblep(t, dt)
+        }
+        Waveform::Square => {
+            let naive = if t < 0.5 { 1.0 } else { -1.0 };
+            naive + polyblep(t, dt) - polyblep((t + 0.5) % 1.0, dt)
+        }
+        Waveform::Triangle => {
+            if t < 0.25 {
+                4.0 * t
+            } else if t < 0.75 {
+                2.0 - 4.0 * t
+            } else {
+                4.0 * t - 4.0
+            }
+        }
+        Waveform::Pulse => {
+            // Default 50% duty cycle for unison (pulse width not per-voice)
+            let naive = if t < 0.5 { 1.0 } else { -1.0 };
+            naive + polyblep(t, dt) - polyblep((t + 0.5) % 1.0, dt)
+        }
+        // Noise waveforms don't make sense for unison detuning — produce silence
+        Waveform::WhiteNoise | Waveform::PinkNoise | Waveform::BrownNoise => 0.0,
+    }
+}
+
+fn default_detune_ratios() -> [f32; 8] {
+    [1.0; 8]
+}
+
+fn default_ratios_dirty() -> bool {
+    true
+}
+
 /// Unison oscillator — N detuned copies of a waveform mixed together.
 ///
 /// Produces a thicker sound by layering multiple slightly-detuned voices.
@@ -316,10 +359,10 @@ pub struct UnisonOscillator {
     /// Phase accumulators for each voice.
     phases: [f32; 8],
     /// Precomputed detune ratios (multiplied with base frequency).
-    #[serde(skip)]
+    #[serde(skip, default = "default_detune_ratios")]
     detune_ratios: [f32; 8],
     /// Whether detune ratios need recomputation.
-    #[serde(skip)]
+    #[serde(skip, default = "default_ratios_dirty")]
     ratios_dirty: bool,
 }
 
@@ -384,9 +427,9 @@ impl UnisonOscillator {
             self.detune_ratios[0] = 1.0;
         } else {
             for i in 0..self.num_voices {
-                // Spread voices symmetrically: -detune/2 to +detune/2
+                // Spread voices symmetrically: -detune_cents/2 to +detune_cents/2
                 let t = i as f32 / (self.num_voices - 1) as f32; // 0..1
-                let cents_offset = (t - 0.5) * 2.0 * self.detune_cents;
+                let cents_offset = (t - 0.5) * self.detune_cents;
                 // Convert cents to frequency ratio: 2^(cents/1200)
                 self.detune_ratios[i] = (cents_offset / 1200.0).exp2();
             }
@@ -409,21 +452,7 @@ impl UnisonOscillator {
             let dt = freq / self.sample_rate;
             let t = self.phases[i];
 
-            let sample = match self.waveform {
-                Waveform::Sine => (t * std::f32::consts::TAU).sin(),
-                Waveform::Saw => {
-                    let naive = 2.0 * t - 1.0;
-                    naive - polyblep(t, dt)
-                }
-                Waveform::Square => {
-                    let naive = if t < 0.5 { 1.0 } else { -1.0 };
-                    naive + polyblep(t, dt) - polyblep((t + 0.5) % 1.0, dt)
-                }
-                _ => {
-                    let naive = 2.0 * t - 1.0;
-                    naive - polyblep(t, dt)
-                }
-            };
+            let sample = stateless_waveform_sample(self.waveform, t, dt);
 
             sum += sample;
 
@@ -456,21 +485,7 @@ impl UnisonOscillator {
             let dt = freq / self.sample_rate;
             let t = self.phases[i];
 
-            let sample = match self.waveform {
-                Waveform::Sine => (t * std::f32::consts::TAU).sin(),
-                Waveform::Saw => {
-                    let naive = 2.0 * t - 1.0;
-                    naive - polyblep(t, dt)
-                }
-                Waveform::Square => {
-                    let naive = if t < 0.5 { 1.0 } else { -1.0 };
-                    naive + polyblep(t, dt) - polyblep((t + 0.5) % 1.0, dt)
-                }
-                _ => {
-                    let naive = 2.0 * t - 1.0;
-                    naive - polyblep(t, dt)
-                }
-            };
+            let sample = stateless_waveform_sample(self.waveform, t, dt);
 
             // Pan position: voice 0 = left, voice N-1 = right
             if nv > 1 {
@@ -505,6 +520,7 @@ impl UnisonOscillator {
     }
 
     /// Fill stereo buffers (left and right channels).
+    #[inline]
     pub fn fill_buffer_stereo(&mut self, left: &mut [f32], right: &mut [f32]) {
         for (l, r) in left.iter_mut().zip(right.iter_mut()) {
             let (sl, sr) = self.next_sample_stereo();
@@ -629,24 +645,30 @@ impl SubOscillator {
     ///
     /// Returns error if frequency is invalid.
     pub fn set_base_frequency(&mut self, freq: f32) -> Result<()> {
-        self.base_frequency = freq;
         let divisor = match self.octave {
             SubOctave::Down1 => 2.0,
             SubOctave::Down2 => 4.0,
         };
-        self.osc.set_frequency((freq / divisor).max(0.1))
+        // Validate before mutating state
+        self.osc.set_frequency((freq / divisor).max(0.1))?;
+        self.base_frequency = freq;
+        Ok(())
     }
 
     /// Set the octave division.
-    pub fn set_octave(&mut self, octave: SubOctave) {
-        self.octave = octave;
+    ///
+    /// # Errors
+    ///
+    /// Returns error if the resulting frequency is invalid.
+    pub fn set_octave(&mut self, octave: SubOctave) -> Result<()> {
         let divisor = match octave {
             SubOctave::Down1 => 2.0,
             SubOctave::Down2 => 4.0,
         };
-        let _ = self
-            .osc
-            .set_frequency((self.base_frequency / divisor).max(0.1));
+        self.osc
+            .set_frequency((self.base_frequency / divisor).max(0.1))?;
+        self.octave = octave;
+        Ok(())
     }
 
     /// Returns the current octave division.

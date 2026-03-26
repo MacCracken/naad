@@ -419,7 +419,7 @@ impl StateVariableFilter {
 
     /// Process a single sample returning only the low-pass output.
     ///
-    /// More efficient when only one output is needed.
+    /// Convenience method — internally computes all outputs.
     #[inline]
     pub fn process_sample_lowpass(&mut self, input: f32) -> f32 {
         self.process_sample(input).low_pass
