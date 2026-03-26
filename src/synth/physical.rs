@@ -109,6 +109,7 @@ impl KarplusStrong {
 
     /// Generate the next sample.
     #[inline]
+    #[must_use]
     pub fn next_sample(&mut self) -> f32 {
         // Read from delay line at the tuned delay length.
         let delayed = self.delay_line.read(self.delay_samples);
@@ -221,6 +222,7 @@ impl Waveguide {
     ///
     /// Advances both delay lines with reflection at the boundaries.
     #[inline]
+    #[must_use]
     pub fn next_sample(&mut self) -> f32 {
         // Read from both delay lines.
         let fwd = self.forward_delay.read(self.delay_samples);
@@ -343,7 +345,7 @@ mod tests {
         // Excite with a short burst.
         for _ in 0..10 {
             wg.excite(1.0);
-            wg.next_sample();
+            let _ = wg.next_sample();
         }
 
         let mut buf = [0.0f32; 1024];

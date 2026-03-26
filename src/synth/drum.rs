@@ -116,6 +116,7 @@ impl KickDrum {
 
     /// Generate the next sample.
     #[inline]
+    #[must_use]
     pub fn next_sample(&mut self) -> f32 {
         if !self.active {
             return 0.0;
@@ -167,6 +168,9 @@ impl KickDrum {
     #[inline]
     fn next_noise(&mut self) -> f32 {
         let mut x = self.noise_state;
+        if x == 0 {
+            x = 42; // Guard: xorshift(0) = 0 forever
+        }
         x ^= x << 13;
         x ^= x >> 17;
         x ^= x << 5;
@@ -246,6 +250,7 @@ impl SnareDrum {
 
     /// Generate the next sample.
     #[inline]
+    #[must_use]
     pub fn next_sample(&mut self) -> f32 {
         if !self.active {
             return 0.0;
@@ -290,6 +295,9 @@ impl SnareDrum {
     #[inline]
     fn next_noise(&mut self) -> f32 {
         let mut x = self.noise_state;
+        if x == 0 {
+            x = 42; // Guard: xorshift(0) = 0 forever
+        }
         x ^= x << 13;
         x ^= x >> 17;
         x ^= x << 5;
@@ -366,6 +374,7 @@ impl HiHat {
 
     /// Generate the next sample.
     #[inline]
+    #[must_use]
     pub fn next_sample(&mut self) -> f32 {
         if !self.active {
             return 0.0;

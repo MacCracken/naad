@@ -38,12 +38,15 @@ impl GrainWindow {
                 (-0.5 * x * x).exp()
             }
             GrainWindow::Tukey => {
-                // alpha = 0.5 (half cosine-tapered).
+                // Tukey window with alpha = 0.5 (half cosine-tapered).
                 let alpha = 0.5;
-                if t < alpha * 0.5 {
-                    0.5 * (1.0 - (std::f32::consts::TAU * t / alpha).cos())
-                } else if t > 1.0 - alpha * 0.5 {
-                    0.5 * (1.0 - (std::f32::consts::TAU * (t - 1.0 + alpha * 0.5) / alpha).cos())
+                let half_alpha = alpha * 0.5;
+                if t < half_alpha {
+                    // Leading taper: 0 → 1
+                    0.5 * (1.0 - (std::f32::consts::PI * t / half_alpha).cos())
+                } else if t > 1.0 - half_alpha {
+                    // Trailing taper: 1 → 0
+                    0.5 * (1.0 + (std::f32::consts::PI * (t - 1.0 + half_alpha) / half_alpha).cos())
                 } else {
                     1.0
                 }
@@ -177,6 +180,7 @@ impl GranularEngine {
 
     /// Generate the next output sample.
     #[inline]
+    #[must_use]
     pub fn next_sample(&mut self) -> f32 {
         if self.source.is_empty() {
             return 0.0;

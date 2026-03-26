@@ -105,6 +105,7 @@ impl FormantFilter {
 
     /// Process one input sample through all parallel formant bands.
     #[inline]
+    #[must_use]
     pub fn process_sample(&mut self, input: f32) -> f32 {
         let mut sum = 0.0f32;
         for (filter, &amp) in self.filters.iter_mut().zip(self.amplitudes.iter()) {
@@ -203,6 +204,7 @@ impl FormantSynth {
 
     /// Process one input sample through the parallel formant bank.
     #[inline]
+    #[must_use]
     pub fn process_sample(&mut self, input: f32) -> f32 {
         let mut sum = 0.0f32;
         for i in 0..NUM_FORMANTS {

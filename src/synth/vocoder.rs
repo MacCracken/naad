@@ -131,6 +131,7 @@ impl Vocoder {
     ///
     /// Returns the sum of all band outputs.
     #[inline]
+    #[must_use]
     pub fn process_sample(&mut self, modulator: f32, carrier: f32) -> f32 {
         let mut sum = 0.0f32;
         for band in &mut self.bands {

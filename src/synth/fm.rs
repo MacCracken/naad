@@ -92,8 +92,12 @@ impl FmOperator {
     }
 
     /// Generate the next sample with external phase modulation input.
+    ///
+    /// `phase_mod` is added to the operator's phase before computing sine.
+    /// Use this directly for custom FM topologies beyond the built-in algorithms.
     #[inline]
-    fn next_sample(&mut self, phase_mod: f32) -> f32 {
+    #[must_use]
+    pub fn next_sample(&mut self, phase_mod: f32) -> f32 {
         let fb = self.feedback * self.feedback_state;
         let mod_phase = self.phase + phase_mod + fb;
         let out = (mod_phase * std::f32::consts::TAU).sin();
@@ -217,6 +221,7 @@ impl FmSynthEngine {
     /// Generate the next output sample by routing operators through
     /// the current algorithm.
     #[inline]
+    #[must_use]
     pub fn next_sample(&mut self) -> f32 {
         let n = self.operators.len();
         match self.algorithm {

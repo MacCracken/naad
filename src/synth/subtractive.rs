@@ -37,6 +37,9 @@ pub struct SubtractiveSynth {
     base_cutoff: f32,
     /// Sample rate in Hz.
     sample_rate: f32,
+    /// Previous modulated cutoff (for skipping redundant coefficient recalculation).
+    #[serde(skip)]
+    prev_modulated_cutoff: f32,
 }
 
 impl SubtractiveSynth {
@@ -67,6 +70,7 @@ impl SubtractiveSynth {
             filter_env_depth: 2.0,
             base_cutoff: cutoff,
             sample_rate,
+            prev_modulated_cutoff: cutoff,
         })
     }
 
@@ -128,6 +132,7 @@ impl SubtractiveSynth {
 
     /// Generate the next sample.
     #[inline]
+    #[must_use]
     pub fn next_sample(&mut self) -> f32 {
         // Oscillator mix
         let mut osc_out = self.osc1.next_sample();
@@ -138,9 +143,13 @@ impl SubtractiveSynth {
 
         // Filter with envelope modulation
         let filter_mod = self.filter_env.next_value() * self.filter_env_depth;
-        let modulated_cutoff = self.base_cutoff * (filter_mod).exp2();
+        let modulated_cutoff = self.base_cutoff * filter_mod.exp2();
         let clamped = modulated_cutoff.clamp(20.0, self.sample_rate * 0.49);
-        let _ = self.filter.set_params(clamped, self.filter.q());
+        // Only recompute filter coefficients when cutoff changes meaningfully
+        if (clamped - self.prev_modulated_cutoff).abs() > 0.5 {
+            let _ = self.filter.set_params(clamped, self.filter.q());
+            self.prev_modulated_cutoff = clamped;
+        }
         let filtered = self.filter.process_sample(osc_out).low_pass;
 
         // Amplitude envelope
@@ -201,11 +210,11 @@ mod tests {
             SubtractiveSynth::new(Waveform::Sine, 440.0, 5000.0, 0.707, 44100.0).unwrap();
         synth.note_on();
         for _ in 0..5000 {
-            synth.next_sample();
+            let _ = synth.next_sample();
         }
         synth.note_off();
         for _ in 0..50000 {
-            synth.next_sample();
+            let _ = synth.next_sample();
         }
         assert!(!synth.is_active(), "should be idle after release");
     }

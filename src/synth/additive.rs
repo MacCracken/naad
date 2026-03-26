@@ -128,6 +128,7 @@ impl AdditiveSynth {
 
     /// Generate the next output sample.
     #[inline]
+    #[must_use]
     pub fn next_sample(&mut self) -> f32 {
         let mut sum = 0.0f32;
 
