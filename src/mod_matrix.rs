@@ -7,6 +7,12 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Number of modulation source slots.
+pub const NUM_SOURCES: usize = 8;
+
+/// Number of modulation destination slots.
+pub const NUM_DESTINATIONS: usize = 8;
+
 /// Modulation source identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -29,6 +35,23 @@ pub enum ModSource {
     PitchBend,
 }
 
+impl ModSource {
+    /// Map source to array index (decoupled from enum discriminant).
+    #[inline]
+    fn index(self) -> usize {
+        match self {
+            Self::Lfo1 => 0,
+            Self::Lfo2 => 1,
+            Self::AmpEnvelope => 2,
+            Self::FilterEnvelope => 3,
+            Self::Velocity => 4,
+            Self::ModWheel => 5,
+            Self::Aftertouch => 6,
+            Self::PitchBend => 7,
+        }
+    }
+}
+
 /// Modulation destination identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -49,6 +72,23 @@ pub enum ModDestination {
     FmIndex,
     /// LFO rate.
     LfoRate,
+}
+
+impl ModDestination {
+    /// Map destination to array index (decoupled from enum discriminant).
+    #[inline]
+    fn index(self) -> usize {
+        match self {
+            Self::Pitch => 0,
+            Self::FilterCutoff => 1,
+            Self::FilterResonance => 2,
+            Self::Amplitude => 3,
+            Self::Pan => 4,
+            Self::PulseWidth => 5,
+            Self::FmIndex => 6,
+            Self::LfoRate => 7,
+        }
+    }
 }
 
 /// A single modulation routing: source → destination with depth.
@@ -107,10 +147,10 @@ pub struct ModMatrix {
     routings: Vec<ModRouting>,
     /// Source values for the current frame.
     #[serde(skip)]
-    source_values: [f32; 8],
+    source_values: [f32; NUM_SOURCES],
     /// Computed destination modulation amounts.
     #[serde(skip)]
-    destination_values: [f32; 8],
+    destination_values: [f32; NUM_DESTINATIONS],
 }
 
 impl ModMatrix {
@@ -147,7 +187,7 @@ impl ModMatrix {
 
     /// Set a source value for the current frame.
     pub fn set_source(&mut self, source: ModSource, value: f32) {
-        self.source_values[source as usize] = value;
+        self.source_values[source.index()] = value;
     }
 
     /// Compute all destination modulation values from current sources.
@@ -159,9 +199,9 @@ impl ModMatrix {
             if !routing.enabled {
                 continue;
             }
-            let src_val = self.source_values[routing.source as usize];
+            let src_val = self.source_values[routing.source.index()];
             let mod_amount = src_val * routing.depth;
-            self.destination_values[routing.destination as usize] += mod_amount;
+            self.destination_values[routing.destination.index()] += mod_amount;
         }
     }
 
@@ -171,7 +211,7 @@ impl ModMatrix {
     #[inline]
     #[must_use]
     pub fn get_destination(&self, dest: ModDestination) -> f32 {
-        self.destination_values[dest as usize]
+        self.destination_values[dest.index()]
     }
 
     /// Returns the number of active routings.

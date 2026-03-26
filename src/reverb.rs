@@ -98,9 +98,10 @@ pub struct Reverb {
     sample_rate: f32,
 }
 
-// Freeverb-style prime delay lengths (in samples at 44100 Hz)
-const COMB_LENGTHS: [usize; 4] = [1116, 1188, 1277, 1356];
-const ALLPASS_LENGTHS: [usize; 2] = [556, 441];
+// Prime delay lengths (in samples at 44100 Hz) for minimal modal clustering.
+// All values are prime and mutually coprime for optimal diffusion.
+const COMB_LENGTHS: [usize; 4] = [1117, 1187, 1277, 1361];
+const ALLPASS_LENGTHS: [usize; 2] = [557, 443];
 // Stereo offset (samples added to right channel for decorrelation)
 const STEREO_OFFSET: usize = 23;
 

@@ -102,10 +102,13 @@ impl ParametricEq {
 ///
 /// Bands at: 31, 63, 125, 250, 500, 1k, 2k, 4k, 8k, 16k Hz.
 /// Each band is a peak filter with configurable gain.
+/// Bands above Nyquist are automatically excluded.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphicEq {
     /// Internal parametric EQ.
     eq: ParametricEq,
+    /// Frequencies of the active bands (may be fewer than 10 at low sample rates).
+    active_frequencies: Vec<f32>,
 }
 
 /// ISO center frequencies for the 10-band graphic EQ.
@@ -121,14 +124,19 @@ impl GraphicEq {
     /// Returns error if sample_rate is invalid.
     pub fn new(sample_rate: f32) -> Result<Self> {
         let mut eq = ParametricEq::new(sample_rate);
+        let mut active_frequencies = Vec::new();
         let q = 1.4; // ~1 octave bandwidth
         for &freq in &GRAPHIC_EQ_FREQUENCIES {
             // Skip bands above Nyquist
             if freq < sample_rate * 0.5 {
                 eq.add_band(FilterType::Peak, freq, q, 0.0)?;
+                active_frequencies.push(freq);
             }
         }
-        Ok(Self { eq })
+        Ok(Self {
+            eq,
+            active_frequencies,
+        })
     }
 
     /// Set the gain for a band (0-9) in dB.
@@ -137,9 +145,18 @@ impl GraphicEq {
     ///
     /// Returns error if index is out of range or gain is invalid.
     pub fn set_band_gain(&mut self, index: usize, gain_db: f32) -> Result<()> {
+        if index >= self.active_frequencies.len() {
+            return Err(crate::NaadError::InvalidParameter {
+                name: "index".to_string(),
+                reason: format!(
+                    "band index {index} out of range ({}  active bands)",
+                    self.active_frequencies.len()
+                ),
+            });
+        }
+        let freq = self.active_frequencies[index];
         if let Some(band) = self.eq.band_mut(index) {
-            band.filter
-                .set_params(GRAPHIC_EQ_FREQUENCIES[index], 1.4, gain_db)
+            band.filter.set_params(freq, 1.4, gain_db)
         } else {
             Err(crate::NaadError::InvalidParameter {
                 name: "index".to_string(),

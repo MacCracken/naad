@@ -42,7 +42,7 @@ impl EnvelopeDetector {
     #[inline]
     #[must_use]
     pub fn process(&mut self, input: f32) -> f32 {
-        let level = input.abs();
+        let level = if input.is_finite() { input.abs() } else { 0.0 };
         let coeff = if level > self.current {
             self.attack_coeff
         } else {
@@ -153,7 +153,7 @@ impl Limiter {
     /// `release` is the release time in seconds.
     #[must_use]
     pub fn new(ceiling_db: f32, release: f32, sample_rate: f32) -> Self {
-        let mut comp = Compressor::new(ceiling_db, 100.0, 0.0001, release, sample_rate);
+        let mut comp = Compressor::new(ceiling_db, f32::MAX, 0.0001, release, sample_rate);
         comp.knee_db = 0.0;
         Self {
             ceiling_db,
@@ -193,8 +193,10 @@ pub struct NoiseGate {
     hold_counter: u32,
     /// Hold time in samples.
     hold_samples: u32,
-    /// Gate open/close smoothing coefficient.
-    smooth_coeff: f32,
+    /// Gate opening smoothing coefficient (fast).
+    attack_coeff: f32,
+    /// Gate closing smoothing coefficient (matches release time).
+    release_coeff: f32,
 }
 
 impl NoiseGate {
@@ -206,13 +208,15 @@ impl NoiseGate {
     /// * `release` - Release time in seconds
     #[must_use]
     pub fn new(threshold_db: f32, attack: f32, hold: f32, release: f32, sample_rate: f32) -> Self {
+        let attack_time = attack.max(0.001); // minimum 1ms to avoid clicks
         Self {
             threshold_db,
             detector: EnvelopeDetector::new(attack, release, sample_rate),
             gate_gain: 0.0,
             hold_counter: 0,
             hold_samples: (hold * sample_rate) as u32,
-            smooth_coeff: if release > 0.0 {
+            attack_coeff: 1.0 - (-1.0 / (attack_time * sample_rate)).exp(),
+            release_coeff: if release > 0.0 {
                 1.0 - (-1.0 / (release * sample_rate)).exp()
             } else {
                 1.0
@@ -236,8 +240,13 @@ impl NoiseGate {
             0.0
         };
 
-        // Smooth the gate gain to avoid clicks
-        self.gate_gain += self.smooth_coeff * (target - self.gate_gain);
+        // Smooth the gate gain: fast attack, slow release
+        let coeff = if target > self.gate_gain {
+            self.attack_coeff
+        } else {
+            self.release_coeff
+        };
+        self.gate_gain += coeff * (target - self.gate_gain);
         self.gate_gain = crate::flush_denormal(self.gate_gain);
 
         input * self.gate_gain

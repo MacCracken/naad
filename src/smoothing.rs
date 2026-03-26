@@ -46,9 +46,11 @@ impl ParamSmoother {
         }
     }
 
-    /// Set a new target value.
+    /// Set a new target value. Non-finite values are ignored.
     pub fn set_target(&mut self, target: f32) {
-        self.target = target;
+        if target.is_finite() {
+            self.target = target;
+        }
     }
 
     /// Get the next smoothed value.
