@@ -236,32 +236,52 @@ How each synthesis engine from shruti's post-MVP roadmap maps to naad modules:
 
 ---
 
-## Post-1.0 — Architecture & Ergonomics (from final audit)
+## 1.1.0 — Project Organization & Cleanup
 
-> Observations from the 1.0 release audit. None are bugs — all are improvement opportunities.
+> Consolidate the codebase: split large modules, deduplicate patterns, formalize naming,
+> strengthen tests. No new features — purely structural improvement.
 
-### Module Structure
-- **oscillator.rs (~950 LOC)**: Largest module. Natural split into `oscillator/{core, unison, sub, sync}.rs` if it grows further.
-- **Duplicate xorshift PRNG**: `GranularEngine`, `UnisonOscillator`, drum types each have inline xorshift. Extract `dsp_util::Xorshift32` to centralize + zero-state guard.
-- **Two FM types**: `modulation::FmSynth` (simple 2-op) and `synth::fm::FmSynthEngine` (multi-op). Consider renaming `FmSynth` → `FmModulator` to clarify the distinction.
+### Module Reorganization
 
-### API Consistency
-- **Encapsulation split**: Types with invariants (Oscillator, SVF, BiquadFilter) have private fields + accessors. Parameter types (Compressor, Adsr, effects) have `pub` fields. This is intentional — document as a design principle: "types with constructor validation use private fields; simple parameter structs use pub fields."
-- **Constructor return types**: `Oscillator::new` → `Result` (validates). `Compressor::new` → `Self` (clamps). Document: "types validating sample_rate/frequency return `Result`; types clamping parameters are infallible."
-- **`FmSynthEngine` setters silently ignore bad index**: Consider returning `bool` or `Option` for discoverability.
+| # | Item | Effort | Notes |
+|---|------|--------|-------|
+| O1 | **Split oscillator.rs (~950 LOC)** | Medium | Move into `oscillator/{mod, core, unison, sub, sync}.rs`. Re-export from `oscillator::*` for backward compat. |
+| O2 | **Extract `dsp_util::Xorshift32`** | Small | Centralize xorshift PRNG from `GranularEngine`, `UnisonOscillator`, drum types. Single impl with zero-state guard. |
+| O3 | **Rename `FmSynth` → `FmModulator`** | Small | Clarify distinction: `modulation::FmModulator` (simple 2-op) vs `synth::fm::FmSynthEngine` (multi-op). Deprecate old name. |
+| O4 | **Rename `EnvelopeDetector` → `LevelDetector`** | Small | Avoid confusion with `EnvelopeState` in envelope module. Both share "Envelope" prefix for unrelated concepts. |
 
-### Performance (pre-allocated buffers)
-- **`ConvolutionReverb::process_block`**: Allocates 3 `Vec<Complex>` per call. Pre-allocate scratch buffers on the struct for real-time use.
-- **`GranularEngine.grains`**: `Vec<Grain>` with fixed `MAX_GRAINS=64`. Convert to `[Grain; 64]` to eliminate heap indirection.
+### API Formalization
 
-### Naming
-- `EnvelopeDetector` (dynamics) vs `EnvelopeState` (envelope) — unrelated types sharing "Envelope" prefix. Consider `LevelDetector` for the dynamics type.
-- `spray` on `GranularEngine` stores samples internally but setter takes milliseconds — unit mismatch is implementation-internal only.
+| # | Item | Effort | Notes |
+|---|------|--------|-------|
+| O5 | **Document encapsulation design principle** | Small | Add to CLAUDE.md / lib.rs: "types with constructor validation use private fields; simple parameter structs use pub fields." |
+| O6 | **Document constructor return type convention** | Small | "Types validating sample_rate/frequency return `Result`; types clamping parameters are infallible." |
+| O7 | **`FmSynthEngine` setters return `Option`** | Small | `set_operator_freq` / `set_operator_level` currently ignore bad index silently. Return `Option<()>` for discoverability. |
+| O8 | **Dynamics types: encapsulate or document** | Small | `Compressor`, `Limiter`, `NoiseGate`, `Adsr` have `pub` fields that bypass validation. Either privatize with setters, or formalize the "parameter struct" convention (O5). |
 
-### Test Improvements
-- Granular: add tests for pitch-shift producing frequency change, spray producing time variation
-- Dynamics: add tests for `ratio=1.0` unity, hold timer behavior, limiter ceiling verification
-- Serde: test granular engine works after roundtrip + source reload
+### Performance Cleanup
+
+| # | Item | Effort | Notes |
+|---|------|--------|-------|
+| O9 | **Pre-allocate `ConvolutionReverb::process_block` buffers** | Medium | Currently allocates 3 `Vec<Complex>` per call. Store scratch buffers on the struct. |
+| O10 | **`GranularEngine.grains` Vec → `[Grain; 64]`** | Small | Fixed-size pool masquerading as Vec. Eliminate heap indirection. |
+| O11 | **`FormantFilter` Vec → `[BiquadFilter; N]`** | Small | `NUM_FORMANTS=3` is constant. Use fixed array. |
+
+### Test Strengthening
+
+| # | Item | Effort | Notes |
+|---|------|--------|-------|
+| O12 | **Granular pitch-shift test** | Small | Verify pitch shift actually changes output frequency. |
+| O13 | **Granular spray variation test** | Small | Verify spray > 0 produces time-varying grain positions. |
+| O14 | **Dynamics edge cases** | Small | Compressor `ratio=1.0` unity, gate hold timer, limiter ceiling exact match. |
+| O15 | **Serde functional tests** | Small | Granular: serialize → deserialize → reload source → verify output. |
+
+### Naming & Consistency
+
+| # | Item | Effort | Notes |
+|---|------|--------|-------|
+| O16 | **Doc comments on all public structs** | Small | `Grain`, `EqBand`, `VocoderBand`, `Partial` lack struct-level docs. |
+| O17 | **Consistent `#[must_use]` policy** | Small | Decide: all `next_sample` get it, or only pure functions. Apply uniformly. |
 
 ---
 
@@ -275,7 +295,9 @@ How each synthesis engine from shruti's post-MVP roadmap maps to naad modules:
 | 0.4.0 | Synthesis algorithms (subtractive, FM, additive, granular, physical, vocoder, formant, drum) | Phase 4 |
 | 0.5.0 | Performance + polish | Phase 5 |
 | **1.0.0** | **Stable API — dhvani integration validated** | **Phase 6** ✓ |
+| 1.1.0 | Project organization & cleanup (17 items: module splits, dedup, naming, tests, docs) | O1-O17 |
+| 1.2.0+ | Deeper hisab integration (H1-H8), performance opts (P1-P3), additional goonj (G1-G3) | Post-1.0 |
 
 ---
 
-*Last Updated: 2026-03-26 — Phases 0-5 complete, Phase 6 + post-1.0 planned*
+*Last Updated: 2026-03-26 — 1.0.0 released, 1.1.0 organization planned*
