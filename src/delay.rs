@@ -69,7 +69,7 @@ impl DelayLine {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CombFilter {
     /// The delay line.
-    pub delay_line: DelayLine,
+    delay_line: DelayLine,
     /// Feedback coefficient (-1.0 to 1.0 for stability).
     pub feedback: f32,
     /// Delay time in samples.
@@ -110,9 +110,9 @@ pub struct AllpassDelay {
     /// Single delay buffer storing the combined signal.
     delay_line: DelayLine,
     /// Allpass coefficient (clamped to (-1, 1) for stability).
-    pub coefficient: f32,
+    coefficient: f32,
     /// Delay time in samples.
-    pub delay_samples: f32,
+    delay_samples: f32,
 }
 
 impl AllpassDelay {
@@ -124,6 +124,20 @@ impl AllpassDelay {
             coefficient: coefficient.clamp(-0.999, 0.999),
             delay_samples: delay_samples as f32,
         }
+    }
+
+    /// Returns the allpass coefficient.
+    #[inline]
+    #[must_use]
+    pub fn coefficient(&self) -> f32 {
+        self.coefficient
+    }
+
+    /// Returns the delay time in samples.
+    #[inline]
+    #[must_use]
+    pub fn delay_samples(&self) -> f32 {
+        self.delay_samples
     }
 
     /// Process a single sample through the Schroeder allpass.

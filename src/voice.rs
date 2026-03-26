@@ -35,13 +35,13 @@ pub enum StealMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Voice {
     /// Whether this voice is currently active (producing sound).
-    pub active: bool,
+    active: bool,
     /// The MIDI note number this voice is playing (0-127).
     pub note: u8,
     /// Velocity (0.0 to 1.0).
     pub velocity: f32,
     /// Age counter — incremented each sample when active. Used for oldest-steal.
-    pub age: u64,
+    age: u64,
     /// Current amplitude (for quietest-steal heuristic).
     pub amplitude: f32,
     /// Per-note pitch bend (MIDI 2.0, in semitones).
@@ -50,6 +50,22 @@ pub struct Voice {
     pub pressure: f32,
     /// Per-note brightness (MIDI 2.0 CC74, 0.0 to 1.0).
     pub brightness: f32,
+}
+
+impl Voice {
+    /// Returns whether this voice is currently active (producing sound).
+    #[inline]
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    /// Returns the age counter for this voice.
+    #[inline]
+    #[must_use]
+    pub fn age(&self) -> u64 {
+        self.age
+    }
 }
 
 impl Default for Voice {
@@ -71,7 +87,7 @@ impl Default for Voice {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoiceManager {
     /// Voice pool.
-    pub voices: Vec<Voice>,
+    pub(crate) voices: Vec<Voice>,
     /// Maximum polyphony.
     max_voices: usize,
     /// Polyphony mode.
@@ -192,6 +208,19 @@ impl VoiceManager {
         self.voices.iter().filter(|v| v.active).count()
     }
 
+    /// Returns a shared reference to the voice pool.
+    #[inline]
+    #[must_use]
+    pub fn voices(&self) -> &[Voice] {
+        &self.voices
+    }
+
+    /// Returns a mutable reference to a voice by index, or `None` if out of bounds.
+    #[inline]
+    pub fn voice_mut(&mut self, index: usize) -> Option<&mut Voice> {
+        self.voices.get_mut(index)
+    }
+
     /// Returns the maximum polyphony.
     #[must_use]
     pub fn max_voices(&self) -> usize {
@@ -215,7 +244,7 @@ mod tests {
         let mut vm = VoiceManager::new(4, PolyMode::Poly, StealMode::Oldest);
         let idx = vm.note_on(60, 0.8).unwrap();
         assert_eq!(vm.active_count(), 1);
-        assert_eq!(vm.voices[idx].note, 60);
+        assert_eq!(vm.voices()[idx].note, 60);
         vm.note_off(60);
         assert_eq!(vm.active_count(), 0);
     }
@@ -230,7 +259,7 @@ mod tests {
         assert_eq!(vm.active_count(), 2);
         // Third note should steal oldest
         let idx = vm.note_on(67, 0.9).unwrap();
-        assert_eq!(vm.voices[idx].note, 67);
+        assert_eq!(vm.voices()[idx].note, 67);
         assert_eq!(vm.active_count(), 2);
     }
 
@@ -247,7 +276,7 @@ mod tests {
         let _ = vm.note_on(60, 0.8);
         let _ = vm.note_on(64, 0.7);
         // Mono always uses voice 0
-        assert_eq!(vm.voices[0].note, 64);
+        assert_eq!(vm.voices()[0].note, 64);
         assert_eq!(vm.active_count(), 1);
     }
 

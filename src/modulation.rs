@@ -240,9 +240,9 @@ impl ModulationSource for Lfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FmSynth {
     /// Carrier oscillator.
-    pub carrier: Oscillator,
+    carrier: Oscillator,
     /// Modulator oscillator.
-    pub modulator: Oscillator,
+    modulator: Oscillator,
     /// Modulation index (depth of FM).
     pub mod_index: f32,
     /// Base carrier frequency for FM calculation.
@@ -274,6 +274,20 @@ impl FmSynth {
             mod_index,
             carrier_base_freq: carrier_freq,
         })
+    }
+
+    /// Returns a shared reference to the carrier oscillator.
+    #[inline]
+    #[must_use]
+    pub fn carrier(&self) -> &Oscillator {
+        &self.carrier
+    }
+
+    /// Returns a shared reference to the modulator oscillator.
+    #[inline]
+    #[must_use]
+    pub fn modulator(&self) -> &Oscillator {
+        &self.modulator
     }
 
     /// Generate the next FM synthesis sample.
@@ -311,7 +325,7 @@ impl FmSynth {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RingModulator {
     /// The modulator oscillator.
-    pub modulator: Oscillator,
+    modulator: Oscillator,
 }
 
 impl RingModulator {
@@ -323,6 +337,13 @@ impl RingModulator {
     pub fn new(waveform: Waveform, mod_freq: f32, sample_rate: f32) -> Result<Self> {
         let modulator = Oscillator::new(waveform, mod_freq, sample_rate)?;
         Ok(Self { modulator })
+    }
+
+    /// Returns a shared reference to the modulator oscillator.
+    #[inline]
+    #[must_use]
+    pub fn modulator(&self) -> &Oscillator {
+        &self.modulator
     }
 
     /// Process a sample through ring modulation.

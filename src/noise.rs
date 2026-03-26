@@ -53,7 +53,7 @@ const PINK_OCTAVES: usize = 16;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NoiseGenerator {
     /// The type of noise being generated.
-    pub noise_type: NoiseType,
+    noise_type: NoiseType,
     /// PRNG state.
     rng: Xorshift32,
     /// Voss-McCartney octave values for pink noise.
@@ -73,6 +73,7 @@ impl NoiseGenerator {
     ///
     /// * `noise_type` - Type of noise to generate
     /// * `seed` - Random seed for deterministic output
+    #[must_use]
     pub fn new(noise_type: NoiseType, seed: u32) -> Self {
         let mut rng = Xorshift32::new(seed);
 
@@ -95,6 +96,13 @@ impl NoiseGenerator {
             pink_running_sum,
             brown_prev: 0.0,
         }
+    }
+
+    /// Returns the type of noise being generated.
+    #[inline]
+    #[must_use]
+    pub fn noise_type(&self) -> NoiseType {
+        self.noise_type
     }
 
     /// Generate the next noise sample.
@@ -227,6 +235,6 @@ mod tests {
         let ngen = NoiseGenerator::new(NoiseType::Pink, 123);
         let json = serde_json::to_string(&ngen).unwrap();
         let back: NoiseGenerator = serde_json::from_str(&json).unwrap();
-        assert_eq!(ngen.noise_type, back.noise_type);
+        assert_eq!(ngen.noise_type(), back.noise_type());
     }
 }

@@ -313,17 +313,17 @@ fn pink_noise_spectral_slope() {
 fn wavetable_harmonics() {
     // Single harmonic = sine wave
     let wt = Wavetable::from_harmonics(1, &[1.0], 1024).unwrap();
-    assert_eq!(wt.samples.len(), 1024);
+    assert_eq!(wt.len(), 1024);
 
     // Peak should be at 1.0 (normalized)
-    let max = wt.samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+    let max = wt.samples().iter().map(|s| s.abs()).fold(0.0f32, f32::max);
     assert!(
         (max - 1.0).abs() < 0.01,
         "normalized wavetable max should be 1.0, got {max}"
     );
 
     // The sample at index 256 (1/4 period) of a sine should be near peak
-    let quarter = wt.samples[256]; // sin(pi/2) = 1.0
+    let quarter = wt.samples()[256]; // sin(pi/2) = 1.0
     assert!(
         quarter > 0.9,
         "sine wavetable at 1/4 period should be near 1.0, got {quarter}"
@@ -436,7 +436,7 @@ fn serde_roundtrip_allpass_delay() {
     let ap = AllpassDelay::new(100, 0.7);
     let json = serde_json::to_string(&ap).unwrap();
     let back: AllpassDelay = serde_json::from_str(&json).unwrap();
-    assert!((ap.coefficient - back.coefficient).abs() < f32::EPSILON);
+    assert!((ap.coefficient() - back.coefficient()).abs() < f32::EPSILON);
 }
 
 #[test]

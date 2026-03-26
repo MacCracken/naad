@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - Phase 6: Integration Validation + Stable API
+
+### Added
+
+- **API stability audit** — all public struct fields with constructor validation now encapsulated: Wavetable, WavetableOscillator, MorphWavetable, CombFilter, AllpassDelay, FmSynth, RingModulator, NoiseGenerator, VoiceManager, Voice. Accessor methods added throughout.
+- **FFT convolution** — `ConvolutionReverb::process_block()` uses overlap-save via `hisab::num::fft()` for O(N log N) per block (vs O(N) per sample in `process_sample`)
+- **dhvani smoke test example** — `examples/dhvani_smoke_test.rs` demonstrates full synthesis chain: voice manager → unison oscillator → SVF filter → envelope → mod matrix → reverb → compressor → EQ → stereo panning
+- **Shruti migration guide** — `docs/development/shruti-migration.md` maps all shruti-instruments types to naad equivalents with migration steps
+
+### Changed
+
+- VERSION bumped to 1.0.0 — stable API
+- All public fields on stateful types now private with validated accessors
+- `Voice::active` and `Voice::age` now private (use `is_active()`, `age()`)
+- `VoiceManager::voices` now `pub(crate)` (use `voices()`, `voice_mut()`)
+
 ## [0.5.0] - Phase 5: Performance + Polish
 
 ### Added

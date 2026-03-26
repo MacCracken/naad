@@ -157,7 +157,7 @@ Per CLAUDE.md P(-1) process:
 
 ---
 
-## Phase 6 — Integration Validation
+## ~~Phase 6 — Integration Validation~~ COMPLETE
 
 > **Effort**: Medium | **Prerequisite**: Phase 5
 > **Goal**: Validate that dhvani can consume naad cleanly. Prove the abstraction boundary works.
@@ -212,7 +212,56 @@ How each synthesis engine from shruti's post-MVP roadmap maps to naad modules:
 | hisab Module | naad Usage | Since |
 |---|---|---|
 | `Vec3` | Room/source/listener positions | Phase 3 (acoustics) |
-| `Complex` + `num::fft()` | `fft_magnitudes()`, `power_spectrum()` | Phase 5 |
+| `Complex` + `num::fft()` | `fft_magnitudes()`, `power_spectrum()`, FFT convolution | Phase 5-6 |
+
+---
+
+## Post-1.0 — Performance Optimizations (from shruti backlog)
+
+| # | Item | Origin | naad Module | Notes |
+|---|------|--------|-------------|-------|
+| P1 | **Compressor LUT-based dB conversion** | shruti P2 | `dynamics` | 256-entry lookup table for -80..+20 dB range. Avoids per-sample `log10`/`powf` in `amplitude_to_db`/`db_to_amplitude`. |
+| P2 | **Compressor soft-knee specialization** | shruti P6 | `dynamics` | Specialize `compute_gain_db` for `knee_db == 0.0` to eliminate branch in inner loop. |
+| P3 | **SmallVec/ArrayVec for fixed-size collections** | shruti A10 | `voice`, `synth::fm`, `synth::vocoder`, `eq` | Replace `Vec` with stack-allocated arrays where max size is known (e.g., 8 voices, 6 operators, 16 bands). Avoids heap. |
+
+## Post-1.0 — Additional goonj Acoustics
+
+> Remaining goonj integration points from shruti's roadmap that naad could expose.
+
+| # | Item | goonj API | naad Module | Notes |
+|---|------|----------|-------------|-------|
+| G1 | **Absorption advisor** | `goonj::analysis::suggest_absorption_placement()` | `acoustics::analysis` | Recommend acoustic treatment for virtual mix rooms. Returns placement suggestions. |
+| G2 | **Coupled room decay** | `goonj::coupled::coupled_room_decay()` | `acoustics` (new) | Multi-room simulation (live room + control room). Double-slope decay model. |
+| G3 | **Speaker directivity** | `goonj::directivity::DirectivityPattern` | `acoustics` (new) | Source radiation patterns (cardioid, figure-8, etc.) for monitor placement simulation and spatial synthesis. |
+
+---
+
+## Post-1.0 — Architecture & Ergonomics (from final audit)
+
+> Observations from the 1.0 release audit. None are bugs — all are improvement opportunities.
+
+### Module Structure
+- **oscillator.rs (~950 LOC)**: Largest module. Natural split into `oscillator/{core, unison, sub, sync}.rs` if it grows further.
+- **Duplicate xorshift PRNG**: `GranularEngine`, `UnisonOscillator`, drum types each have inline xorshift. Extract `dsp_util::Xorshift32` to centralize + zero-state guard.
+- **Two FM types**: `modulation::FmSynth` (simple 2-op) and `synth::fm::FmSynthEngine` (multi-op). Consider renaming `FmSynth` → `FmModulator` to clarify the distinction.
+
+### API Consistency
+- **Encapsulation split**: Types with invariants (Oscillator, SVF, BiquadFilter) have private fields + accessors. Parameter types (Compressor, Adsr, effects) have `pub` fields. This is intentional — document as a design principle: "types with constructor validation use private fields; simple parameter structs use pub fields."
+- **Constructor return types**: `Oscillator::new` → `Result` (validates). `Compressor::new` → `Self` (clamps). Document: "types validating sample_rate/frequency return `Result`; types clamping parameters are infallible."
+- **`FmSynthEngine` setters silently ignore bad index**: Consider returning `bool` or `Option` for discoverability.
+
+### Performance (pre-allocated buffers)
+- **`ConvolutionReverb::process_block`**: Allocates 3 `Vec<Complex>` per call. Pre-allocate scratch buffers on the struct for real-time use.
+- **`GranularEngine.grains`**: `Vec<Grain>` with fixed `MAX_GRAINS=64`. Convert to `[Grain; 64]` to eliminate heap indirection.
+
+### Naming
+- `EnvelopeDetector` (dynamics) vs `EnvelopeState` (envelope) — unrelated types sharing "Envelope" prefix. Consider `LevelDetector` for the dynamics type.
+- `spray` on `GranularEngine` stores samples internally but setter takes milliseconds — unit mismatch is implementation-internal only.
+
+### Test Improvements
+- Granular: add tests for pitch-shift producing frequency change, spray producing time variation
+- Dynamics: add tests for `ratio=1.0` unity, hold timer behavior, limiter ceiling verification
+- Serde: test granular engine works after roundtrip + source reload
 
 ---
 
@@ -225,7 +274,7 @@ How each synthesis engine from shruti's post-MVP roadmap maps to naad modules:
 | 0.3.0 | New primitive modules (dynamics, EQ, reverb, voice, mod matrix) | Phase 3 |
 | 0.4.0 | Synthesis algorithms (subtractive, FM, additive, granular, physical, vocoder, formant, drum) | Phase 4 |
 | 0.5.0 | Performance + polish | Phase 5 |
-| 1.0.0 | Stable API — dhvani integration validated | Phase 6 |
+| **1.0.0** | **Stable API — dhvani integration validated** | **Phase 6** ✓ |
 
 ---
 

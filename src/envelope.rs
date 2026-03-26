@@ -27,12 +27,24 @@ pub enum EnvelopeState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Adsr {
     /// Attack time in seconds.
+    ///
+    /// Note: modifying this directly bypasses validation. Use the constructor
+    /// for guaranteed-valid values.
     pub attack_time: f32,
     /// Decay time in seconds.
+    ///
+    /// Note: modifying this directly bypasses validation. Use the constructor
+    /// for guaranteed-valid values.
     pub decay_time: f32,
     /// Sustain level (0.0 to 1.0).
+    ///
+    /// Note: modifying this directly bypasses validation. Use the constructor
+    /// for guaranteed-valid values.
     pub sustain_level: f32,
     /// Release time in seconds.
+    ///
+    /// Note: modifying this directly bypasses validation. Use the constructor
+    /// for guaranteed-valid values.
     pub release_time: f32,
     /// Sample rate in Hz.
     sample_rate: f32,

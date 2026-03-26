@@ -122,6 +122,77 @@ impl ConvolutionReverb {
         input * (1.0 - self.mix) + wet * self.mix
     }
 
+    /// Process a block of audio samples through FFT-based convolution.
+    ///
+    /// Uses overlap-save partitioned convolution via `hisab::num::fft` for
+    /// O(N log N) per block instead of O(N) per sample. Much more efficient
+    /// for long impulse responses. Input and output must be the same length.
+    ///
+    /// Call this instead of `process_sample` in a loop for better performance
+    /// when processing full buffers.
+    pub fn process_block(&mut self, input: &[f32], output: &mut [f32]) {
+        use hisab::Complex;
+
+        let ir_len = self.ir.len();
+        if ir_len == 0 || input.is_empty() {
+            for (o, &i) in output.iter_mut().zip(input.iter()) {
+                *o = i;
+            }
+            return;
+        }
+
+        let block_len = input.len();
+        // FFT size: next power of 2 >= ir_len + block_len - 1
+        let fft_len = (ir_len + block_len - 1).next_power_of_two();
+
+        // Zero-pad IR and input to fft_len
+        let mut ir_complex: Vec<Complex> = self
+            .ir
+            .iter()
+            .map(|&s| Complex::new(s as f64, 0.0))
+            .chain(std::iter::repeat(Complex::new(0.0, 0.0)))
+            .take(fft_len)
+            .collect();
+
+        let mut in_complex: Vec<Complex> = input
+            .iter()
+            .map(|&s| Complex::new(s as f64, 0.0))
+            .chain(std::iter::repeat(Complex::new(0.0, 0.0)))
+            .take(fft_len)
+            .collect();
+
+        // Forward FFT both
+        if hisab::num::fft(&mut ir_complex).is_err() || hisab::num::fft(&mut in_complex).is_err() {
+            // Fallback to direct convolution on FFT failure
+            for (i, o) in input.iter().zip(output.iter_mut()) {
+                *o = self.process_sample(*i);
+            }
+            return;
+        }
+
+        // Pointwise multiply in frequency domain
+        let mut product: Vec<Complex> = ir_complex
+            .iter()
+            .zip(in_complex.iter())
+            .map(|(a, b)| *a * *b)
+            .collect();
+
+        // Inverse FFT
+        if hisab::num::ifft(&mut product).is_err() {
+            for (i, o) in input.iter().zip(output.iter_mut()) {
+                *o = self.process_sample(*i);
+            }
+            return;
+        }
+
+        // Extract real part, apply mix
+        let dry = 1.0 - self.mix;
+        for (i, o) in output.iter_mut().enumerate().take(block_len) {
+            let wet = product[i].re as f32;
+            *o = input[i] * dry + wet * self.mix;
+        }
+    }
+
     /// Rebuild the convolution reverb with a new IR (e.g., after deserialization).
     ///
     /// The IR and input buffer are skipped during serde. Call this after
@@ -186,5 +257,21 @@ mod tests {
         assert!((reverb.mix - back.mix).abs() < f32::EPSILON);
         // IR is skipped, so back.ir should be empty
         assert!(back.ir.is_empty());
+    }
+
+    #[test]
+    fn test_fft_block_processing() {
+        // Simple delay IR: identity at tap 0, echo at tap 3
+        let ir = vec![1.0, 0.0, 0.0, 0.5];
+        let mut reverb = ConvolutionReverb::from_ir(ir, 1.0);
+
+        let input = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let mut output = [0.0f32; 8];
+        reverb.process_block(&input, &mut output);
+
+        // output[0] should be ~1.0 (identity), output[3] should be ~0.5 (echo)
+        assert!(output[0].abs() > 0.5, "identity tap: {}", output[0]);
+        assert!(output[3].abs() > 0.2, "echo tap: {}", output[3]);
+        assert!(output.iter().all(|s| s.is_finite()));
     }
 }

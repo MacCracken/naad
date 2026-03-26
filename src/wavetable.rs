@@ -11,7 +11,7 @@ use crate::error::{self, NaadError, Result};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Wavetable {
     /// The waveform samples (one cycle).
-    pub samples: Vec<f32>,
+    samples: Vec<f32>,
 }
 
 impl Wavetable {
@@ -81,6 +81,27 @@ impl Wavetable {
         Ok(Self { samples })
     }
 
+    /// Returns a shared reference to the waveform samples.
+    #[inline]
+    #[must_use]
+    pub fn samples(&self) -> &[f32] {
+        &self.samples
+    }
+
+    /// Returns the number of samples in the wavetable.
+    #[inline]
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.samples.len()
+    }
+
+    /// Returns `true` if the wavetable contains no samples.
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
+    }
+
     /// Read a sample from the wavetable with linear interpolation.
     #[inline]
     #[must_use]
@@ -101,13 +122,13 @@ impl Wavetable {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WavetableOscillator {
     /// The wavetable to read from.
-    pub table: Wavetable,
+    table: Wavetable,
     /// Current phase (0.0 to 1.0).
-    pub phase: f32,
+    phase: f32,
     /// Sample rate in Hz.
-    pub sample_rate: f32,
+    sample_rate: f32,
     /// Playback frequency in Hz.
-    pub frequency: f32,
+    frequency: f32,
 }
 
 impl WavetableOscillator {
@@ -129,6 +150,47 @@ impl WavetableOscillator {
             sample_rate,
             frequency,
         })
+    }
+
+    /// Returns a shared reference to the wavetable.
+    #[inline]
+    #[must_use]
+    pub fn table(&self) -> &Wavetable {
+        &self.table
+    }
+
+    /// Returns the current phase (0.0 to 1.0).
+    #[inline]
+    #[must_use]
+    pub fn phase(&self) -> f32 {
+        self.phase
+    }
+
+    /// Returns the sample rate in Hz.
+    #[inline]
+    #[must_use]
+    pub fn sample_rate(&self) -> f32 {
+        self.sample_rate
+    }
+
+    /// Returns the playback frequency in Hz.
+    #[inline]
+    #[must_use]
+    pub fn frequency(&self) -> f32 {
+        self.frequency
+    }
+
+    /// Set the playback frequency.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if frequency is invalid for the current sample rate.
+    pub fn set_frequency(&mut self, freq: f32) -> crate::error::Result<()> {
+        if let Some(e) = error::validate_frequency(freq, self.sample_rate) {
+            return Err(e);
+        }
+        self.frequency = freq;
+        Ok(())
     }
 
     /// Generate the next sample with linear interpolation.
@@ -157,15 +219,15 @@ impl WavetableOscillator {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MorphWavetable {
     /// The wavetables to morph between.
-    pub tables: Vec<Wavetable>,
+    tables: Vec<Wavetable>,
     /// Morph position (0.0 to 1.0).
-    pub position: f32,
+    position: f32,
     /// Current phase (0.0 to 1.0).
-    pub phase: f32,
+    phase: f32,
     /// Sample rate in Hz.
-    pub sample_rate: f32,
+    sample_rate: f32,
     /// Playback frequency in Hz.
-    pub frequency: f32,
+    frequency: f32,
 }
 
 impl MorphWavetable {
@@ -202,6 +264,41 @@ impl MorphWavetable {
             sample_rate,
             frequency,
         })
+    }
+
+    /// Returns a shared reference to the wavetables.
+    #[inline]
+    #[must_use]
+    pub fn tables(&self) -> &[Wavetable] {
+        &self.tables
+    }
+
+    /// Returns the current morph position (0.0 to 1.0).
+    #[inline]
+    #[must_use]
+    pub fn position(&self) -> f32 {
+        self.position
+    }
+
+    /// Returns the current phase (0.0 to 1.0).
+    #[inline]
+    #[must_use]
+    pub fn phase(&self) -> f32 {
+        self.phase
+    }
+
+    /// Returns the sample rate in Hz.
+    #[inline]
+    #[must_use]
+    pub fn sample_rate(&self) -> f32 {
+        self.sample_rate
+    }
+
+    /// Returns the playback frequency in Hz.
+    #[inline]
+    #[must_use]
+    pub fn frequency(&self) -> f32 {
+        self.frequency
     }
 
     /// Set the morph position (clamped to 0.0..1.0).
@@ -242,7 +339,7 @@ mod tests {
     #[test]
     fn test_from_samples() {
         let wt = Wavetable::from_samples(vec![0.0, 1.0, 0.0, -1.0]).unwrap();
-        assert_eq!(wt.samples.len(), 4);
+        assert_eq!(wt.len(), 4);
     }
 
     #[test]
@@ -253,8 +350,8 @@ mod tests {
     #[test]
     fn test_from_harmonics() {
         let wt = Wavetable::from_harmonics(3, &[1.0, 0.5, 0.25], 1024).unwrap();
-        assert_eq!(wt.samples.len(), 1024);
-        let max = wt.samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        assert_eq!(wt.len(), 1024);
+        let max = wt.samples().iter().map(|s| s.abs()).fold(0.0f32, f32::max);
         assert!((max - 1.0).abs() < 0.01, "should be normalized to 1.0");
     }
 
@@ -289,6 +386,6 @@ mod tests {
         let wt = Wavetable::from_samples(vec![0.0, 1.0, 0.0, -1.0]).unwrap();
         let json = serde_json::to_string(&wt).unwrap();
         let back: Wavetable = serde_json::from_str(&json).unwrap();
-        assert_eq!(wt.samples, back.samples);
+        assert_eq!(wt.samples(), back.samples());
     }
 }
