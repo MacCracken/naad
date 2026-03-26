@@ -5,6 +5,7 @@
 //! with simultaneous LP/HP/BP/Notch outputs.
 
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use crate::error::{self, NaadError, Result};
 
@@ -105,6 +106,7 @@ impl BiquadFilter {
             });
         }
 
+        debug!(?filter_type, frequency, q, gain_db, "biquad filter created");
         let mut filter = Self {
             b0: 1.0,
             b1: 0.0,

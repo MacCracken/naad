@@ -3,6 +3,7 @@
 //! All processors operate sample-by-sample for real-time use.
 
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use crate::dsp_util;
 
@@ -84,6 +85,7 @@ impl Compressor {
     /// * `sample_rate` - Sample rate in Hz
     #[must_use]
     pub fn new(threshold_db: f32, ratio: f32, attack: f32, release: f32, sample_rate: f32) -> Self {
+        debug!(threshold_db, ratio, attack, release, "compressor created");
         Self {
             threshold_db,
             ratio: ratio.max(1.0),

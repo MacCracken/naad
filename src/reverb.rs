@@ -5,6 +5,7 @@
 //! and stereo width.
 
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use crate::delay::DelayLine;
 use crate::error::{self, Result};
@@ -130,6 +131,10 @@ impl Reverb {
             return Err(e);
         }
 
+        debug!(
+            decay,
+            damping, pre_delay_ms, mix, sample_rate, "reverb created"
+        );
         let scale = sample_rate / 44100.0;
         let feedback = decay.clamp(0.0, 0.99);
         let damp = damping.clamp(0.0, 1.0);

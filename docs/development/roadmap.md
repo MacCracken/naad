@@ -37,7 +37,7 @@ naad provides every low-level synthesis building block the AGNOS audio stack nee
 | 0 — Scaffold | Initial synthesis primitives | Oscillator (PolyBLEP), Wavetable + MorphWavetable, ADSR + MultiStageEnvelope, BiquadFilter + SVF, LFO + FM + RingMod, DelayLine + Comb + Allpass, Chorus + Flanger + Phaser + Distortion, Noise (White/Pink/Brown), Tuning (ET/JI/Pythagorean), Error types, benchmarks, integration tests |
 | 1 — Hardening | Audit + fix scaffold | WaveFold fix, Phaser validation, SVF coefficient caching, AllpassDelay single-buffer, denormal protection, Oscillator encapsulation, ADSR stored sample_rate, 14 new serde tests, 8 new benchmarks, gain_db constructor |
 | 2 — Primitives | Enhanced oscillator + LFO | 4-point PolyBLEP, HardSync, UnisonOscillator (1-8 voices, stereo), SubOscillator (-1/-2 oct), LFO 6 shapes + bipolar/unipolar modes, SVF buffer methods |
-| 3 — New Modules | Dynamics, EQ, reverb, voice, mod matrix | dsp_util, Compressor/Limiter/NoiseGate, ParametricEq/GraphicEq/DeEsser, Schroeder Reverb, Panning, ParamSmoother, VoiceManager, ModMatrix |
+| 3 — New Modules | Dynamics, EQ, reverb, voice, mod matrix, acoustics | dsp_util, Compressor/Limiter/NoiseGate, ParametricEq/GraphicEq/DeEsser, Schroeder Reverb, Panning, ParamSmoother, VoiceManager, ModMatrix + goonj acoustics (room/convolution/binaural/FDN/analysis/ambisonics) |
 | 4 — Synthesis | 8 synthesis algorithms | Subtractive, FM (multi-op), Drum (kick/snare/hihat), Formant (vowels), Additive (64 partials), Vocoder, Granular (64 grains), Physical (Karplus-Strong + Waveguide) |
 
 ---
@@ -79,7 +79,7 @@ Per CLAUDE.md P(-1) process:
 
 ---
 
-## ~~Phase 3 — New Primitive Modules~~ COMPLETE (Traditional)
+## ~~Phase 3 — New Primitive Modules~~ COMPLETE
 
 > **Effort**: Large | **Prerequisite**: Phase 2
 > **Goal**: Add the missing synthesis primitives that shruti-instruments and shruti-dsp currently provide inline.
@@ -144,11 +144,15 @@ Per CLAUDE.md P(-1) process:
 | # | Item | Effort | Notes |
 |---|------|--------|-------|
 | 5A | **SIMD-ready buffer processing** | Medium | Ensure all `process_buffer` / `fill_buffer` methods work on aligned slices. Document SIMD extension points for dhvani. |
-| 5B | **Per-buffer coefficient caching** | Small | All filters, oscillators, envelopes: recompute coefficients only on parameter change, not per-sample. Systematic audit. |
+| 5B | **Per-buffer coefficient caching** | Small | All filters, oscillators, envelopes: recompute coefficients only on parameter change, not per-sample. Systematic audit. Includes `FormantSynth::morph` per-sample biquad recompute. |
 | 5C | **Benchmark suite expansion** | Medium | Every new module gets criterion benchmarks. Target: <1us per 1024-sample buffer for core primitives. |
-| 5D | **Allocation audit** | Small | Zero allocations in all `process_sample` / `next_sample` hot paths. Verify with `#[global_allocator]` counting allocator in tests. |
+| 5D | **Allocation audit** | Small | Zero allocations in all `process_sample` / `next_sample` hot paths. Verify with `#[global_allocator]` counting allocator in tests. Includes converting `FormantFilter` Vec to fixed array. |
 | 5E | **Documentation** | Medium | Module-level docs, algorithm references, usage examples for each synthesis algorithm. |
 | 5F | **Feature gates** | Small | Optional modules behind feature flags. Default = core primitives. `synthesis` flag for Phase 4 algorithms. `dynamics` for compressor/limiter/gate. `eq` for EQ modules. |
+| 5G | **AdditiveSynth Nyquist re-check** | Small | `set_fundamental` and `set_partial` must re-zero partials that exceed Nyquist. Currently only checked at construction. Can cause aliasing if fundamental is raised. |
+| 5H | **Missing `is_active()` on synths** | Small | `AdditiveSynth`, `KarplusStrong`, `Waveguide`, `GranularEngine` lack `is_active()`. Consumers doing voice allocation need idle detection. KS/Waveguide: check output amplitude < threshold. Additive/Granular: check if any grains/partials active. |
+| 5I | **Granular hermite interpolation** | Small | `GranularEngine` source reading uses linear interpolation. Upgrade to `dsp_util::hermite_interpolate` for less aliasing on pitch-shifted grains. |
+| 5J | **Vocoder band Q scaling** | Small | Fixed Q=4.0 for all bands. Ideally Q should scale with band spacing for consistent bandwidth coverage across the spectrum. |
 
 ---
 

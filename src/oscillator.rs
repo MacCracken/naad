@@ -4,6 +4,7 @@
 //! along with basic sine, triangle, and noise generators.
 
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use crate::error::{self, Result};
 use crate::noise;
@@ -118,6 +119,7 @@ impl Oscillator {
             _ => None,
         };
 
+        debug!(?waveform, frequency, sample_rate, "oscillator created");
         Ok(Self {
             waveform,
             frequency,

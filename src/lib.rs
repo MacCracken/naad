@@ -32,6 +32,7 @@
 //! ## Feature Flags
 //!
 //! - `logging` — Enable tracing-subscriber for structured logging output
+//! - `acoustics` — Room simulation, convolution reverb, binaural, FDN, analysis, ambisonics (via goonj)
 
 pub mod delay;
 pub mod dsp_util;
@@ -53,6 +54,9 @@ pub mod voice;
 pub mod wavetable;
 
 pub mod synth;
+
+#[cfg(feature = "acoustics")]
+pub mod acoustics;
 
 pub use error::{NaadError, Result};
 
