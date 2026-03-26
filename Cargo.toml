@@ -1,0 +1,32 @@
+[package]
+name = "naad"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "GPL-3.0"
+description = "naad — Audio synthesis primitives: oscillators, filters, envelopes, modulation, wavetables, effects"
+homepage = "https://github.com/MacCracken/naad"
+repository = "https://github.com/MacCracken/naad"
+readme = "README.md"
+documentation = "https://docs.rs/naad"
+keywords = ["synthesis", "audio", "dsp", "oscillator", "filter"]
+categories = ["multimedia::audio"]
+exclude = [".claude/", ".github/", "docs/", "scripts/"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"], optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+serde_json = "1"
+
+[features]
+default = []
+logging = ["dep:tracing-subscriber"]
+
+[[bench]]
+name = "benchmarks"
+harness = false
