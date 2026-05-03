@@ -56,7 +56,12 @@ impl GrainWindow {
     }
 }
 
-/// A single grain: a windowed fragment of the source buffer.
+/// A single grain in the [`GranularEngine`] pool.
+///
+/// A grain is one windowed slice of the source buffer, played back at
+/// `playback_rate` (1.0 = original pitch) with the configured `window`
+/// applied across its `duration_samples` lifetime. Grains are owned by
+/// the engine — consumers do not construct them directly.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Grain {
     /// Starting position in the source buffer (fractional sample).

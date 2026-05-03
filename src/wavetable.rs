@@ -195,6 +195,7 @@ impl WavetableOscillator {
 
     /// Generate the next sample with linear interpolation.
     #[inline]
+    #[must_use]
     pub fn next_sample(&mut self) -> f32 {
         let sample = self.table.read_interpolated(self.phase);
 
@@ -308,6 +309,7 @@ impl MorphWavetable {
 
     /// Generate the next sample, interpolating between wavetables.
     #[inline]
+    #[must_use]
     pub fn next_sample(&mut self) -> f32 {
         let num_tables = self.tables.len();
         let sample = if num_tables == 1 {

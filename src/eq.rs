@@ -8,12 +8,17 @@ use serde::{Deserialize, Serialize};
 use crate::error::Result;
 use crate::filter::{BiquadFilter, FilterType};
 
-/// A single parametric EQ band.
+/// One band of a [`ParametricEq`].
+///
+/// Wraps a [`BiquadFilter`] (configured at band-add time with type, frequency,
+/// Q, and gain) plus an `enabled` toggle so bands can be bypassed without
+/// removing them. Disabled bands are skipped during processing — their state
+/// is preserved but contributes no filtering.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EqBand {
     /// The underlying biquad filter.
     filter: BiquadFilter,
-    /// Whether this band is enabled.
+    /// Whether this band is enabled. When `false`, the band is bypassed.
     pub enabled: bool,
 }
 
@@ -72,6 +77,7 @@ impl ParametricEq {
 
     /// Process a single sample through all enabled bands in series.
     #[inline]
+    #[must_use]
     pub fn process_sample(&mut self, input: f32) -> f32 {
         let mut out = input;
         for band in &mut self.bands {
@@ -167,6 +173,7 @@ impl GraphicEq {
 
     /// Process a single sample.
     #[inline]
+    #[must_use]
     pub fn process_sample(&mut self, input: f32) -> f32 {
         self.eq.process_sample(input)
     }
@@ -228,6 +235,7 @@ impl DeEsser {
 
     /// Process a single sample.
     #[inline]
+    #[must_use]
     pub fn process_sample(&mut self, input: f32) -> f32 {
         // Sidechain: bandpass the input to detect sibilance
         let detected = self.detector_filter.process_sample(input);

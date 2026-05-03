@@ -227,6 +227,7 @@ impl BiquadFilter {
     /// Uses Direct Form II Transposed for numerical stability.
     /// State variables are flushed to prevent denormal slowdowns.
     #[inline]
+    #[must_use]
     pub fn process_sample(&mut self, input: f32) -> f32 {
         let output = self.b0 * input + self.z1;
         self.z1 = crate::flush_denormal(self.b1 * input - self.a1 * output + self.z2);
@@ -398,6 +399,7 @@ impl StateVariableFilter {
     ///
     /// State variables are flushed to prevent denormal slowdowns.
     #[inline]
+    #[must_use]
     pub fn process_sample(&mut self, input: f32) -> SvfOutput {
         let v3 = input - self.ic2eq;
         let v1 = self.a1 * self.ic1eq + self.a2 * v3;
@@ -423,6 +425,7 @@ impl StateVariableFilter {
     ///
     /// Convenience method — internally computes all outputs.
     #[inline]
+    #[must_use]
     pub fn process_sample_lowpass(&mut self, input: f32) -> f32 {
         self.process_sample(input).low_pass
     }

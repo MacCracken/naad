@@ -94,6 +94,7 @@ impl FdnReverb {
     ///
     /// Applies wet/dry mix to the output.
     #[inline]
+    #[must_use]
     pub fn process_sample(&mut self, input: f32) -> f32 {
         // Lazily reconstruct Fdn after deserialization
         if self.fdn.is_none() {
@@ -144,7 +145,7 @@ mod tests {
     fn test_fdn_produces_reverb_tail() {
         let mut fdn = FdnReverb::new(10.0, 8.0, 3.0, 1.0, 48000, 1.0).unwrap();
         // Feed an impulse
-        fdn.process_sample(1.0);
+        let _ = fdn.process_sample(1.0);
         // Check for reverb tail
         let mut has_tail = false;
         for _ in 0..10000 {
@@ -160,7 +161,7 @@ mod tests {
     #[test]
     fn test_fdn_output_finite() {
         let mut fdn = FdnReverb::new(10.0, 8.0, 3.0, 0.5, 48000, 1.0).unwrap();
-        fdn.process_sample(1.0);
+        let _ = fdn.process_sample(1.0);
         for _ in 0..5000 {
             let out = fdn.process_sample(0.0);
             assert!(out.is_finite(), "output should be finite");

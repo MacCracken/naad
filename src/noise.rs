@@ -107,6 +107,7 @@ impl NoiseGenerator {
 
     /// Generate the next noise sample.
     #[inline]
+    #[must_use]
     pub fn next_sample(&mut self) -> f32 {
         match self.noise_type {
             NoiseType::White => self.white_noise(),

@@ -12,14 +12,21 @@ use crate::error::Result;
 /// Maximum number of partials supported.
 const MAX_PARTIALS: usize = 64;
 
-/// A single partial: frequency ratio and amplitude.
+/// One sine partial in an [`AdditiveSynth`] bank.
+///
+/// A partial is `amplitude * sin(2π * (fundamental * frequency_ratio) * t + phase)`.
+/// `frequency_ratio` is relative to the synth's fundamental (e.g. 1.0 = unison,
+/// 2.0 = octave above, 1.5 = perfect fifth). The `phase` field is an initial
+/// offset in turns (0..1); the engine maintains the running phase separately.
+/// Partials whose absolute frequency would exceed Nyquist are zeroed by the
+/// engine to prevent aliasing.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Partial {
     /// Frequency multiplier relative to the fundamental.
     pub frequency_ratio: f32,
     /// Amplitude (0.0 to 1.0).
     pub amplitude: f32,
-    /// Phase offset (0..1).
+    /// Initial phase offset in turns (0..1).
     pub phase: f32,
 }
 

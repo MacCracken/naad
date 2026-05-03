@@ -181,6 +181,7 @@ impl Reverb {
 
     /// Process a mono input and return stereo output (left, right).
     #[inline]
+    #[must_use]
     pub fn process_sample(&mut self, input: f32) -> (f32, f32) {
         // Pre-delay
         self.pre_delay.write(input);
@@ -261,7 +262,7 @@ mod tests {
         let mut rev = Reverb::new(0.8, 0.3, 10.0, 1.0, 44100.0).unwrap();
         rev.width = 1.0;
         // Feed impulse and collect stereo output
-        rev.process_sample(1.0);
+        let _ = rev.process_sample(1.0);
         let mut diff_found = false;
         for _ in 0..5000 {
             let (l, r) = rev.process_sample(0.0);
@@ -284,7 +285,7 @@ mod tests {
     #[test]
     fn test_reverb_no_blow_up() {
         let mut rev = Reverb::new(0.99, 0.0, 0.0, 1.0, 44100.0).unwrap();
-        rev.process_sample(1.0);
+        let _ = rev.process_sample(1.0);
         for _ in 0..100_000 {
             let (l, r) = rev.process_sample(0.0);
             assert!(l.abs() < 10.0, "reverb should not blow up: {l}");

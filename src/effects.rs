@@ -90,6 +90,7 @@ impl Chorus {
 
     /// Process a single sample through the chorus.
     #[inline]
+    #[must_use]
     pub fn process_sample(&mut self, input: f32) -> f32 {
         let mut wet = 0.0f32;
 
@@ -163,6 +164,7 @@ impl Flanger {
 
     /// Process a single sample through the flanger.
     #[inline]
+    #[must_use]
     pub fn process_sample(&mut self, input: f32) -> f32 {
         let lfo_val = self.lfo.next_sample();
         let delay = self.base_delay + self.depth * (lfo_val * 0.5 + 0.5);
@@ -244,6 +246,7 @@ impl Phaser {
 
     /// Process a single sample through the phaser.
     #[inline]
+    #[must_use]
     pub fn process_sample(&mut self, input: f32) -> f32 {
         let lfo_val = self.lfo.next_sample();
         // Map LFO to frequency range (logarithmic)

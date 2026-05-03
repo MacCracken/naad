@@ -102,7 +102,7 @@ fn adsr_sustain_holds() {
 
     // Run through attack and decay (about 88 samples for 2ms total)
     for _ in 0..500 {
-        env.next_value();
+        let _ = env.next_value();
     }
 
     // Now we should be at sustain — check that it holds steady
@@ -132,7 +132,7 @@ fn biquad_lp_minus_3db_at_cutoff() {
     // Let the filter settle
     for _ in 0..10000 {
         let input = osc.next_sample();
-        filter.process_sample(input);
+        let _ = filter.process_sample(input);
     }
 
     // Measure peak amplitude

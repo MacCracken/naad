@@ -118,6 +118,7 @@ impl Compressor {
 
     /// Process a single sample.
     #[inline]
+    #[must_use]
     pub fn process_sample(&mut self, input: f32) -> f32 {
         let env = self.detector.process(input);
         let env_db = dsp_util::amplitude_to_db(env);
@@ -166,6 +167,7 @@ impl Limiter {
 
     /// Process a single sample.
     #[inline]
+    #[must_use]
     pub fn process_sample(&mut self, input: f32) -> f32 {
         self.compressor.process_sample(input)
     }
@@ -228,6 +230,7 @@ impl NoiseGate {
 
     /// Process a single sample.
     #[inline]
+    #[must_use]
     pub fn process_sample(&mut self, input: f32) -> f32 {
         let env = self.detector.process(input);
         let env_db = dsp_util::amplitude_to_db(env);
@@ -295,7 +298,7 @@ mod tests {
         let mut comp = Compressor::new(-20.0, 4.0, 0.0, 0.01, 44100.0);
         // Feed loud signal to build up envelope
         for _ in 0..1000 {
-            comp.process_sample(1.0);
+            let _ = comp.process_sample(1.0);
         }
         let out = comp.process_sample(1.0);
         // Output should be reduced
@@ -319,7 +322,7 @@ mod tests {
         let mut lim = Limiter::new(-0.1, 0.01, 44100.0);
         // Feed loud signal
         for _ in 0..1000 {
-            lim.process_sample(2.0);
+            let _ = lim.process_sample(2.0);
         }
         let out = lim.process_sample(2.0);
         assert!(out < 2.0, "limiter should reduce signal");
@@ -330,7 +333,7 @@ mod tests {
         let mut gate = NoiseGate::new(-40.0, 0.001, 0.01, 0.01, 44100.0);
         // Very quiet signal
         for _ in 0..10000 {
-            gate.process_sample(0.001);
+            let _ = gate.process_sample(0.001);
         }
         let out = gate.process_sample(0.001);
         assert!(
@@ -344,7 +347,7 @@ mod tests {
         let mut gate = NoiseGate::new(-40.0, 0.0, 0.01, 0.01, 44100.0);
         // Loud signal should pass — run enough samples for gate to fully open
         for _ in 0..2000 {
-            gate.process_sample(0.5);
+            let _ = gate.process_sample(0.5);
         }
         let out = gate.process_sample(0.5);
         assert!(out > 0.3, "gate should pass loud signal, got {out}");

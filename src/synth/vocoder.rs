@@ -11,7 +11,13 @@ use serde::{Deserialize, Serialize};
 use crate::error::Result;
 use crate::filter::{BiquadFilter, FilterType};
 
-/// A single vocoder band: analysis + synthesis filters + envelope follower.
+/// One frequency band of a [`Vocoder`].
+///
+/// Holds a parallel pair of bandpass filters — `analysis_filter` extracts
+/// the modulator's energy in this band, `synthesis_filter` carves the same
+/// band out of the carrier — plus an envelope follower (with separate
+/// attack/release coefficients) that smooths the modulator level before
+/// it amplitude-modulates the filtered carrier.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VocoderBand {
     /// Bandpass filter for the modulator signal.
@@ -32,6 +38,7 @@ impl VocoderBand {
     /// Returns the carrier filtered and amplitude-modulated by the
     /// modulator's envelope.
     #[inline]
+    #[must_use]
     pub fn process(&mut self, modulator: f32, carrier: f32) -> f32 {
         // Bandpass the modulator and extract envelope.
         let mod_filtered = self.analysis_filter.process_sample(modulator);

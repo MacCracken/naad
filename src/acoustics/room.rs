@@ -112,6 +112,7 @@ impl RoomReverb {
     ///
     /// Uses direct convolution with the stored impulse response.
     #[inline]
+    #[must_use]
     pub fn process_sample(&mut self, input: f32) -> f32 {
         let ir_len = self.impulse_response.len();
         if ir_len == 0 {

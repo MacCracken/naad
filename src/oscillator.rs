@@ -156,6 +156,7 @@ impl Oscillator {
 
     /// Generate the next sample.
     #[inline]
+    #[must_use]
     pub fn next_sample(&mut self) -> f32 {
         let dt = self.phase_increment();
         let t = self.phase;
@@ -441,6 +442,7 @@ impl UnisonOscillator {
 
     /// Generate the next mono sample (all voices averaged).
     #[inline]
+    #[must_use]
     pub fn next_sample(&mut self) -> f32 {
         if self.ratios_dirty {
             self.recompute_ratios();
@@ -637,6 +639,7 @@ impl SubOscillator {
 
     /// Generate the next sub-oscillator sample (scaled by level).
     #[inline]
+    #[must_use]
     pub fn next_sample(&mut self) -> f32 {
         self.osc.next_sample() * self.level
     }
@@ -730,6 +733,7 @@ impl HardSync {
     ///
     /// The slave produces audio; the master controls when the slave resets.
     #[inline]
+    #[must_use]
     pub fn next_sample(&mut self) -> f32 {
         let master_phase_before = self.master.phase;
         let _ = self.master.next_sample();

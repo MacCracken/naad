@@ -350,6 +350,7 @@ impl RingModulator {
     ///
     /// Multiplies the input by the modulator output.
     #[inline]
+    #[must_use]
     pub fn process_sample(&mut self, input: f32) -> f32 {
         input * self.modulator.next_sample()
     }

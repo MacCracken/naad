@@ -103,6 +103,7 @@ impl BinauralProcessor {
 
     /// Process a mono input sample into stereo (left, right) output.
     #[inline]
+    #[must_use]
     pub fn process_sample(&mut self, input: f32) -> (f32, f32) {
         let left_len = self.left_ir.len();
         let right_len = self.right_ir.len();

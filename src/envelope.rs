@@ -150,6 +150,7 @@ impl Adsr {
     ///
     /// Returns a value between 0.0 and 1.0.
     #[inline]
+    #[must_use]
     pub fn next_value(&mut self) -> f32 {
         let sr = self.sample_rate;
         match self.state {
@@ -293,6 +294,7 @@ impl MultiStageEnvelope {
 
     /// Generate the next envelope value.
     #[inline]
+    #[must_use]
     pub fn next_value(&mut self) -> f32 {
         if !self.active {
             return 0.0;
@@ -353,7 +355,7 @@ mod tests {
         env.gate_on();
         // Run through attack + decay
         for _ in 0..1000 {
-            env.next_value();
+            let _ = env.next_value();
         }
         // Should be at sustain level
         let val = env.next_value();
@@ -367,10 +369,10 @@ mod tests {
     fn test_adsr_release_to_zero() {
         let mut env = Adsr::new(0.0, 0.0, 1.0, 0.01).unwrap();
         env.gate_on();
-        env.next_value();
+        let _ = env.next_value();
         env.gate_off();
         for _ in 0..2000 {
-            env.next_value();
+            let _ = env.next_value();
         }
         assert!(!env.is_active());
     }
@@ -402,7 +404,7 @@ mod tests {
         env.trigger();
         assert!(env.is_active());
         for _ in 0..5000 {
-            env.next_value();
+            let _ = env.next_value();
         }
         assert!(!env.is_active());
     }

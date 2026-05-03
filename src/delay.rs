@@ -91,6 +91,7 @@ impl CombFilter {
 
     /// Process a single sample.
     #[inline]
+    #[must_use]
     pub fn process_sample(&mut self, input: f32) -> f32 {
         let delayed = self.delay_line.read(self.delay_samples);
         let output = input + self.feedback * crate::flush_denormal(delayed);
@@ -142,6 +143,7 @@ impl AllpassDelay {
 
     /// Process a single sample through the Schroeder allpass.
     #[inline]
+    #[must_use]
     pub fn process_sample(&mut self, input: f32) -> f32 {
         let delayed = self.delay_line.read(self.delay_samples);
         let output = -self.coefficient * input + delayed;

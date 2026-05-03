@@ -103,6 +103,7 @@ impl ConvolutionReverb {
     ///
     /// Returns a mix of dry input and wet convolved output.
     #[inline]
+    #[must_use]
     pub fn process_sample(&mut self, input: f32) -> f32 {
         let ir_len = self.ir.len();
         if ir_len == 0 {
