@@ -376,4 +376,98 @@ mod tests {
         let back: NoiseGate = serde_json::from_str(&json).unwrap();
         assert!((gate.threshold_db - back.threshold_db).abs() < f32::EPSILON);
     }
+
+    /// O14 — Compressor with `ratio=1.0` is unity gain even above threshold.
+    ///
+    /// At 1:1 the gain-reduction formula collapses to zero dB, so a loud
+    /// signal must pass through unchanged once the envelope has settled.
+    /// Verifies the formula has no off-by-one or branch error at the boundary.
+    #[test]
+    fn test_compressor_ratio_one_is_unity() {
+        let mut comp = Compressor::new(-20.0, 1.0, 0.0, 0.01, 44100.0);
+        // Settle the envelope detector with a loud above-threshold signal.
+        for _ in 0..2000 {
+            let _ = comp.process_sample(1.0);
+        }
+        let out = comp.process_sample(1.0);
+        assert!(
+            (out - 1.0).abs() < 1e-3,
+            "ratio=1.0 must be unity gain, got {out}"
+        );
+    }
+
+    /// O14 — Hold timer keeps the gate open after the signal drops below threshold.
+    ///
+    /// After a loud burst opens the gate, switching to a small sub-threshold
+    /// signal should still pass through the gate during the hold window, then
+    /// close after the timer expires. Distinguishes hold from release.
+    #[test]
+    fn test_noise_gate_hold_timer_keeps_gate_open() {
+        let sr = 44100.0;
+        let hold = 0.1; // 100 ms — ample window to observe both phases
+        let mut gate = NoiseGate::new(-10.0, 0.0, hold, 0.001, sr);
+
+        // Open the gate with a loud above-threshold signal.
+        for _ in 0..1000 {
+            let _ = gate.process_sample(1.0);
+        }
+
+        // Switch to a small sub-threshold signal; let the envelope detector
+        // settle below threshold (1ms release ≪ 500 samples).
+        for _ in 0..500 {
+            let _ = gate.process_sample(0.05);
+        }
+
+        // Still inside the hold window — gate should remain open.
+        let mid_hold = gate.process_sample(0.05);
+        assert!(
+            mid_hold > 0.04,
+            "gate must remain open during hold window, got {mid_hold}"
+        );
+
+        // Run past hold expiry plus enough samples for the release to take effect.
+        let hold_samples = (hold * sr) as usize;
+        for _ in 0..hold_samples + 5000 {
+            let _ = gate.process_sample(0.05);
+        }
+        let after_hold = gate.process_sample(0.05);
+        assert!(
+            after_hold < 0.005,
+            "gate must close after hold expires, got {after_hold}"
+        );
+    }
+
+    /// O14 — Limiter passes input that's exactly at the ceiling unchanged.
+    ///
+    /// The compressor branch uses `input_db <= threshold`, so a signal sitting
+    /// precisely on the ceiling should incur zero gain reduction. Anything
+    /// above must be brought back down. Catches a `<` vs `<=` regression at
+    /// the boundary.
+    #[test]
+    fn test_limiter_ceiling_exact_match_passes_through() {
+        let ceiling_db = -3.0;
+        let amp_at_ceiling = 10f32.powf(ceiling_db / 20.0);
+        let mut lim = Limiter::new(ceiling_db, 0.01, 44100.0);
+
+        // Settle envelope at exactly the ceiling.
+        for _ in 0..2000 {
+            let _ = lim.process_sample(amp_at_ceiling);
+        }
+        let out_at = lim.process_sample(amp_at_ceiling);
+        assert!(
+            (out_at - amp_at_ceiling).abs() < 1e-3,
+            "input at ceiling must pass through, got {out_at} (expected {amp_at_ceiling})"
+        );
+
+        // Now push above ceiling — limiter must reduce it.
+        let above = amp_at_ceiling * 2.0;
+        for _ in 0..2000 {
+            let _ = lim.process_sample(above);
+        }
+        let out_above = lim.process_sample(above);
+        assert!(
+            out_above < above,
+            "input above ceiling must be reduced, got {out_above} (input {above})"
+        );
+    }
 }

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **O12 — granular pitch-shift test**: `test_pitch_shift_changes_output_frequency` renders a 200 Hz sine source at `pitch_shift=1.0` vs `2.0` and asserts the zero-crossing density rises by ≥1.5×, confirming the playback rate actually retunes the output.
+- **O13 — granular spray variation test**: `test_spray_produces_position_variance` runs the engine with `spray=0` and `spray=50ms` over a ramp source and asserts the rendered buffers diverge meaningfully (total |diff| > 1.0). Replaces the previous finiteness-only check with a real behavioral assertion.
+- **O14 — dynamics edge cases**: `test_compressor_ratio_one_is_unity` (1:1 above threshold = no reduction), `test_noise_gate_hold_timer_keeps_gate_open` (gate stays open during hold window after env drops below threshold, then closes), `test_limiter_ceiling_exact_match_passes_through` (signal at ceiling passes unchanged, signal above is reduced) — covers boundary branches that previous tests missed.
+- **O15 — granular serde functional test**: `test_serde_functional_reload` proves a deserialized engine is silent without a source, and that reloading a source post-deser produces audible output using the preserved configuration. Strengthens the field-only roundtrip check.
 - **O16 — struct-level docs**: Expanded terse one-liners on `Grain`, `EqBand`, `VocoderBand`, `Partial` to describe their role in the parent type, field semantics (e.g. `Partial.phase` units), and lifecycle (e.g. engine-owned vs. user-constructed).
 - **O17 — `#[must_use]` policy**: All sample-returning methods (`next_sample`, `next_value`, `next_sample_stereo`, `process_sample`, `process_sample_lowpass`, `process`) now carry `#[must_use]` — discarding a DSP sample is almost always a bug. 30 sites annotated across `delay`, `dynamics`, `effects`, `envelope`, `eq`, `filter`, `modulation`, `noise`, `oscillator`, `reverb`, `wavetable`, `synth::vocoder`, `acoustics::{binaural,convolution,fdn_reverb,room}`. Tests that intentionally advance state without consuming output now use `let _ = …`.
 

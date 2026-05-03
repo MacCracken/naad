@@ -376,4 +376,129 @@ mod tests {
         engine.fill_buffer(&mut buf);
         assert!(buf.iter().all(|s| s.is_finite()));
     }
+
+    /// O13 — Verify spray > 0 produces time-varying grain start positions.
+    ///
+    /// A ramp source makes grain start position observable in the output:
+    /// without spray every grain starts at the same source index and the
+    /// engine is fully deterministic, so changing only the spray amount
+    /// must produce a meaningfully different output stream.
+    #[test]
+    fn test_spray_produces_position_variance() {
+        let source: Vec<f32> = (0..44100).map(|i| i as f32 / 44100.0).collect();
+
+        let make = |spray_ms: f32| {
+            let mut e = GranularEngine::new(44100.0);
+            e.set_source(source.clone());
+            e.set_grain_rate(100.0);
+            e.set_grain_duration(20.0);
+            e.set_spray(spray_ms);
+            e
+        };
+
+        let mut no_spray = make(0.0);
+        let mut sprayed = make(50.0);
+
+        let mut buf_a = [0.0f32; 4096];
+        let mut buf_b = [0.0f32; 4096];
+        no_spray.fill_buffer(&mut buf_a);
+        sprayed.fill_buffer(&mut buf_b);
+
+        let diff: f32 = buf_a
+            .iter()
+            .zip(buf_b.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum();
+        assert!(
+            diff > 1.0,
+            "spray > 0 must change grain positions vs. spray=0, got total diff {diff}"
+        );
+    }
+
+    /// O12 — Verify pitch shift actually changes the output frequency.
+    ///
+    /// Counts zero crossings on the rendered output for two pitch settings.
+    /// At `pitch_shift=2.0` the source is read twice as fast, so the dominant
+    /// output frequency must increase — zero-crossing density should rise
+    /// well above the unity-rate baseline.
+    #[test]
+    fn test_pitch_shift_changes_output_frequency() {
+        let source: Vec<f32> = (0..44100)
+            .map(|i| (i as f32 / 44100.0 * 200.0 * std::f32::consts::TAU).sin())
+            .collect();
+
+        let make = |shift: f32| {
+            let mut e = GranularEngine::new(44100.0);
+            e.set_source(source.clone());
+            e.set_grain_rate(10.0);
+            e.set_grain_duration(80.0); // long grains expose pitch
+            e.set_pitch_shift(shift);
+            e
+        };
+
+        let mut unity = make(1.0);
+        let mut up = make(2.0);
+
+        let mut buf_unity = [0.0f32; 8192];
+        let mut buf_up = [0.0f32; 8192];
+        unity.fill_buffer(&mut buf_unity);
+        up.fill_buffer(&mut buf_up);
+
+        let zc = |buf: &[f32]| -> usize {
+            buf.windows(2)
+                .filter(|w| w[0] != 0.0 && w[0].signum() != w[1].signum())
+                .count()
+        };
+        let zc_unity = zc(&buf_unity);
+        let zc_up = zc(&buf_up);
+
+        assert!(
+            zc_up >= zc_unity * 3 / 2,
+            "pitch_shift=2 must raise zero-crossing count meaningfully: \
+             zc_unity={zc_unity}, zc_up={zc_up}"
+        );
+    }
+
+    /// O15 — Functional serde test: roundtrip → reload source → verify output.
+    ///
+    /// `source` is `#[serde(skip)]`, so a deserialized engine is silent until
+    /// the consumer reloads a buffer. This proves the post-deser engine is
+    /// usable (config preserved, internal state intact) once a source is
+    /// supplied — not just that fields roundtrip.
+    #[test]
+    fn test_serde_functional_reload() {
+        let mut engine = GranularEngine::new(44100.0);
+        engine.set_grain_rate(60.0);
+        engine.set_grain_duration(25.0);
+        engine.set_pitch_shift(1.25);
+        engine.set_window(GrainWindow::Gaussian);
+
+        let json = serde_json::to_string(&engine).unwrap();
+        let mut back: GranularEngine = serde_json::from_str(&json).unwrap();
+
+        // No source → silence after deser.
+        let mut silent = [0.0f32; 512];
+        back.fill_buffer(&mut silent);
+        assert!(
+            silent.iter().all(|&s| s == 0.0),
+            "deserialized engine without source should be silent"
+        );
+
+        // Reload a source — engine should now produce output using preserved config.
+        let source: Vec<f32> = (0..44100)
+            .map(|i| (i as f32 / 44100.0 * 440.0 * std::f32::consts::TAU).sin())
+            .collect();
+        back.set_source(source);
+
+        let mut out = [0.0f32; 4096];
+        back.fill_buffer(&mut out);
+        assert!(
+            out.iter().any(|&s| s.abs() > 0.01),
+            "post-reload engine should produce audible output"
+        );
+        assert!(
+            out.iter().all(|s| s.is_finite()),
+            "all samples should be finite"
+        );
+    }
 }
