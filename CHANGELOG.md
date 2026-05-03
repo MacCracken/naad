@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **O1 — `oscillator.rs` (949 LOC) split into `oscillator/{mod,core,sub,sync,unison}.rs`**: Largest single source file in the crate is now five files; the heaviest is `core.rs` at 403 LOC (Waveform + Oscillator + polyblep + the stateless waveform helper). Tests follow the code into per-submodule `mod tests`. Public API is preserved via re-exports in `oscillator/mod.rs` — external callers continue to use `naad::oscillator::Oscillator` etc. with no change. `HardSync` now uses the public `Oscillator::phase()` accessor instead of the private field (it crossed a module boundary). The unison-oscillator initial-phase RNG also moved to the canonical `dsp_util::xorshift32_unit_f32` (a 5th call site that O2 missed).
+
 - **O3 — `modulation::FmSynth` → `modulation::FmModulator`**: Disambiguates the simple two-operator FM primitive in `modulation` from the multi-operator [`synth::fm::FmSynthEngine`]. **Breaking**: imports/usages must update the type name. Doc comment now also points readers at `FmSynthEngine` for serial/stack/parallel topologies.
 - **O4 — `dynamics::EnvelopeDetector` → `dynamics::LevelDetector`**: Disambiguates from the unrelated [`envelope::EnvelopeState`] in the ADSR module — both prefixes shared "Envelope" for entirely different concepts. **Breaking** for direct importers; the type is also re-used internally by `Compressor` and `NoiseGate`, but those are unaffected.
 
