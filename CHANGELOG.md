@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 1.1.0 Organization & Cleanup
+
+### Changed
+
+- **Deps**: criterion 0.5 → 0.8 (dev-dep). Swapped `criterion::black_box` for `std::hint::black_box` in `benches/benchmarks.rs` (deprecated upstream).
+- **deny.toml**: removed 4 unused license allowances (BSD-3-Clause, deprecated GPL-3.0, ISC, Unicode-DFS-2016) — only MIT, Apache-2.0, GPL-3.0-only, Unicode-3.0 are encountered in the dep tree.
+
 ## [1.0.0] - Phase 6: Integration Validation + Stable API
 
 ### Added
