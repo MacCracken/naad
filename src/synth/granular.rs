@@ -298,15 +298,10 @@ impl GranularEngine {
         };
     }
 
-    /// Simple xorshift PRNG returning f32 in [0, 1).
+    /// Random `f32` in `[0, 1)` from the engine's spray-jitter PRNG.
     #[inline]
     fn next_rng_f32(&mut self) -> f32 {
-        let mut x = self.rng_state;
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        self.rng_state = if x == 0 { 1 } else { x };
-        (x as f32) / (u32::MAX as f32)
+        crate::dsp_util::xorshift32_unit_f32(&mut self.rng_state)
     }
 }
 

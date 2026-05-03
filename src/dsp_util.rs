@@ -198,6 +198,43 @@ pub fn power_spectrum(input: &[f32]) -> Vec<f32> {
         .collect()
 }
 
+/// One step of the Marsaglia xorshift32 PRNG.
+///
+/// Updates `state` in place and returns the new value. Includes a
+/// zero-state guard — `xorshift32(0) = 0` would otherwise loop forever,
+/// so a zero state is silently reset to `1` before stepping.
+///
+/// This is the canonical xorshift implementation used by every PRNG
+/// site in the crate (white/pink/brown noise, granular spray jitter,
+/// drum click transients, physical-modeling exciters). Use it directly
+/// instead of inlining the three-XOR sequence.
+#[inline]
+pub fn xorshift32(state: &mut u32) -> u32 {
+    if *state == 0 {
+        *state = 1;
+    }
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = x;
+    x
+}
+
+/// One step of [`xorshift32`] mapped to a signed `f32` in `[-1.0, 1.0)`.
+#[inline]
+#[must_use]
+pub fn xorshift32_signed_f32(state: &mut u32) -> f32 {
+    (xorshift32(state) as f32 / u32::MAX as f32) * 2.0 - 1.0
+}
+
+/// One step of [`xorshift32`] mapped to an unsigned `f32` in `[0.0, 1.0)`.
+#[inline]
+#[must_use]
+pub fn xorshift32_unit_f32(state: &mut u32) -> f32 {
+    xorshift32(state) as f32 / u32::MAX as f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,5 +389,41 @@ mod tests {
         assert_eq!(ps.len(), n / 2 + 1);
         // DC bin should have the most power
         assert!(ps[0] > ps[1]);
+    }
+
+    #[test]
+    fn test_xorshift32_zero_state_guard() {
+        // Without the guard, xorshift32(0) loops on 0 forever.
+        let mut state = 0u32;
+        let v = xorshift32(&mut state);
+        assert_ne!(v, 0, "zero-state guard must produce non-zero output");
+        assert_ne!(state, 0, "state must not remain zero after step");
+    }
+
+    #[test]
+    fn test_xorshift32_deterministic() {
+        let mut a = 42u32;
+        let mut b = 42u32;
+        for _ in 0..100 {
+            assert_eq!(xorshift32(&mut a), xorshift32(&mut b));
+        }
+    }
+
+    #[test]
+    fn test_xorshift32_signed_range() {
+        let mut state = 12345u32;
+        for _ in 0..10_000 {
+            let v = xorshift32_signed_f32(&mut state);
+            assert!((-1.0..1.0).contains(&v), "signed PRNG out of range: {v}");
+        }
+    }
+
+    #[test]
+    fn test_xorshift32_unit_range() {
+        let mut state = 67890u32;
+        for _ in 0..10_000 {
+            let v = xorshift32_unit_f32(&mut state);
+            assert!((0.0..1.0).contains(&v), "unit PRNG out of range: {v}");
+        }
     }
 }

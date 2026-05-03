@@ -150,15 +150,10 @@ impl KarplusStrong {
         self.frequency
     }
 
-    /// Simple xorshift noise.
+    /// Signed-`f32` noise sample for the exciter.
     #[inline]
     fn next_noise(&mut self) -> f32 {
-        let mut x = self.noise_state;
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        self.noise_state = if x == 0 { 1 } else { x };
-        (x as f32 / u32::MAX as f32) * 2.0 - 1.0
+        crate::dsp_util::xorshift32_signed_f32(&mut self.noise_state)
     }
 }
 

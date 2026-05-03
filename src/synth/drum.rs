@@ -164,18 +164,10 @@ impl KickDrum {
         self.active
     }
 
-    /// Simple xorshift noise for the click transient.
+    /// Signed-`f32` noise sample for the click transient.
     #[inline]
     fn next_noise(&mut self) -> f32 {
-        let mut x = self.noise_state;
-        if x == 0 {
-            x = 42; // Guard: xorshift(0) = 0 forever
-        }
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        self.noise_state = x;
-        (x as f32 / u32::MAX as f32) * 2.0 - 1.0
+        crate::dsp_util::xorshift32_signed_f32(&mut self.noise_state)
     }
 }
 
@@ -292,17 +284,10 @@ impl SnareDrum {
         self.active
     }
 
+    /// Signed-`f32` noise sample for the snare body.
     #[inline]
     fn next_noise(&mut self) -> f32 {
-        let mut x = self.noise_state;
-        if x == 0 {
-            x = 42; // Guard: xorshift(0) = 0 forever
-        }
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        self.noise_state = x;
-        (x as f32 / u32::MAX as f32) * 2.0 - 1.0
+        crate::dsp_util::xorshift32_signed_f32(&mut self.noise_state)
     }
 }
 

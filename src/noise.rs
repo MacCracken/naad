@@ -28,21 +28,10 @@ impl Xorshift32 {
         }
     }
 
-    #[inline]
-    fn next(&mut self) -> u32 {
-        let mut x = self.state;
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        self.state = x;
-        x
-    }
-
     /// Generate a random f32 in [-1.0, 1.0).
     #[inline]
     fn next_f32(&mut self) -> f32 {
-        // Map u32 to [-1.0, 1.0)
-        (self.next() as f32 / u32::MAX as f32) * 2.0 - 1.0
+        crate::dsp_util::xorshift32_signed_f32(&mut self.state)
     }
 }
 
@@ -172,15 +161,7 @@ impl NoiseGenerator {
 /// For convenience when you don't need persistent state.
 #[must_use]
 pub fn white_noise_sample(seed: &mut u32) -> f32 {
-    let mut x = *seed;
-    if x == 0 {
-        x = 1;
-    }
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    *seed = x;
-    (x as f32 / u32::MAX as f32) * 2.0 - 1.0
+    crate::dsp_util::xorshift32_signed_f32(seed)
 }
 
 #[cfg(test)]
