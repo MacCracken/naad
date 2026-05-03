@@ -10,6 +10,11 @@ use serde::{Deserialize, Serialize};
 /// Maximum number of simultaneous grains.
 const MAX_GRAINS: usize = 64;
 
+/// Default grain pool for serde reconstruction (all slots inactive).
+fn default_grain_pool() -> [Grain; MAX_GRAINS] {
+    [Grain::default(); MAX_GRAINS]
+}
+
 /// Window function applied to each grain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -104,8 +109,12 @@ pub struct GranularEngine {
     /// Source audio buffer.
     #[serde(skip)]
     source: Vec<f32>,
-    /// Grain pool (fixed size).
-    grains: Vec<Grain>,
+    /// Grain pool (fixed size). Skipped in serde for two reasons: serde 1.x
+    /// only auto-derives for arrays up to len 32, and the source buffer is
+    /// already `#[serde(skip)]` — active grains would be playing out of a
+    /// non-existent buffer after deserialization anyway.
+    #[serde(skip, default = "default_grain_pool")]
+    grains: [Grain; MAX_GRAINS],
     /// Grains spawned per second.
     grain_rate: f32,
     /// Grain duration in milliseconds.
@@ -132,7 +141,7 @@ impl GranularEngine {
     pub fn new(sample_rate: f32) -> Self {
         Self {
             source: Vec::new(),
-            grains: vec![Grain::default(); MAX_GRAINS],
+            grains: [Grain::default(); MAX_GRAINS],
             grain_rate: 20.0,
             grain_duration_ms: 50.0,
             pitch_shift: 1.0,

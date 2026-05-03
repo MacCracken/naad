@@ -71,12 +71,16 @@ impl Vowel {
 }
 
 /// Formant filter: a parallel bank of bandpass resonators.
+///
+/// Holds exactly 3 bands (F1/F2/F3), matching the standard vowel formant
+/// model used elsewhere in the module. Storage is a stack-allocated array —
+/// no heap indirection per sample.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FormantFilter {
     /// Bandpass filter per formant.
-    filters: Vec<BiquadFilter>,
+    filters: [BiquadFilter; NUM_FORMANTS],
     /// Amplitude per formant.
-    amplitudes: Vec<f32>,
+    amplitudes: [f32; NUM_FORMANTS],
 }
 
 impl FormantFilter {
@@ -84,18 +88,41 @@ impl FormantFilter {
     ///
     /// # Errors
     ///
-    /// Returns error if any filter parameters are invalid.
+    /// Returns [`crate::NaadError::InvalidParameter`] if `formants.len()` is
+    /// not exactly 3, or if any filter parameters are invalid.
     pub fn new(formants: &[(f32, f32, f32)], sample_rate: f32) -> Result<Self> {
-        let mut filters = Vec::with_capacity(formants.len());
-        let mut amplitudes = Vec::with_capacity(formants.len());
-
-        for &(freq, bw, amp) in formants {
-            // Q = freq / bandwidth.
-            let q = if bw > 0.0 { freq / bw } else { 1.0 };
-            let filter = BiquadFilter::new(FilterType::BandPass, sample_rate, freq, q)?;
-            filters.push(filter);
-            amplitudes.push(amp);
+        if formants.len() != NUM_FORMANTS {
+            return Err(crate::error::NaadError::InvalidParameter {
+                name: "formants".to_string(),
+                reason: format!(
+                    "expected exactly {NUM_FORMANTS} formant bands, got {}",
+                    formants.len()
+                ),
+            });
         }
+
+        let q = |freq: f32, bw: f32| if bw > 0.0 { freq / bw } else { 1.0 };
+        let filters: [BiquadFilter; NUM_FORMANTS] = [
+            BiquadFilter::new(
+                FilterType::BandPass,
+                sample_rate,
+                formants[0].0,
+                q(formants[0].0, formants[0].1),
+            )?,
+            BiquadFilter::new(
+                FilterType::BandPass,
+                sample_rate,
+                formants[1].0,
+                q(formants[1].0, formants[1].1),
+            )?,
+            BiquadFilter::new(
+                FilterType::BandPass,
+                sample_rate,
+                formants[2].0,
+                q(formants[2].0, formants[2].1),
+            )?,
+        ];
+        let amplitudes = [formants[0].2, formants[1].2, formants[2].2];
 
         Ok(Self {
             filters,

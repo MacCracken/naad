@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use goonj::impulse::{IrConfig, generate_ir};
 use goonj::room::AcousticRoom;
-use hisab::Vec3;
+use hisab::{Complex, Vec3};
 
 use crate::error::{NaadError, Result};
 
@@ -34,6 +34,15 @@ pub struct ConvolutionReverb {
     position: usize,
     /// Wet/dry mix (0.0 = fully dry, 1.0 = fully wet).
     pub mix: f32,
+    /// Reusable FFT scratch — IR in frequency domain.
+    #[serde(skip)]
+    scratch_ir: Vec<Complex>,
+    /// Reusable FFT scratch — input block in frequency domain.
+    #[serde(skip)]
+    scratch_in: Vec<Complex>,
+    /// Reusable FFT scratch — pointwise product / IFFT result.
+    #[serde(skip)]
+    scratch_product: Vec<Complex>,
 }
 
 impl ConvolutionReverb {
@@ -46,6 +55,9 @@ impl ConvolutionReverb {
             input_buffer: vec![0.0; len],
             position: 0,
             mix: mix.clamp(0.0, 1.0),
+            scratch_ir: Vec::new(),
+            scratch_in: Vec::new(),
+            scratch_product: Vec::new(),
         }
     }
 
@@ -132,8 +144,6 @@ impl ConvolutionReverb {
     /// Call this instead of `process_sample` in a loop for better performance
     /// when processing full buffers.
     pub fn process_block(&mut self, input: &[f32], output: &mut [f32]) {
-        use hisab::Complex;
-
         let ir_len = self.ir.len();
         if ir_len == 0 || input.is_empty() {
             for (o, &i) in output.iter_mut().zip(input.iter()) {
@@ -145,25 +155,26 @@ impl ConvolutionReverb {
         let block_len = input.len();
         // FFT size: next power of 2 >= ir_len + block_len - 1
         let fft_len = (ir_len + block_len - 1).next_power_of_two();
+        let zero = Complex::new(0.0, 0.0);
 
-        // Zero-pad IR and input to fft_len
-        let mut ir_complex: Vec<Complex> = self
-            .ir
-            .iter()
-            .map(|&s| Complex::new(s as f64, 0.0))
-            .chain(std::iter::repeat(Complex::new(0.0, 0.0)))
-            .take(fft_len)
-            .collect();
+        // Reuse scratch buffers — resize keeps capacity, only allocates if
+        // fft_len exceeds the largest seen so far.
+        self.scratch_ir.clear();
+        self.scratch_ir.reserve(fft_len);
+        self.scratch_ir
+            .extend(self.ir.iter().map(|&s| Complex::new(s as f64, 0.0)));
+        self.scratch_ir.resize(fft_len, zero);
 
-        let mut in_complex: Vec<Complex> = input
-            .iter()
-            .map(|&s| Complex::new(s as f64, 0.0))
-            .chain(std::iter::repeat(Complex::new(0.0, 0.0)))
-            .take(fft_len)
-            .collect();
+        self.scratch_in.clear();
+        self.scratch_in.reserve(fft_len);
+        self.scratch_in
+            .extend(input.iter().map(|&s| Complex::new(s as f64, 0.0)));
+        self.scratch_in.resize(fft_len, zero);
 
         // Forward FFT both
-        if hisab::num::fft(&mut ir_complex).is_err() || hisab::num::fft(&mut in_complex).is_err() {
+        if hisab::num::fft(&mut self.scratch_ir).is_err()
+            || hisab::num::fft(&mut self.scratch_in).is_err()
+        {
             // Fallback to direct convolution on FFT failure
             for (i, o) in input.iter().zip(output.iter_mut()) {
                 *o = self.process_sample(*i);
@@ -171,15 +182,18 @@ impl ConvolutionReverb {
             return;
         }
 
-        // Pointwise multiply in frequency domain
-        let mut product: Vec<Complex> = ir_complex
-            .iter()
-            .zip(in_complex.iter())
-            .map(|(a, b)| *a * *b)
-            .collect();
+        // Pointwise multiply in frequency domain (into scratch_product).
+        self.scratch_product.clear();
+        self.scratch_product.reserve(fft_len);
+        self.scratch_product.extend(
+            self.scratch_ir
+                .iter()
+                .zip(self.scratch_in.iter())
+                .map(|(a, b)| *a * *b),
+        );
 
         // Inverse FFT
-        if hisab::num::ifft(&mut product).is_err() {
+        if hisab::num::ifft(&mut self.scratch_product).is_err() {
             for (i, o) in input.iter().zip(output.iter_mut()) {
                 *o = self.process_sample(*i);
             }
@@ -189,7 +203,7 @@ impl ConvolutionReverb {
         // Extract real part, apply mix
         let dry = 1.0 - self.mix;
         for (i, o) in output.iter_mut().enumerate().take(block_len) {
-            let wet = product[i].re as f32;
+            let wet = self.scratch_product[i].re as f32;
             *o = input[i] * dry + wet * self.mix;
         }
     }
@@ -203,6 +217,11 @@ impl ConvolutionReverb {
         self.input_buffer = vec![0.0; len];
         self.position = 0;
         self.ir = ir;
+        // Drop any cached FFT scratch so the next process_block grows fresh
+        // capacity to fit the new IR length.
+        self.scratch_ir.clear();
+        self.scratch_in.clear();
+        self.scratch_product.clear();
     }
 
     /// Returns the length of the impulse response in samples.
