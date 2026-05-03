@@ -5,7 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - 1.1.0 Organization & Cleanup
+## [1.1.0] - Project Organization & Cleanup
+
+All 17 1.1.0 roadmap items (O1–O17) shipped. No new features — refactor,
+encapsulation, dedup, tests, and docs only. Several breaking changes for
+direct field readers / type importers; see individual entries below.
 
 ### Added
 

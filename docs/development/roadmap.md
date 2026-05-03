@@ -1,7 +1,7 @@
 # naad Roadmap — Pure Audio Synthesis Primitives
 
-> **Version**: 0.1.0 | **Last Updated**: 2026-03-26
-> **Status**: Phase 0 complete (initial scaffold) — hardening + expansion ahead
+> **Version**: 1.1.0 | **Last Updated**: 2026-05-03
+> **Status**: 1.1.0 organization & cleanup complete (O1–O17). Post-1.0 buckets ahead.
 
 ## Vision
 
@@ -236,10 +236,11 @@ How each synthesis engine from shruti's post-MVP roadmap maps to naad modules:
 
 ---
 
-## 1.1.0 — Project Organization & Cleanup
+## ~~1.1.0 — Project Organization & Cleanup~~ COMPLETE
 
 > Consolidate the codebase: split large modules, deduplicate patterns, formalize naming,
-> strengthen tests. No new features — purely structural improvement.
+> strengthen tests. No new features — purely structural improvement. **All 17 items
+> shipped (O1–O17).** See CHANGELOG `[1.1.0]` for per-item details.
 
 ### Module Reorganization
 
@@ -295,9 +296,9 @@ How each synthesis engine from shruti's post-MVP roadmap maps to naad modules:
 | 0.4.0 | Synthesis algorithms (subtractive, FM, additive, granular, physical, vocoder, formant, drum) | Phase 4 |
 | 0.5.0 | Performance + polish | Phase 5 |
 | **1.0.0** | **Stable API — dhvani integration validated** | **Phase 6** ✓ |
-| 1.1.0 | Project organization & cleanup (17 items: module splits, dedup, naming, tests, docs) | O1-O17 |
+| **1.1.0** | **Project organization & cleanup (17 items: module splits, dedup, naming, tests, docs)** | **O1-O17** ✓ |
 | 1.2.0+ | Deeper hisab integration (H1-H8), performance opts (P1-P3), additional goonj (G1-G3) | Post-1.0 |
 
 ---
 
-*Last Updated: 2026-03-26 — 1.0.0 released, 1.1.0 organization planned*
+*Last Updated: 2026-05-03 — 1.1.0 organization & cleanup complete (O1–O17), 1.2.0+ post-1.0 buckets next*
