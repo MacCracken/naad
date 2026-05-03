@@ -59,12 +59,17 @@ impl EnvelopeDetector {
 ///
 /// Reduces dynamic range by attenuating signals above a threshold.
 /// Supports configurable ratio, attack, release, makeup gain, and knee width.
+///
+/// `threshold_db`, `knee_db`, and `makeup_db` are direct-read parameter
+/// fields — modifying them takes effect on the next sample with no
+/// validation. `ratio` is private because it is clamped to `>= 1.0` at
+/// construction; use [`Self::set_ratio`] to enforce the same invariant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Compressor {
     /// Threshold in dB.
     pub threshold_db: f32,
-    /// Compression ratio (e.g., 4.0 = 4:1).
-    pub ratio: f32,
+    /// Compression ratio (e.g., 4.0 = 4:1). Clamped to `>= 1.0`.
+    ratio: f32,
     /// Knee width in dB (0.0 = hard knee).
     pub knee_db: f32,
     /// Makeup gain in dB.
@@ -79,7 +84,7 @@ impl Compressor {
     /// # Arguments
     ///
     /// * `threshold_db` - Threshold in dB (e.g., -20.0)
-    /// * `ratio` - Compression ratio (e.g., 4.0 for 4:1)
+    /// * `ratio` - Compression ratio (e.g., 4.0 for 4:1; clamped to `>= 1.0`)
     /// * `attack` - Attack time in seconds
     /// * `release` - Release time in seconds
     /// * `sample_rate` - Sample rate in Hz
@@ -93,6 +98,17 @@ impl Compressor {
             makeup_db: 0.0,
             detector: EnvelopeDetector::new(attack, release, sample_rate),
         }
+    }
+
+    /// Returns the current compression ratio.
+    #[must_use]
+    pub fn ratio(&self) -> f32 {
+        self.ratio
+    }
+
+    /// Set the compression ratio. Clamped to `>= 1.0`.
+    pub fn set_ratio(&mut self, ratio: f32) {
+        self.ratio = ratio.max(1.0);
     }
 
     /// Compute gain reduction in dB for a given input level in dB.
@@ -139,12 +155,16 @@ impl Compressor {
 ///
 /// Prevents signal from exceeding the ceiling. Uses fast attack
 /// and configurable release for transparent limiting.
+///
+/// `ceiling_db` and `release` are private because they shadow values inside
+/// the underlying [`Compressor`] — modifying them directly would not
+/// propagate to the gain stage. Use the typed accessors instead.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Limiter {
     /// Ceiling in dB (typically 0.0 or -0.1).
-    pub ceiling_db: f32,
+    ceiling_db: f32,
     /// Release time in seconds.
-    pub release: f32,
+    release: f32,
     /// Internal compressor with infinity ratio.
     compressor: Compressor,
 }
@@ -163,6 +183,24 @@ impl Limiter {
             release,
             compressor: comp,
         }
+    }
+
+    /// Returns the current ceiling in dB.
+    #[must_use]
+    pub fn ceiling_db(&self) -> f32 {
+        self.ceiling_db
+    }
+
+    /// Set the ceiling in dB. Propagates to the internal gain stage.
+    pub fn set_ceiling_db(&mut self, ceiling_db: f32) {
+        self.ceiling_db = ceiling_db;
+        self.compressor.threshold_db = ceiling_db;
+    }
+
+    /// Returns the current release time in seconds.
+    #[must_use]
+    pub fn release(&self) -> f32 {
+        self.release
     }
 
     /// Process a single sample.
@@ -185,9 +223,14 @@ impl Limiter {
 ///
 /// Silences signal below a threshold. Supports configurable
 /// attack, hold, and release times.
+///
+/// `threshold_db` is `pub` because it is read directly each sample with no
+/// internal coupling — modifying it takes effect immediately. The smoothing
+/// coefficients (attack/hold/release) are private since they are
+/// pre-computed at construction from time values.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NoiseGate {
-    /// Threshold in dB.
+    /// Threshold in dB. Read directly each sample — modify any time.
     pub threshold_db: f32,
     /// Envelope detector.
     detector: EnvelopeDetector,

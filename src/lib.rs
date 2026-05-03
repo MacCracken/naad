@@ -47,6 +47,40 @@
 //! - `acoustics` — Room simulation, convolution reverb, binaural, FDN, analysis, ambisonics (via goonj)
 //! - `logging` — Enable tracing-subscriber for structured logging output
 //! - `full` — All features enabled
+//!
+//! ## API Conventions
+//!
+//! These conventions apply uniformly across the crate. Knowing them up front
+//! avoids surprises when wiring naad into a host (dhvani, svara, etc.).
+//!
+//! ### Encapsulation
+//!
+//! - **Stateful types with non-trivial invariants** (e.g. [`oscillator::Oscillator`],
+//!   [`filter::BiquadFilter`], [`wavetable::Wavetable`]) keep their fields **private**
+//!   and expose validated setters. Modifying state requires a constructor or a
+//!   typed mutator — there is no way to silently break the invariant.
+//! - **Parameter structs** that are pure value-bags read directly by their owning
+//!   type (e.g. [`dynamics::Compressor::threshold_db`], [`envelope::Adsr::sustain_level`])
+//!   keep `pub` fields. They are documented when modifying them bypasses
+//!   constructor-time clamping; callers may set arbitrary `f32` values and
+//!   accept whatever output the algorithm produces.
+//!
+//! Rule of thumb: if changing a field requires recomputing cached coefficients
+//! or affects internal state coupling, it is private. If it only feeds a
+//! direct read in the next-sample loop, it may be `pub`.
+//!
+//! ### Constructor return types
+//!
+//! - **Constructors that validate `sample_rate`, `frequency`, or other
+//!   range-restricted inputs return [`Result`]**. Examples:
+//!   [`oscillator::Oscillator::new`], [`filter::BiquadFilter::new`],
+//!   [`envelope::Adsr::new`].
+//! - **Constructors that only clamp inputs (e.g. amplitude to `0..=1`) are
+//!   infallible** — they take any `f32` and store the clamped result.
+//!   Examples: [`dynamics::EnvelopeDetector::new`], [`smoothing::ParamSmoother::new`].
+//! - **Index-based mutators (`set_operator_freq`, `set_band_gain`)** that may
+//!   receive an out-of-range index return `Option<()>` or `Result<()>` so
+//!   callers can detect — and not silently ignore — bad indices.
 
 pub mod delay;
 pub mod dsp_util;

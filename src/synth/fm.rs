@@ -177,20 +177,24 @@ impl FmSynthEngine {
 
     /// Set the frequency of an operator by index.
     ///
-    /// Does nothing if `index` is out of range.
-    pub fn set_operator_freq(&mut self, index: usize, freq: f32) {
-        if let Some(op) = self.operators.get_mut(index) {
-            op.set_frequency(freq);
-        }
+    /// Returns `None` if `index` is out of range, allowing callers to detect
+    /// — and not silently ignore — bad indices. The previous fire-and-forget
+    /// signature was a discoverability hazard for callers building algorithms
+    /// dynamically.
+    pub fn set_operator_freq(&mut self, index: usize, freq: f32) -> Option<()> {
+        let op = self.operators.get_mut(index)?;
+        op.set_frequency(freq);
+        Some(())
     }
 
     /// Set the output level of an operator by index.
     ///
-    /// Does nothing if `index` is out of range.
-    pub fn set_operator_level(&mut self, index: usize, level: f32) {
-        if let Some(op) = self.operators.get_mut(index) {
-            op.set_level(level);
-        }
+    /// Returns `None` if `index` is out of range. See [`Self::set_operator_freq`]
+    /// for rationale.
+    pub fn set_operator_level(&mut self, index: usize, level: f32) -> Option<()> {
+        let op = self.operators.get_mut(index)?;
+        op.set_level(level);
+        Some(())
     }
 
     /// Trigger all operator envelopes (note on).

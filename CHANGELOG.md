@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **O5 + O6 — API Conventions section in `lib.rs`**: Documents the encapsulation rule (stateful types → private fields + setters; pure value-bag parameter structs → `pub` fields with stated semantics) and the constructor return-type rule (validating constructors return `Result`; clamping constructors are infallible; index-based mutators return `Option`/`Result`). Gives consumers an explicit map of why some types take `&mut self` setters and others let them poke fields directly.
+- **O7 — `FmSynthEngine::set_operator_freq` / `set_operator_level` now return `Option<()>`**: They previously ignored bad indices silently; the return type now documents the failure mode so callers building algorithms dynamically can detect mistakes. **Breaking change** — callers discarding the result must add `let _ =` (Rust's `Option<()>` does not raise `unused_must_use`, but the source signature has changed).
+- **O8 — Dynamics encapsulation**:
+  - `Compressor.ratio` is now private with `ratio()` / `set_ratio()` accessors that re-apply the `>= 1.0` clamp. `threshold_db`, `knee_db`, `makeup_db` remain `pub` (direct-read parameter fields) and are documented as such.
+  - `Limiter.ceiling_db` and `Limiter.release` are now private. They previously shadowed values inside the internal `Compressor` and modifying them did **nothing** at runtime. New `ceiling_db()` accessor and `set_ceiling_db()` mutator that propagates to the gain stage; `release()` accessor.
+  - `NoiseGate.threshold_db` documented (no behavior change — `pub` is correct here).
+  - **Breaking change** for consumers reading/writing `Compressor.ratio`, `Limiter.ceiling_db`, or `Limiter.release` as fields.
+
 - **O12 — granular pitch-shift test**: `test_pitch_shift_changes_output_frequency` renders a 200 Hz sine source at `pitch_shift=1.0` vs `2.0` and asserts the zero-crossing density rises by ≥1.5×, confirming the playback rate actually retunes the output.
 - **O13 — granular spray variation test**: `test_spray_produces_position_variance` runs the engine with `spray=0` and `spray=50ms` over a ramp source and asserts the rendered buffers diverge meaningfully (total |diff| > 1.0). Replaces the previous finiteness-only check with a real behavioral assertion.
 - **O14 — dynamics edge cases**: `test_compressor_ratio_one_is_unity` (1:1 above threshold = no reduction), `test_noise_gate_hold_timer_keeps_gate_open` (gate stays open during hold window after env drops below threshold, then closes), `test_limiter_ceiling_exact_match_passes_through` (signal at ceiling passes unchanged, signal above is reduced) — covers boundary branches that previous tests missed.
