@@ -7,9 +7,15 @@ use tracing::debug;
 
 use crate::dsp_util;
 
-/// RMS envelope detector for dynamics processing.
+/// Smoothed level detector for dynamics processing.
+///
+/// Tracks the abs-value envelope of an input signal with separate attack
+/// and release time constants. Renamed from `EnvelopeDetector` in 1.1.0
+/// to disambiguate from the unrelated `EnvelopeState` in
+/// [`crate::envelope`] — both prefixes shared "Envelope" for different
+/// concepts (the dynamics envelope vs. the ADSR state machine).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EnvelopeDetector {
+pub struct LevelDetector {
     /// Current envelope value (linear).
     current: f32,
     /// Attack coefficient.
@@ -18,7 +24,7 @@ pub struct EnvelopeDetector {
     release_coeff: f32,
 }
 
-impl EnvelopeDetector {
+impl LevelDetector {
     /// Create a new envelope detector.
     ///
     /// `attack` and `release` are times in seconds.
@@ -75,7 +81,7 @@ pub struct Compressor {
     /// Makeup gain in dB.
     pub makeup_db: f32,
     /// Envelope detector.
-    detector: EnvelopeDetector,
+    detector: LevelDetector,
 }
 
 impl Compressor {
@@ -96,7 +102,7 @@ impl Compressor {
             ratio: ratio.max(1.0),
             knee_db: 0.0,
             makeup_db: 0.0,
-            detector: EnvelopeDetector::new(attack, release, sample_rate),
+            detector: LevelDetector::new(attack, release, sample_rate),
         }
     }
 
@@ -233,7 +239,7 @@ pub struct NoiseGate {
     /// Threshold in dB. Read directly each sample — modify any time.
     pub threshold_db: f32,
     /// Envelope detector.
-    detector: EnvelopeDetector,
+    detector: LevelDetector,
     /// Current gate gain (0.0 = closed, 1.0 = open).
     gate_gain: f32,
     /// Hold counter (samples remaining before release).
@@ -258,7 +264,7 @@ impl NoiseGate {
         let attack_time = attack.max(0.001); // minimum 1ms to avoid clicks
         Self {
             threshold_db,
-            detector: EnvelopeDetector::new(attack, release, sample_rate),
+            detector: LevelDetector::new(attack, release, sample_rate),
             gate_gain: 0.0,
             hold_counter: 0,
             hold_samples: (hold * sample_rate) as u32,
@@ -315,7 +321,7 @@ mod tests {
 
     #[test]
     fn test_envelope_detector() {
-        let mut det = EnvelopeDetector::new(0.001, 0.01, 44100.0);
+        let mut det = LevelDetector::new(0.001, 0.01, 44100.0);
         // Feed a loud signal
         for _ in 0..1000 {
             let _ = det.process(1.0);

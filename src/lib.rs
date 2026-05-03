@@ -77,7 +77,7 @@
 //!   [`envelope::Adsr::new`].
 //! - **Constructors that only clamp inputs (e.g. amplitude to `0..=1`) are
 //!   infallible** — they take any `f32` and store the clamped result.
-//!   Examples: [`dynamics::EnvelopeDetector::new`], [`smoothing::ParamSmoother::new`].
+//!   Examples: [`dynamics::LevelDetector::new`], [`smoothing::ParamSmoother::new`].
 //! - **Index-based mutators (`set_operator_freq`, `set_band_gain`)** that may
 //!   receive an out-of-range index return `Option<()>` or `Result<()>` so
 //!   callers can detect — and not silently ignore — bad indices.

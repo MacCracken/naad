@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **O3 — `modulation::FmSynth` → `modulation::FmModulator`**: Disambiguates the simple two-operator FM primitive in `modulation` from the multi-operator [`synth::fm::FmSynthEngine`]. **Breaking**: imports/usages must update the type name. Doc comment now also points readers at `FmSynthEngine` for serial/stack/parallel topologies.
+- **O4 — `dynamics::EnvelopeDetector` → `dynamics::LevelDetector`**: Disambiguates from the unrelated [`envelope::EnvelopeState`] in the ADSR module — both prefixes shared "Envelope" for entirely different concepts. **Breaking** for direct importers; the type is also re-used internally by `Compressor` and `NoiseGate`, but those are unaffected.
+
 - **O2 — `dsp_util::xorshift32` (+ `_signed_f32`/`_unit_f32` wrappers)**: Single canonical xorshift32 step (with zero-state guard) replaces 6 inline copies across `noise`, `synth::granular`, `synth::physical`, and `synth::drum` (kick + snare). Callers keep their `noise_state: u32` field types — only the algorithm is centralized — so serde formats are unchanged. New unit tests cover the zero-state guard, determinism, and output-range invariants.
 
 - **O9 — `ConvolutionReverb::process_block` reuses scratch buffers**: Three `Vec<Complex>` (zero-padded IR, zero-padded input, pointwise product) were allocated and dropped on every block. They now live as `#[serde(skip)]` fields on the struct and are reset via `clear() + reserve() + extend() + resize()` per call — capacity grows to fit the largest seen `fft_len` then stays put. `rebuild_from_ir` clears them so a smaller IR doesn't pay for a previous larger one's footprint. (Not bench-validated — no `convolution_reverb` bench exists yet; structural change only.)

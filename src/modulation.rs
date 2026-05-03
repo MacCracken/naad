@@ -233,12 +233,16 @@ impl ModulationSource for Lfo {
     }
 }
 
-/// FM (Frequency Modulation) synthesizer.
+/// Two-operator FM (Frequency Modulation) modulator.
 ///
-/// The modulator output is scaled by `mod_index` and added to the carrier
-/// frequency to produce frequency modulation and sidebands.
+/// The modulator oscillator's output is scaled by `mod_index` and added to
+/// the carrier frequency to produce frequency modulation and sidebands.
+///
+/// For multi-operator algorithms (DX-style 4-op / 6-op stacks, parallel,
+/// feedback), use [`crate::synth::fm::FmSynthEngine`] instead — this type
+/// is just the simple 2-op modulator primitive.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FmSynth {
+pub struct FmModulator {
     /// Carrier oscillator.
     carrier: Oscillator,
     /// Modulator oscillator.
@@ -249,7 +253,7 @@ pub struct FmSynth {
     carrier_base_freq: f32,
 }
 
-impl FmSynth {
+impl FmModulator {
     /// Create a new FM synthesizer.
     ///
     /// # Arguments
@@ -425,7 +429,7 @@ mod tests {
 
     #[test]
     fn test_fm_synthesis() {
-        let mut fm = FmSynth::new(440.0, 220.0, 2.0, 44100.0).unwrap();
+        let mut fm = FmModulator::new(440.0, 220.0, 2.0, 44100.0).unwrap();
         let mut buf = [0.0f32; 1024];
         fm.fill_buffer(&mut buf);
         assert!(buf.iter().all(|s| s.is_finite()));
@@ -448,9 +452,9 @@ mod tests {
 
     #[test]
     fn test_serde_roundtrip() {
-        let fm = FmSynth::new(440.0, 220.0, 2.0, 44100.0).unwrap();
+        let fm = FmModulator::new(440.0, 220.0, 2.0, 44100.0).unwrap();
         let json = serde_json::to_string(&fm).unwrap();
-        let back: FmSynth = serde_json::from_str(&json).unwrap();
+        let back: FmModulator = serde_json::from_str(&json).unwrap();
         assert!((fm.mod_index - back.mod_index).abs() < f32::EPSILON);
     }
 }

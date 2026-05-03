@@ -4,7 +4,7 @@ use naad::delay::{AllpassDelay, CombFilter, DelayLine};
 use naad::effects::{Chorus, Distortion, DistortionType, Flanger, Phaser};
 use naad::envelope::{Adsr, EnvelopeSegment, MultiStageEnvelope};
 use naad::filter::{BiquadFilter, FilterType, StateVariableFilter};
-use naad::modulation::{FmSynth, Lfo, LfoShape, RingModulator};
+use naad::modulation::{FmModulator, Lfo, LfoShape, RingModulator};
 use naad::noise::{NoiseGenerator, NoiseType};
 use naad::oscillator::{Oscillator, Waveform};
 use naad::tuning;
@@ -175,7 +175,7 @@ fn equal_temperament_a4_c4() {
 #[test]
 fn fm_synthesis_produces_sidebands() {
     let sample_rate = 44100.0;
-    let mut fm = FmSynth::new(440.0, 220.0, 2.0, sample_rate).unwrap();
+    let mut fm = FmModulator::new(440.0, 220.0, 2.0, sample_rate).unwrap();
 
     let num_samples = 4096;
     let mut samples = vec![0.0f32; num_samples];

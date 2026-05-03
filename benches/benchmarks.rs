@@ -8,7 +8,7 @@ use naad::delay::{AllpassDelay, CombFilter};
 use naad::effects::{Chorus, Distortion, DistortionType, Phaser};
 use naad::envelope::Adsr;
 use naad::filter::{BiquadFilter, FilterType, StateVariableFilter};
-use naad::modulation::FmSynth;
+use naad::modulation::FmModulator;
 use naad::noise::{NoiseGenerator, NoiseType};
 use naad::oscillator::{Oscillator, Waveform};
 use naad::wavetable::{Wavetable, WavetableOscillator};
@@ -72,7 +72,7 @@ fn adsr_envelope_1024(c: &mut Criterion) {
 
 fn fm_synthesis_1024(c: &mut Criterion) {
     c.bench_function("fm_synthesis_1024", |b| {
-        let mut fm = FmSynth::new(440.0, 220.0, 2.0, 44100.0).unwrap();
+        let mut fm = FmModulator::new(440.0, 220.0, 2.0, 44100.0).unwrap();
         let mut buffer = [0.0f32; 1024];
         b.iter(|| {
             fm.fill_buffer(black_box(&mut buffer));
