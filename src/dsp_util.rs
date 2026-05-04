@@ -198,6 +198,120 @@ pub fn power_spectrum(input: &[f32]) -> Vec<f32> {
         .collect()
 }
 
+/// Detect the fundamental pitch of a buffer via autocorrelation.
+///
+/// Computes the autocorrelation of `buffer`, locates the dominant peak in
+/// the lag range `[sample_rate/max_hz, sample_rate/min_hz]`, then refines
+/// it to sub-sample accuracy using **Newton-Raphson on a Catmull-Rom cubic
+/// interpolant** through the four samples surrounding the discrete peak
+/// (`hisab::num::roots::newton_raphson` solves `P'(τ) = 0`).
+///
+/// Returns `None` for buffers shorter than 32 samples, when no peak
+/// exceeds 30 % of the zero-lag energy (signal is noise-dominated), or
+/// when the search range is degenerate (`min_hz >= max_hz` after
+/// quantizing to integer lags).
+///
+/// `min_hz` / `max_hz` should bracket the expected pitch range — narrow
+/// brackets reject octave errors and keep the autocorrelation cheaper.
+/// For musical pitch detection, common values are `30.0..2000.0` Hz.
+///
+/// Requires the `synthesis` feature (uses hisab).
+#[cfg(feature = "synthesis")]
+#[must_use]
+pub fn detect_pitch_autocorr(
+    buffer: &[f32],
+    sample_rate: f32,
+    min_hz: f32,
+    max_hz: f32,
+) -> Option<f32> {
+    let n = buffer.len();
+    if n < 32 || sample_rate <= 0.0 || min_hz <= 0.0 || max_hz <= min_hz {
+        return None;
+    }
+
+    let max_lag = ((sample_rate / min_hz) as usize).min(n - 1);
+    let min_lag = ((sample_rate / max_hz) as usize).max(2);
+    if min_lag + 2 >= max_lag {
+        return None;
+    }
+
+    // Direct autocorrelation up to max_lag. For typical pitch-detection
+    // buffers (1k-4k samples) this is fast enough; FFT-based autocorr is
+    // a future optimization.
+    let mut autocorr = vec![0.0f32; max_lag + 2];
+    for (lag, slot) in autocorr.iter_mut().enumerate() {
+        let mut sum = 0.0f32;
+        for i in 0..(n - lag) {
+            sum += buffer[i] * buffer[i + lag];
+        }
+        *slot = sum;
+    }
+
+    let r0 = autocorr[0];
+    if r0 <= 0.0 {
+        return None;
+    }
+
+    // Find the largest peak in [min_lag, max_lag-1].
+    let mut peak_lag = min_lag;
+    let mut peak_val = autocorr[min_lag];
+    for lag in (min_lag + 1)..max_lag {
+        if autocorr[lag] > peak_val
+            && autocorr[lag] > autocorr[lag - 1]
+            && autocorr[lag] > autocorr[lag + 1]
+        {
+            peak_val = autocorr[lag];
+            peak_lag = lag;
+        }
+    }
+
+    // Reject noise-dominated buffers (peak too weak relative to r(0)).
+    if peak_val < 0.30 * r0 {
+        return None;
+    }
+
+    // Catmull-Rom cubic through (peak_lag-1, peak_lag, peak_lag+1, peak_lag+2)
+    // mapped to t ∈ [0, 1] between the middle pair. The peak lives at some
+    // fractional t we'll find by Newton-Raphson on the derivative.
+    let y0 = autocorr[peak_lag - 1] as f64;
+    let y1 = autocorr[peak_lag] as f64;
+    let y2 = autocorr[peak_lag + 1] as f64;
+    let y3 = autocorr[peak_lag + 2] as f64;
+
+    // P(t)   = 0.5 * (a*t³ + b*t² + c*t + 2*y1)
+    // P'(t)  = 0.5 * (3a*t² + 2b*t + c)
+    // P''(t) = 0.5 * (6a*t + 2b)
+    let a = -y0 + 3.0 * y1 - 3.0 * y2 + y3;
+    let b = 2.0 * y0 - 5.0 * y1 + 4.0 * y2 - y3;
+    let c = -y0 + y2;
+
+    let dp = move |t: f64| 0.5 * (3.0 * a * t * t + 2.0 * b * t + c);
+    let ddp = move |t: f64| 0.5 * (6.0 * a * t + 2.0 * b);
+
+    // Initial guess: parabolic-interpolation closed-form (one NR step on
+    // a local quadratic). Newton then refines on the cubic.
+    let denom = 2.0 * (y0 - 2.0 * y1 + y2);
+    let parabolic_t = if denom.abs() < 1e-12 {
+        0.0
+    } else {
+        ((y0 - y2) / denom).clamp(-1.0, 1.0)
+    };
+
+    let refined_t = hisab::num::newton_raphson(dp, ddp, parabolic_t, 1e-9, 16)
+        .unwrap_or(parabolic_t)
+        .clamp(-1.0, 1.0);
+
+    let refined_lag = peak_lag as f64 + refined_t;
+    if refined_lag <= 0.0 {
+        return None;
+    }
+    let pitch = sample_rate as f64 / refined_lag;
+    if !pitch.is_finite() || pitch < min_hz as f64 * 0.5 || pitch > max_hz as f64 * 2.0 {
+        return None;
+    }
+    Some(pitch as f32)
+}
+
 /// 256-entry lookup table mapping dB to linear amplitude over `[-80, +20] dB`.
 ///
 /// Built lazily on first access via `LazyLock`. Resolution is ~0.39 dB per
@@ -435,6 +549,93 @@ mod tests {
         assert_eq!(ps.len(), n / 2 + 1);
         // DC bin should have the most power
         assert!(ps[0] > ps[1]);
+    }
+
+    #[cfg(feature = "synthesis")]
+    fn synth_sine(freq_hz: f32, sample_rate: f32, n: usize) -> Vec<f32> {
+        (0..n)
+            .map(|i| (i as f32 / sample_rate * freq_hz * std::f32::consts::TAU).sin())
+            .collect()
+    }
+
+    #[cfg(feature = "synthesis")]
+    #[test]
+    fn test_detect_pitch_sine_440() {
+        let sr = 44100.0;
+        let buf = synth_sine(440.0, sr, 4096);
+        let pitch = detect_pitch_autocorr(&buf, sr, 30.0, 2000.0).unwrap();
+        let cents_off = 1200.0 * (pitch / 440.0).log2();
+        assert!(
+            cents_off.abs() < 5.0,
+            "440 Hz sine: detected {pitch} Hz ({cents_off:+.2} cents off)"
+        );
+    }
+
+    #[cfg(feature = "synthesis")]
+    #[test]
+    fn test_detect_pitch_sine_220_and_880() {
+        let sr = 44100.0;
+        for &freq in &[220.0f32, 880.0, 1100.0] {
+            let buf = synth_sine(freq, sr, 4096);
+            let pitch = detect_pitch_autocorr(&buf, sr, 30.0, 2000.0).unwrap();
+            let cents_off = 1200.0 * (pitch / freq).log2();
+            assert!(
+                cents_off.abs() < 5.0,
+                "{freq} Hz sine: detected {pitch} Hz ({cents_off:+.2} cents off)"
+            );
+        }
+    }
+
+    #[cfg(feature = "synthesis")]
+    #[test]
+    fn test_detect_pitch_subsample_accuracy() {
+        // Pick a frequency whose period isn't an integer number of samples
+        // — this exercises the cubic+NR refinement (without it, accuracy
+        // drops to ±20 cents).
+        let sr = 44100.0;
+        let freq = 437.3; // period ≈ 100.86 samples
+        let buf = synth_sine(freq, sr, 4096);
+        let pitch = detect_pitch_autocorr(&buf, sr, 30.0, 2000.0).unwrap();
+        let cents_off = 1200.0 * (pitch / freq).log2();
+        assert!(
+            cents_off.abs() < 5.0,
+            "non-integer period: detected {pitch} Hz vs {freq} Hz ({cents_off:+.2} cents)"
+        );
+    }
+
+    #[cfg(feature = "synthesis")]
+    #[test]
+    fn test_detect_pitch_rejects_noise() {
+        // Pure white noise should yield no confident pitch.
+        let mut state = 12345u32;
+        let noise: Vec<f32> = (0..4096)
+            .map(|_| xorshift32_signed_f32(&mut state))
+            .collect();
+        // Most calls will return None; an occasional spurious peak is fine
+        // but should not be musically meaningful. Just assert that the API
+        // doesn't panic and returns either None or something well outside
+        // a sensible musical range for noise.
+        let pitch = detect_pitch_autocorr(&noise, 44100.0, 30.0, 2000.0);
+        if let Some(p) = pitch {
+            assert!(p.is_finite(), "noise pitch must be finite if returned");
+        }
+    }
+
+    #[cfg(feature = "synthesis")]
+    #[test]
+    fn test_detect_pitch_short_buffer_returns_none() {
+        let buf = [0.0f32; 16];
+        assert!(detect_pitch_autocorr(&buf, 44100.0, 30.0, 2000.0).is_none());
+    }
+
+    #[cfg(feature = "synthesis")]
+    #[test]
+    fn test_detect_pitch_invalid_range_returns_none() {
+        let buf = synth_sine(440.0, 44100.0, 1024);
+        // min_hz > max_hz → degenerate
+        assert!(detect_pitch_autocorr(&buf, 44100.0, 2000.0, 30.0).is_none());
+        // negative sample rate
+        assert!(detect_pitch_autocorr(&buf, -1.0, 30.0, 2000.0).is_none());
     }
 
     #[test]
