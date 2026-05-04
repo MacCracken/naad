@@ -198,6 +198,54 @@ pub fn power_spectrum(input: &[f32]) -> Vec<f32> {
         .collect()
 }
 
+/// Evaluate a 1-D clamped uniform B-spline at `t ∈ [0, 1]`.
+///
+/// Wraps `hisab::calc::bspline_eval` for scalar use: lifts the
+/// `control_points: &[f32]` into Vec3.x, generates a clamped open uniform
+/// knot vector internally, and returns the spline value's `.x` component.
+///
+/// "Clamped uniform" means the first control point is hit at `t=0` and
+/// the last at `t=1`, with uniform spacing of the interior knots. For
+/// degree `d` this gives a `C^{d-1}`-continuous curve (cubic = `C²`)
+/// that's well-suited to smoothly morphing between a small number of
+/// scalar values — wavetable morph axes, parameter-curve scrubbing, etc.
+///
+/// Returns `None` if `control_points.len() < degree + 1`, `degree == 0`,
+/// or `t` is outside `[0, 1]`.
+///
+/// **Allocates** per call (knot vector + Vec3 control-point copy). Hot
+/// audio paths should call only when the morph parameter changes, then
+/// cache the result.
+///
+/// Requires the `synthesis` feature (uses hisab `calc::bspline_eval`).
+#[cfg(feature = "synthesis")]
+#[must_use]
+pub fn bspline_eval_1d(degree: usize, control_points: &[f32], t: f32) -> Option<f32> {
+    if degree == 0 || control_points.len() <= degree {
+        return None;
+    }
+    let t = t as f64;
+    if !(0.0..=1.0).contains(&t) {
+        return None;
+    }
+    let n = control_points.len();
+
+    // Clamped open uniform knots: (degree+1) zeros, then uniform interior, then (degree+1) ones.
+    // Total length = n + degree + 1.
+    let interior_count = n - degree - 1;
+    let mut knots: Vec<f64> = Vec::with_capacity(n + degree + 1);
+    knots.extend(std::iter::repeat_n(0.0, degree + 1));
+    knots.extend((1..=interior_count).map(|i| i as f64 / (interior_count as f64 + 1.0)));
+    knots.extend(std::iter::repeat_n(1.0, degree + 1));
+
+    let cps: Vec<hisab::Vec3> = control_points
+        .iter()
+        .map(|&v| hisab::Vec3::new(v, 0.0, 0.0))
+        .collect();
+
+    hisab::calc::bspline_eval(degree, &cps, &knots, t).map(|v| v.x)
+}
+
 /// Fit a polynomial of `degree` to `(xs, ys)` via least-squares.
 ///
 /// Wraps `hisab::num::linalg::least_squares_poly`. Returns the coefficients
@@ -800,6 +848,52 @@ mod tests {
         (0..n)
             .map(|i| (i as f32 / sample_rate * freq_hz * std::f32::consts::TAU).sin())
             .collect()
+    }
+
+    #[cfg(feature = "synthesis")]
+    #[test]
+    fn test_bspline_eval_1d_interpolates_endpoints() {
+        // Clamped open uniform B-spline interpolates first and last control points.
+        let cps = [0.0f32, 0.5, -0.3, 1.0, 0.2];
+        let at_0 = bspline_eval_1d(3, &cps, 0.0).unwrap();
+        let at_1 = bspline_eval_1d(3, &cps, 1.0).unwrap();
+        assert!((at_0 - cps[0]).abs() < 1e-5, "spline(0) = {at_0}");
+        assert!(
+            (at_1 - cps[cps.len() - 1]).abs() < 1e-5,
+            "spline(1) = {at_1}"
+        );
+    }
+
+    #[cfg(feature = "synthesis")]
+    #[test]
+    fn test_bspline_eval_1d_smooth_no_kinks() {
+        let cps = [0.0f32, 1.0, 0.0, 1.0, 0.0];
+        let n = 1024;
+        let buf: Vec<f32> = (0..n)
+            .map(|i| bspline_eval_1d(3, &cps, i as f32 / (n - 1) as f32).unwrap())
+            .collect();
+        // Cubic B-spline through these 5 control points: max sample-to-sample
+        // delta should be modest (<<1.0/sample-spacing).
+        let max_diff = buf
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_diff < 0.05,
+            "B-spline shouldn't have sharp jumps; max |Δ| = {max_diff}"
+        );
+    }
+
+    #[cfg(feature = "synthesis")]
+    #[test]
+    fn test_bspline_eval_1d_rejects_invalid() {
+        // degree=0 is invalid (B-spline of degree 0 is just step function — not useful)
+        assert!(bspline_eval_1d(0, &[1.0, 2.0], 0.5).is_none());
+        // Too few control points
+        assert!(bspline_eval_1d(3, &[1.0, 2.0], 0.5).is_none()); // need ≥4
+        // t out of [0, 1]
+        assert!(bspline_eval_1d(3, &[0.0, 1.0, 0.0, 1.0], -0.1).is_none());
+        assert!(bspline_eval_1d(3, &[0.0, 1.0, 0.0, 1.0], 1.1).is_none());
     }
 
     #[cfg(feature = "synthesis")]

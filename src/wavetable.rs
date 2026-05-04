@@ -332,6 +332,55 @@ impl MorphWavetable {
 
         sample
     }
+
+    /// Generate the next sample with C²-smooth (cubic B-spline) morphing across tables.
+    ///
+    /// Where [`Self::next_sample`] linearly blends the two adjacent tables,
+    /// `next_sample_smooth` evaluates a clamped cubic B-spline through *all*
+    /// tables (sampled at the current phase) and reads it at `position`.
+    /// This eliminates the audible "kink" as the morph parameter sweeps past
+    /// table boundaries — the C²-continuous curve has matched first and
+    /// second derivatives across each table transition.
+    ///
+    /// Falls back to [`Self::next_sample`]'s linear blend when fewer than 4
+    /// tables are present (cubic B-spline requires at least 4 control
+    /// points). Slower than `next_sample` — call only when the smoother
+    /// morph is worth the cost.
+    ///
+    /// Requires the `synthesis` feature (uses hisab B-spline).
+    #[cfg(feature = "synthesis")]
+    #[inline]
+    #[must_use]
+    pub fn next_sample_smooth(&mut self) -> f32 {
+        if self.tables.len() < 4 {
+            return self.next_sample();
+        }
+
+        // Sample every table at the current phase, then evaluate the
+        // B-spline across those scalar control points at `position`.
+        let cps: Vec<f32> = self
+            .tables
+            .iter()
+            .map(|t| t.read_interpolated(self.phase))
+            .collect();
+        let sample =
+            crate::dsp_util::bspline_eval_1d(3, &cps, self.position).unwrap_or_else(|| {
+                // Defensive fallback — bspline_eval should not fail given our
+                // construction-time invariants, but degrade gracefully if it does.
+                let scaled = self.position * (self.tables.len() - 1) as f32;
+                let idx_low = (scaled.floor() as usize).min(self.tables.len() - 2);
+                let idx_high = idx_low + 1;
+                let frac = scaled - idx_low as f32;
+                cps[idx_low] * (1.0 - frac) + cps[idx_high] * frac
+            });
+
+        self.phase += self.frequency / self.sample_rate;
+        if self.phase >= 1.0 {
+            self.phase -= 1.0;
+        }
+
+        sample
+    }
 }
 
 #[cfg(test)]
@@ -389,5 +438,68 @@ mod tests {
         let json = serde_json::to_string(&wt).unwrap();
         let back: Wavetable = serde_json::from_str(&json).unwrap();
         assert_eq!(wt.samples(), back.samples());
+    }
+
+    #[cfg(feature = "synthesis")]
+    fn morph_with_n_tables(n: usize) -> MorphWavetable {
+        let tables: Vec<Wavetable> = (0..n)
+            .map(|h| {
+                let amps: Vec<f32> = (0..(h + 1)).map(|_| 1.0 / (h + 1) as f32).collect();
+                Wavetable::from_harmonics(h + 1, &amps, 256).unwrap()
+            })
+            .collect();
+        MorphWavetable::new(tables, 440.0, 44100.0).unwrap()
+    }
+
+    #[cfg(feature = "synthesis")]
+    #[test]
+    fn test_morph_smooth_falls_back_with_few_tables() {
+        // <4 tables → smooth() falls back to linear next_sample().
+        let mut m1 = morph_with_n_tables(2);
+        let mut m2 = morph_with_n_tables(2);
+        m1.set_morph(0.5);
+        m2.set_morph(0.5);
+        let s1 = m1.next_sample();
+        let s2 = m2.next_sample_smooth();
+        assert!(
+            (s1 - s2).abs() < 1e-5,
+            "with 2 tables, smooth should equal linear; got {s1} vs {s2}"
+        );
+    }
+
+    #[cfg(feature = "synthesis")]
+    #[test]
+    fn test_morph_smooth_differs_from_linear_with_4_tables() {
+        // ≥4 tables → smooth path actually engages the B-spline.
+        let mut linear = morph_with_n_tables(5);
+        let mut smooth = morph_with_n_tables(5);
+        linear.set_morph(0.4);
+        smooth.set_morph(0.4);
+
+        let mut total_diff = 0.0f32;
+        for _ in 0..256 {
+            let l = linear.next_sample();
+            let s = smooth.next_sample_smooth();
+            total_diff += (l - s).abs();
+        }
+        // Different curves through the same control points → outputs should
+        // diverge meaningfully across a buffer.
+        assert!(
+            total_diff > 0.1,
+            "linear vs smooth must differ across a buffer; total |diff| = {total_diff}"
+        );
+    }
+
+    #[cfg(feature = "synthesis")]
+    #[test]
+    fn test_morph_smooth_finite_at_boundaries() {
+        let mut m = morph_with_n_tables(5);
+        for &pos in &[0.0f32, 0.5, 1.0] {
+            m.set_morph(pos);
+            for _ in 0..32 {
+                let s = m.next_sample_smooth();
+                assert!(s.is_finite(), "pos={pos}: got non-finite sample {s}");
+            }
+        }
     }
 }

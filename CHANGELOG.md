@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - H2 — B-spline wavetable morph
+
+### Added
+
+- **H2 — `dsp_util::bspline_eval_1d`**: Scalar wrapper around `hisab::calc::bspline_eval` — lifts `&[f32]` control points into `Vec3.x`, generates a clamped open uniform knot vector internally (so the first/last control points are interpolated at `t=0`/`t=1`), returns the spline value's `.x`. Tests verify endpoint interpolation, smoothness (no kinks across a 1024-sample sweep), and rejection of invalid inputs (`degree=0`, fewer than `degree+1` control points, `t` outside `[0, 1]`). Allocates per call; the doc string flags this for hot-path callers.
+- **H2 — `MorphWavetable::next_sample_smooth`**: Cubic-B-spline (degree 3) version of `next_sample`. Sweeping the morph parameter through *all* tables produces a `C²`-continuous output curve instead of the kinked piecewise-linear blend. Falls back to the existing linear `next_sample` when fewer than 4 tables are present (cubic B-spline needs ≥4 control points). Tests confirm: fallback equals linear with 2 tables, smooth diverges from linear meaningfully across a buffer with 5 tables, all samples finite at `position` boundaries (0.0, 0.5, 1.0). `synthesis` feature gate.
+
 ## [1.2.0] - Post-1.0 buckets — first wave
 
 Eight roadmap items shipped: two `P*` perf optimizations, three `G*` goonj
