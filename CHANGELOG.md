@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.4] - H4 — color-free Hadamard FDN reverb
+
+### Added
+
+- **H4 — `acoustics::fdn_reverb::MatrixFdn`**: From-scratch 8-line FDN with an 8×8 normalised Sylvester-Hadamard feedback matrix (orthogonal, energy-preserving) — the "color-free" reverb topology the roadmap calls out. Delay lengths are mutually-coprime primes spanning ~30–80 ms (29.7/37.1/41.3/43.7/53.9/59.1/67.3/73.7 ms) for high modal density and no metallic comb resonances. Per-line damping gains are computed from RT60 + delay length per Schroeder's `g = 10^(-3D/(RT60·SR))`. The Hadamard transform is hand-unrolled (±1 entries only — no matmul). Lives alongside the existing goonj-backed `FdnReverb` rather than replacing it; pick `MatrixFdn` when you want timbre that's a function of `target_rt60` alone, decoupled from any room-acoustic interpretation. Tests cover Hadamard self-orthogonality (H·H = 8·I), reverb-tail production, decay across ~RT60 (5× early/late energy ratio), DC stability under continuous white noise, dry passthrough, invalid-input rejection, and serde roundtrip with deferred-buffer reconstruction.
+
 ## [1.2.3] - H3 — DCT additive amplitude compression
 
 ### Added
