@@ -198,6 +198,48 @@ pub fn power_spectrum(input: &[f32]) -> Vec<f32> {
         .collect()
 }
 
+/// Fit a polynomial of `degree` to `(xs, ys)` via least-squares.
+///
+/// Wraps `hisab::num::linalg::least_squares_poly`. Returns the coefficients
+/// `[c0, c1, c2, ..., c_degree]` such that `p(x) = c0 + c1*x + c2*x² + ...`.
+///
+/// Useful for replacing expensive transfer functions (`tanh`, `exp`,
+/// custom lookup tables) with a polynomial whose evaluation is just
+/// `degree + 1` multiplies + adds via Horner's method
+/// ([`eval_polynomial`]).
+///
+/// Returns `None` if `xs.len() != ys.len()`, fewer than `degree + 1`
+/// samples are supplied, or the linear system is singular.
+///
+/// Requires the `synthesis` feature (uses hisab linalg).
+#[cfg(feature = "synthesis")]
+#[must_use]
+pub fn fit_polynomial(xs: &[f64], ys: &[f64], degree: usize) -> Option<Vec<f64>> {
+    if xs.len() != ys.len() || xs.len() <= degree {
+        return None;
+    }
+    hisab::num::least_squares_poly(xs, ys, degree).ok()
+}
+
+/// Evaluate a polynomial at `x` via Horner's method.
+///
+/// `coeffs` is in ascending-degree order: `coeffs[i]` is the coefficient
+/// of `xⁱ`. Empty `coeffs` returns `0.0`. Uses `f64` internally for
+/// stability on high-degree fits and casts the result to `f32`.
+#[inline]
+#[must_use]
+pub fn eval_polynomial(coeffs: &[f64], x: f32) -> f32 {
+    if coeffs.is_empty() {
+        return 0.0;
+    }
+    let xd = x as f64;
+    let mut acc = coeffs[coeffs.len() - 1];
+    for &c in coeffs[..coeffs.len() - 1].iter().rev() {
+        acc = acc * xd + c;
+    }
+    acc as f32
+}
+
 /// Window function for spectral analysis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -758,6 +800,73 @@ mod tests {
         (0..n)
             .map(|i| (i as f32 / sample_rate * freq_hz * std::f32::consts::TAU).sin())
             .collect()
+    }
+
+    #[cfg(feature = "synthesis")]
+    #[test]
+    fn test_fit_polynomial_recovers_known_quadratic() {
+        // y = 1 + 2x + 3x²; fit should recover those coefficients exactly
+        // (within numerical noise) given enough sample points.
+        let xs: Vec<f64> = (0..20).map(|i| -2.0 + i as f64 * 0.2).collect();
+        let ys: Vec<f64> = xs.iter().map(|&x| 1.0 + 2.0 * x + 3.0 * x * x).collect();
+        let coeffs = fit_polynomial(&xs, &ys, 2).unwrap();
+        assert_eq!(coeffs.len(), 3);
+        assert!((coeffs[0] - 1.0).abs() < 1e-9, "c0 = {}", coeffs[0]);
+        assert!((coeffs[1] - 2.0).abs() < 1e-9, "c1 = {}", coeffs[1]);
+        assert!((coeffs[2] - 3.0).abs() < 1e-9, "c2 = {}", coeffs[2]);
+    }
+
+    #[cfg(feature = "synthesis")]
+    #[test]
+    fn test_eval_polynomial_horner() {
+        // p(x) = 1 + 2x + 3x²
+        let coeffs = vec![1.0f64, 2.0, 3.0];
+        for x in [-2.0f32, -0.5, 0.0, 0.5, 2.0] {
+            let exact = 1.0 + 2.0 * x + 3.0 * x * x;
+            let got = eval_polynomial(&coeffs, x);
+            assert!(
+                (got - exact).abs() < 1e-5,
+                "p({x}) = {got}, expected {exact}"
+            );
+        }
+    }
+
+    #[cfg(feature = "synthesis")]
+    #[test]
+    fn test_eval_polynomial_empty_returns_zero() {
+        assert_eq!(eval_polynomial(&[], 1.0), 0.0);
+    }
+
+    #[cfg(feature = "synthesis")]
+    #[test]
+    fn test_fit_polynomial_approximates_tanh() {
+        // Demonstrate the canonical use case: replace tanh with a fast
+        // odd polynomial that's accurate over a useful range.
+        let xs: Vec<f64> = (0..201).map(|i| -2.0 + i as f64 * 0.02).collect();
+        let ys: Vec<f64> = xs.iter().map(|&x| x.tanh()).collect();
+        let coeffs = fit_polynomial(&xs, &ys, 5).unwrap();
+
+        // Verify the fit is accurate within [-1.5, 1.5] — outside that
+        // range tanh saturates and a polynomial diverges, but the soft-clip
+        // sweet spot is well inside.
+        for i in 0..=30 {
+            let x = -1.5 + i as f32 * 0.1;
+            let exact = (x as f64).tanh() as f32;
+            let approx = eval_polynomial(&coeffs, x);
+            assert!(
+                (exact - approx).abs() < 0.015,
+                "tanh({x}): exact={exact}, fit={approx}"
+            );
+        }
+    }
+
+    #[cfg(feature = "synthesis")]
+    #[test]
+    fn test_fit_polynomial_rejects_invalid() {
+        // mismatched lengths
+        assert!(fit_polynomial(&[1.0, 2.0], &[1.0], 1).is_none());
+        // not enough points for the requested degree
+        assert!(fit_polynomial(&[1.0, 2.0], &[1.0, 2.0], 5).is_none());
     }
 
     #[cfg(feature = "synthesis")]

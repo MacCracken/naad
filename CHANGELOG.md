@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **H5 — Polynomial-fit utilities in `dsp_util`**: `fit_polynomial(xs, ys, degree)` wraps `hisab::num::least_squares_poly` with input validation, and `eval_polynomial(coeffs, x)` is the matching Horner's-method evaluator (f64 internally for stability, returns f32). Tests verify exact recovery of a known quadratic, Horner correctness on a hand-computed polynomial, rejection of mismatched/undersized inputs, and a worked tanh-fit example showing a 5th-order polynomial stays within 0.015 of `tanh(x)` over `[-1.5, 1.5]` — the soft-clip sweet spot, suitable for replacing per-sample `tanh()` calls in distortion paths. Behind the `synthesis` feature.
+
 - **H8 — Spectral analysis suite in `dsp_util`**: Three new primitives for offline analysis (svara composition tools, dhvani spectral metering):
   - `SpectralWindow` enum (`Rectangular` / `Hann` / `Hamming` / `Blackman`) with an in-place `apply` method.
   - `stft_magnitudes(signal, window_size, hop_size, window)` — short-time Fourier transform returning per-frame magnitude vectors. Tests verify dimensions match the spec, sine peaks land in the right bin (within 1.5 bins), and invalid inputs (non-power-of-two window, hop=0, undersized signal) return empty.
