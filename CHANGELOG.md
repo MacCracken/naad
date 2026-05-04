@@ -5,7 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - 1.2.0+ post-1.0 buckets
+## [1.2.0] - Post-1.0 buckets — first wave
+
+Eight roadmap items shipped: two `P*` perf optimizations, three `G*` goonj
+acoustics wrappers, three `H*` hisab integrations. The remaining `H1` /
+`H2` / `H3` / `H4` / `P3` items are deferred — see roadmap for status.
 
 ### Added
 
