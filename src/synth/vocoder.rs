@@ -7,9 +7,14 @@
 //! spectral envelope — the classic "talking synth" effect.
 
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 
 use crate::error::Result;
 use crate::filter::{BiquadFilter, FilterType};
+
+/// Inline band capacity for the vocoder bank — typical configs use 8–16
+/// bands and stay stack-resident; larger band counts spill to the heap.
+const VOCODER_INLINE: usize = 16;
 
 /// One frequency band of a [`Vocoder`].
 ///
@@ -61,10 +66,12 @@ impl VocoderBand {
 }
 
 /// Channel vocoder with configurable number of frequency bands.
+///
+/// Band storage is a [`SmallVec`] with `VOCODER_INLINE = 16` slots inline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Vocoder {
     /// Frequency bands.
-    bands: Vec<VocoderBand>,
+    bands: SmallVec<[VocoderBand; VOCODER_INLINE]>,
     /// Sample rate in Hz.
     sample_rate: f32,
 }
@@ -111,7 +118,7 @@ impl Vocoder {
         let attack_coeff = 1.0 - (-1.0 / (0.005 * sample_rate)).exp();
         let release_coeff = 1.0 - (-1.0 / (0.020 * sample_rate)).exp();
 
-        let mut bands = Vec::with_capacity(num_bands);
+        let mut bands: SmallVec<[VocoderBand; VOCODER_INLINE]> = SmallVec::new();
         for i in 0..num_bands {
             let center = (log_low + step * i as f32).exp();
             // Clamp to Nyquist safety.

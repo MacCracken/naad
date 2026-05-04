@@ -1,9 +1,8 @@
 # naad Roadmap — Pure Audio Synthesis Primitives
 
-> **Version**: 1.2.4 | **Last Updated**: 2026-05-03
-> **Status**: 1.2.x rolling — 1.2.0 first wave, 1.2.1 H2 (B-spline wavetable),
-> 1.2.2 H1 (RK4 Moog ladder), 1.2.3 H3 (DCT amplitude compression),
-> 1.2.4 H4 (Hadamard FDN). P3 last.
+> **Version**: 1.2.5 | **Last Updated**: 2026-05-03
+> **Status**: 1.2.x complete — all post-1.0 roadmap items shipped (H1–H8, G1–G3,
+> P1–P3). 1.3.0+ awaits new direction.
 
 ## Vision
 
@@ -304,8 +303,8 @@ How each synthesis engine from shruti's post-MVP roadmap maps to naad modules:
 | 1.2.2 | RK4-integrated Moog ladder filter | H1 ✓ |
 | 1.2.3 | DCT-based additive amplitude compression | H3 ✓ |
 | 1.2.4 | Color-free Hadamard FDN reverb | H4 ✓ |
-| 1.2.x | Remaining post-1.0 items in focused patches | P3 |
+| **1.2.5** | **SmallVec for bounded collections — P3 done; 1.2.x complete** | **P3** ✓ |
 
 ---
 
-*Last Updated: 2026-05-03 — 1.2.0 first wave shipped (H5-H8, G1-G3, P1-P2). H1/H2/H3/H4/P3 deferred to 1.2.x patches.*
+*Last Updated: 2026-05-03 — all post-1.0 items shipped across 1.2.0..1.2.5 (H1-H8, G1-G3, P1-P3).*

@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.5] - P3 — `SmallVec` for fixed-size collections
+
+### Added
+
+- **dep**: `smallvec = "1"` with `serde` + `const_generics` features. Serializes as a sequence (Vec-compatible JSON shape), so existing serialized data deserializes cleanly into the new field types.
+
+### Changed
+
+- **P3 — Stack-allocated bounded collections**:
+  - `voice::VoiceManager.voices` → `SmallVec<[Voice; 16]>`. Typical poly-synth configurations (4–16 voices) stay stack-resident; larger pools (up to the 128 cap) spill to the heap.
+  - `synth::fm::FmSynthEngine.operators` → `SmallVec<[FmOperator; 6]>`. With `MAX_OPERATORS = 6`, every supported configuration is fully inline — no heap traffic for FM voices.
+  - `synth::vocoder::Vocoder.bands` → `SmallVec<[VocoderBand; 16]>`. Typical 8–16-band channel vocoders stay stack-resident.
+  - `synth::eq::ParametricEq.bands` → `SmallVec<[EqBand; 16]>`. Covers parametric (4–10 bands) and graphic (10 bands) EQs without heap.
+  - SmallVec serializes as `Vec<T>` does, so JSON / on-disk preset shapes are unchanged. Pure perf change at the API boundary.
+
 ## [1.2.4] - H4 — color-free Hadamard FDN reverb
 
 ### Added

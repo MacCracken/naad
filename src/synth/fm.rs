@@ -5,6 +5,7 @@
 //! ADSR envelope, output level, and optional self-feedback.
 
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 
 use crate::envelope::Adsr;
 use crate::error::Result;
@@ -129,10 +130,12 @@ impl FmOperator {
 /// Multi-operator FM synthesis engine.
 ///
 /// Supports up to 6 operators routed through configurable algorithms.
+/// Operators live in a [`SmallVec`] sized for the `MAX_OPERATORS = 6`
+/// cap, so allocation stays on the stack for every supported configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FmSynthEngine {
-    /// Operators (up to 6).
-    operators: Vec<FmOperator>,
+    /// Operators (up to 6, always stack-resident).
+    operators: SmallVec<[FmOperator; MAX_OPERATORS]>,
     /// Routing algorithm.
     algorithm: FmAlgorithm,
     /// Sample rate in Hz.
@@ -158,7 +161,7 @@ impl FmSynthEngine {
             return Err(crate::error::NaadError::InvalidSampleRate { sample_rate });
         }
 
-        let mut operators = Vec::with_capacity(num_operators);
+        let mut operators: SmallVec<[FmOperator; MAX_OPERATORS]> = SmallVec::new();
         for _ in 0..num_operators {
             operators.push(FmOperator::new(440.0, sample_rate)?);
         }

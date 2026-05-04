@@ -262,11 +262,11 @@ impl MatrixFdn {
 
         // Read delay-line outputs and apply per-line damping.
         let mut delayed = [0.0f32; MATRIX_FDN_N];
-        for ((slot, line), (pos, gain)) in delayed.iter_mut().zip(self.buffers.iter()).zip(
-            self.positions
-                .iter()
-                .zip(self.damping_gain.iter()),
-        ) {
+        for ((slot, line), (pos, gain)) in delayed
+            .iter_mut()
+            .zip(self.buffers.iter())
+            .zip(self.positions.iter().zip(self.damping_gain.iter()))
+        {
             let read_pos = (*pos + 1) % line.len();
             let damped = line[read_pos] * gain;
             *slot = crate::flush_denormal(damped);

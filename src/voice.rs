@@ -4,6 +4,11 @@
 //! for polyphonic instruments.
 
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
+
+/// Inline voice capacity — the SmallVec spills to the heap above this.
+/// 16 covers the vast majority of polyphonic-synth use cases without alloc.
+const VOICE_INLINE: usize = 16;
 
 /// Polyphony mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,10 +89,14 @@ impl Default for Voice {
 }
 
 /// Manages voice allocation and stealing for polyphonic instruments.
+///
+/// The voice pool lives in a [`SmallVec`] with `VOICE_INLINE = 16` slots
+/// inline — typical polysynth configurations (4–16 voices) stay entirely
+/// stack-resident, while larger pools (up to 128) spill to the heap.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoiceManager {
     /// Voice pool.
-    pub(crate) voices: Vec<Voice>,
+    pub(crate) voices: SmallVec<[Voice; VOICE_INLINE]>,
     /// Maximum polyphony.
     max_voices: usize,
     /// Polyphony mode.

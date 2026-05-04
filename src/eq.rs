@@ -4,9 +4,15 @@
 //! configurations for spectral shaping.
 
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 
 use crate::error::Result;
 use crate::filter::{BiquadFilter, FilterType};
+
+/// Inline band capacity for parametric/graphic EQ — typical EQs run
+/// 4–10 parametric bands or up to 10 graphic bands; 16 inline covers
+/// all common cases without spilling to the heap.
+const EQ_INLINE: usize = 16;
 
 /// One band of a [`ParametricEq`].
 ///
@@ -25,11 +31,13 @@ pub struct EqBand {
 /// N-band parametric equalizer.
 ///
 /// Each band is an independent [`BiquadFilter`] with configurable type,
-/// frequency, Q, and gain. Bands are processed in series.
+/// frequency, Q, and gain. Bands are processed in series. Storage is a
+/// [`SmallVec`] with `EQ_INLINE = 16` slots inline — typical EQ
+/// configurations stay stack-resident.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParametricEq {
     /// The EQ bands.
-    bands: Vec<EqBand>,
+    bands: SmallVec<[EqBand; EQ_INLINE]>,
     /// Sample rate in Hz.
     sample_rate: f32,
 }
@@ -39,7 +47,7 @@ impl ParametricEq {
     #[must_use]
     pub fn new(sample_rate: f32) -> Self {
         Self {
-            bands: Vec::new(),
+            bands: SmallVec::new(),
             sample_rate,
         }
     }
