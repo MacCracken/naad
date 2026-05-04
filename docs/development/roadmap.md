@@ -1,8 +1,8 @@
 # naad Roadmap — Pure Audio Synthesis Primitives
 
-> **Version**: 1.2.1 | **Last Updated**: 2026-05-03
-> **Status**: 1.2.0 first wave shipped, 1.2.1 adds H2 (B-spline wavetable morph).
-> H1/H3/H4/P3 still deferred to upcoming 1.2.x patches.
+> **Version**: 1.2.2 | **Last Updated**: 2026-05-03
+> **Status**: 1.2.x rolling — 1.2.0 first wave, 1.2.1 H2 (B-spline wavetable),
+> 1.2.2 H1 (RK4 Moog ladder). H3/H4/P3 next.
 
 ## Vision
 
@@ -300,7 +300,8 @@ How each synthesis engine from shruti's post-MVP roadmap maps to naad modules:
 | **1.1.0** | **Project organization & cleanup (17 items: module splits, dedup, naming, tests, docs)** | **O1-O17** ✓ |
 | **1.2.0** | **First wave of post-1.0 work — hisab numerics, goonj acoustics, perf** | **H5-H8, G1-G3, P1-P2** ✓ |
 | 1.2.1 | B-spline wavetable morph | H2 ✓ |
-| 1.2.x | Remaining post-1.0 items in focused patches | H1, H3, H4, P3 (deferred) |
+| 1.2.2 | RK4-integrated Moog ladder filter | H1 ✓ |
+| 1.2.x | Remaining post-1.0 items in focused patches | H3, H4, P3 |
 
 ---
 

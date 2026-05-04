@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] - H1 — RK4-integrated Moog-ladder filter
+
+### Added
+
+- **H1 — `synth::physical::MoogLadder`**: Classic Moog-ladder lowpass filter (4 cascaded one-pole stages with global feedback `k` for resonance and a `tanh` saturator at every stage) integrated per-sample via one `hisab::num::rk4` step over `1 / sample_rate`. Substantially more accurate than the trapezoidal / one-sample-Euler discretisations common in DSP-equation Moog implementations, especially at high resonance and near the cutoff. Internal state is `f64` for ODE-integrator stability; output is `f32` clamped to `[-2.0, 2.0]` as a defensive guard against rare divergence at extreme parameter combinations. Tests verify high-frequency attenuation (5 kHz < 0.5× of 200 kHz at a 1 kHz cutoff), resonant ringing (4× tail vs dry baseline), DC stability under self-oscillation parameters, parameter clamping, invalid-input rejection, and serde roundtrip. Behind the `synthesis` feature.
+
 ## [1.2.1] - H2 — B-spline wavetable morph
 
 ### Added
