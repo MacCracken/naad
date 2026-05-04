@@ -181,6 +181,74 @@ impl AdditiveSynth {
     pub fn is_active(&self) -> bool {
         self.partials.iter().any(|p| p.amplitude > 0.0)
     }
+
+    /// Compress the partial amplitude bank via DCT-II, keeping the first `num_coeffs` coefficients.
+    ///
+    /// Smooth amplitude envelopes (typical for harmonic spectra — `1/n`
+    /// rolloff, formant peaks, etc.) concentrate most of their energy in
+    /// the low-order DCT coefficients, so truncating the spectrum gives
+    /// efficient lossy compression for preset storage / transmission.
+    /// Pair with [`Self::restore_amplitudes_dct`] to expand on the receiving
+    /// side.
+    ///
+    /// `num_coeffs` is clamped to `[1, num_partials]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::NaadError::ComputationError`] if the underlying
+    /// `hisab::num::dct` call fails.
+    ///
+    /// Requires the `synthesis` feature (uses hisab DCT).
+    pub fn compress_amplitudes_dct(&self, num_coeffs: usize) -> Result<Vec<f64>> {
+        let amps: Vec<f64> = self.partials.iter().map(|p| p.amplitude as f64).collect();
+        let coeffs =
+            hisab::num::dct(&amps).map_err(|e| crate::error::NaadError::ComputationError {
+                message: format!("DCT failed: {e:?}"),
+            })?;
+        let keep = num_coeffs.clamp(1, coeffs.len());
+        Ok(coeffs.into_iter().take(keep).collect())
+    }
+
+    /// Restore partial amplitudes from DCT coefficients (inverse of [`Self::compress_amplitudes_dct`]).
+    ///
+    /// Zero-pads `coeffs` out to the current partial count, runs the
+    /// inverse DCT, and writes the result back into the partial bank
+    /// (clamped to `[0.0, 1.0]` and re-Nyquist-filtered). Partial
+    /// frequency ratios and phases are unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::NaadError::InvalidParameter`] if `coeffs` is
+    /// empty or longer than the partial count, or
+    /// [`crate::NaadError::ComputationError`] if `hisab::num::idct` fails.
+    ///
+    /// Requires the `synthesis` feature.
+    pub fn restore_amplitudes_dct(&mut self, coeffs: &[f64]) -> Result<()> {
+        let n = self.partials.len();
+        if coeffs.is_empty() || coeffs.len() > n {
+            return Err(crate::error::NaadError::InvalidParameter {
+                name: "coeffs".to_string(),
+                reason: format!("must be 1..={n} long, got {}", coeffs.len()),
+            });
+        }
+
+        let mut padded = vec![0.0f64; n];
+        padded[..coeffs.len()].copy_from_slice(coeffs);
+        let restored =
+            hisab::num::idct(&padded).map_err(|e| crate::error::NaadError::ComputationError {
+                message: format!("IDCT failed: {e:?}"),
+            })?;
+
+        let nyquist = self.sample_rate / 2.0;
+        for (p, &amp) in self.partials.iter_mut().zip(restored.iter()) {
+            p.amplitude = if self.fundamental * p.frequency_ratio >= nyquist {
+                0.0
+            } else {
+                (amp as f32).clamp(0.0, 1.0)
+            };
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -247,6 +315,97 @@ mod tests {
                 "partial {} should be zeroed (above Nyquist)",
                 i + 1
             );
+        }
+    }
+
+    #[test]
+    fn test_dct_full_roundtrip_preserves_amplitudes() {
+        // With all coefficients kept, DCT → IDCT should recover the
+        // original amplitudes within numerical noise.
+        let mut synth = AdditiveSynth::new(440.0, 16, 44100.0).unwrap();
+        let original: Vec<f32> = synth.partials.iter().map(|p| p.amplitude).collect();
+
+        let coeffs = synth.compress_amplitudes_dct(synth.num_partials()).unwrap();
+        assert_eq!(coeffs.len(), 16);
+
+        synth.restore_amplitudes_dct(&coeffs).unwrap();
+        for (i, (orig, p)) in original.iter().zip(synth.partials.iter()).enumerate() {
+            assert!(
+                (orig - p.amplitude).abs() < 1e-4,
+                "partial {i}: orig={orig}, restored={}",
+                p.amplitude
+            );
+        }
+    }
+
+    #[test]
+    fn test_dct_truncated_is_lossy_approximation() {
+        // Keeping only the first 4 of 16 coefficients should reproduce
+        // the smooth 1/n harmonic envelope reasonably (most energy is in
+        // low-order DCT bins) but not exactly.
+        let mut synth = AdditiveSynth::new(440.0, 16, 44100.0).unwrap();
+        let original: Vec<f32> = synth.partials.iter().map(|p| p.amplitude).collect();
+
+        let coeffs = synth.compress_amplitudes_dct(4).unwrap();
+        assert_eq!(coeffs.len(), 4);
+        synth.restore_amplitudes_dct(&coeffs).unwrap();
+
+        // RMS error should be small relative to the amplitude scale.
+        let mse: f32 = original
+            .iter()
+            .zip(synth.partials.iter())
+            .map(|(o, p)| (o - p.amplitude).powi(2))
+            .sum::<f32>()
+            / original.len() as f32;
+        let rmse = mse.sqrt();
+        // 1/n harmonics compress reasonably — 4 of 16 coeffs holds RMSE < 0.15
+        // (a 75% storage reduction at modest perceptual cost).
+        assert!(rmse < 0.15, "truncated DCT roundtrip RMSE = {rmse}");
+        // ...but not zero, since we discarded 12 coefficients.
+        assert!(
+            rmse > 1e-6,
+            "with truncation RMSE shouldn't be exactly zero"
+        );
+    }
+
+    #[test]
+    fn test_dct_compress_clamps_num_coeffs() {
+        let synth = AdditiveSynth::new(440.0, 8, 44100.0).unwrap();
+        // num_coeffs > num_partials → clamps to num_partials
+        let coeffs = synth.compress_amplitudes_dct(100).unwrap();
+        assert_eq!(coeffs.len(), 8);
+        // num_coeffs == 0 → clamps to 1
+        let coeffs = synth.compress_amplitudes_dct(0).unwrap();
+        assert_eq!(coeffs.len(), 1);
+    }
+
+    #[test]
+    fn test_dct_restore_rejects_invalid_lengths() {
+        let mut synth = AdditiveSynth::new(440.0, 8, 44100.0).unwrap();
+        // empty
+        assert!(synth.restore_amplitudes_dct(&[]).is_err());
+        // too long
+        assert!(synth.restore_amplitudes_dct(&vec![0.5; 99]).is_err());
+    }
+
+    #[test]
+    fn test_dct_restore_respects_nyquist() {
+        // Build a synth with partials above Nyquist (zeroed at construction),
+        // then "restore" amplitudes that would re-enable them. The Nyquist
+        // re-check should keep them silent.
+        let mut synth = AdditiveSynth::new(1000.0, 8, 8000.0).unwrap();
+        // Above-Nyquist partials are zeroed at construction.
+        let pretend_full = vec![0.5f64; 8];
+        // Run a DCT-IDCT cycle of the would-be amplitudes.
+        let coeffs = hisab::num::dct(&pretend_full).unwrap();
+        synth.restore_amplitudes_dct(&coeffs).unwrap();
+        for (i, p) in synth.partials.iter().enumerate() {
+            if 1000.0 * p.frequency_ratio >= 4000.0 {
+                assert!(
+                    p.amplitude == 0.0,
+                    "partial {i} above Nyquist must remain 0.0 after restore"
+                );
+            }
         }
     }
 }

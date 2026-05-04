@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.3] - H3 — DCT additive amplitude compression
+
+### Added
+
+- **H3 — `AdditiveSynth::compress_amplitudes_dct` / `restore_amplitudes_dct`**: DCT-II / IDCT pair for compressing the partial amplitude bank — smooth amplitude envelopes (1/n harmonic rolloff, formant peaks) concentrate most energy in low-order DCT coefficients, so storing just the first K (where K ≪ num_partials) gives lossy spectral compression suitable for preset transmission. `compress_amplitudes_dct(num_coeffs)` clamps `num_coeffs` to `[1, num_partials]`; `restore_amplitudes_dct(&coeffs)` zero-pads, runs IDCT, clamps each restored amplitude to `[0.0, 1.0]`, and re-applies the Nyquist filter (above-Nyquist partials stay silent). Uses `hisab::num::dct` / `idct`. Tests verify: full roundtrip preserves amplitudes within 1e-4, 4-of-16 truncation holds RMSE < 0.15 (75 % storage reduction at modest perceptual cost) but isn't exactly zero, `num_coeffs` clamping, length-validation rejection, and Nyquist invariant under restore. Behind the `synthesis` feature.
+
 ## [1.2.2] - H1 — RK4-integrated Moog-ladder filter
 
 ### Added
