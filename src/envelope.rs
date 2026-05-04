@@ -5,6 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "synthesis")]
+use hisab::Vec3;
+
 use crate::error::{NaadError, Result};
 
 /// Envelope state machine stages.
@@ -337,6 +340,161 @@ impl MultiStageEnvelope {
     }
 }
 
+/// One control point of a [`CatmullRomEnvelope`].
+#[cfg(feature = "synthesis")]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct EnvelopePoint {
+    /// Seconds from envelope trigger.
+    pub time: f32,
+    /// Target value at this time.
+    pub value: f32,
+}
+
+/// Smooth envelope curve interpolating user-placed control points with Catmull-Rom splines.
+///
+/// Where [`MultiStageEnvelope`] connects targets with linear segments,
+/// `CatmullRomEnvelope` connects them with C¹-continuous cubic splines via
+/// `hisab::calc::splines::catmull_rom` — no kinks at control points,
+/// well-suited to organic / vocal-style amplitude shapes that linear ADSRs
+/// can't capture without dozens of segments.
+///
+/// At the endpoints the curve is clamped (the phantom outer points mirror
+/// the first/last actual points) so it doesn't overshoot before t=0 or
+/// after the last control point.
+///
+/// Behind the `synthesis` feature (uses hisab).
+#[cfg(feature = "synthesis")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatmullRomEnvelope {
+    /// Control points, ordered by `time`.
+    points: Vec<EnvelopePoint>,
+    /// Sample rate in Hz.
+    sample_rate: f32,
+    /// Elapsed samples since trigger.
+    elapsed_samples: f32,
+    /// Whether the envelope is currently producing values.
+    active: bool,
+}
+
+#[cfg(feature = "synthesis")]
+impl CatmullRomEnvelope {
+    /// Build a Catmull-Rom envelope from a sequence of control points.
+    ///
+    /// `points` must contain at least 2 entries with strictly increasing
+    /// `time` values; the first should typically be at `time = 0.0`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NaadError::InvalidParameter`] if fewer than 2 points are
+    /// supplied or times are not strictly increasing, or
+    /// [`NaadError::InvalidSampleRate`] for a bad sample rate.
+    pub fn new(points: Vec<EnvelopePoint>, sample_rate: f32) -> Result<Self> {
+        if points.len() < 2 {
+            return Err(NaadError::InvalidParameter {
+                name: "points".to_string(),
+                reason: "need at least 2 control points".to_string(),
+            });
+        }
+        for w in points.windows(2) {
+            if w[1].time <= w[0].time {
+                return Err(NaadError::InvalidParameter {
+                    name: "points[*].time".to_string(),
+                    reason: "control point times must be strictly increasing".to_string(),
+                });
+            }
+        }
+        if sample_rate <= 0.0 || !sample_rate.is_finite() {
+            return Err(NaadError::InvalidSampleRate { sample_rate });
+        }
+        Ok(Self {
+            points,
+            sample_rate,
+            elapsed_samples: 0.0,
+            active: false,
+        })
+    }
+
+    /// Start the envelope from `t = 0`.
+    pub fn trigger(&mut self) {
+        self.elapsed_samples = 0.0;
+        self.active = true;
+    }
+
+    /// Stop and reset the envelope (next `next_value` returns 0).
+    pub fn release(&mut self) {
+        self.active = false;
+    }
+
+    /// Generate the next envelope sample.
+    ///
+    /// Returns the spline value at the current elapsed time. After the
+    /// last control point, returns the last point's value and marks the
+    /// envelope inactive.
+    #[inline]
+    #[must_use]
+    pub fn next_value(&mut self) -> f32 {
+        if !self.active {
+            return 0.0;
+        }
+
+        let t = self.elapsed_samples / self.sample_rate;
+        self.elapsed_samples += 1.0;
+
+        let n = self.points.len();
+        let last_time = self.points[n - 1].time;
+
+        if t >= last_time {
+            self.active = false;
+            return self.points[n - 1].value;
+        }
+        if t <= self.points[0].time {
+            return self.points[0].value;
+        }
+
+        // Locate the segment [i, i+1] containing t. Linear scan is fine —
+        // envelopes typically have <32 control points.
+        let mut i = 0usize;
+        for k in 0..(n - 1) {
+            if t < self.points[k + 1].time {
+                i = k;
+                break;
+            }
+        }
+
+        let p1 = self.points[i];
+        let p2 = self.points[i + 1];
+        // Phantom endpoints clamp the curve at the boundaries.
+        let p0 = if i == 0 { p1 } else { self.points[i - 1] };
+        let p3 = if i + 2 >= n { p2 } else { self.points[i + 2] };
+
+        let u = ((t - p1.time) / (p2.time - p1.time)).clamp(0.0, 1.0);
+
+        // Catmull-Rom on scalars: lift each value into Vec3.x, run hisab's
+        // catmull_rom, take .x back. Vec3 indirection is the price for
+        // staying on the canonical hisab implementation.
+        let lifted = hisab::calc::catmull_rom(
+            Vec3::new(p0.value, 0.0, 0.0),
+            Vec3::new(p1.value, 0.0, 0.0),
+            Vec3::new(p2.value, 0.0, 0.0),
+            Vec3::new(p3.value, 0.0, 0.0),
+            u,
+        );
+        lifted.x
+    }
+
+    /// Check if the envelope is currently producing values.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    /// Number of control points.
+    #[must_use]
+    pub fn num_points(&self) -> usize {
+        self.points.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,5 +574,115 @@ mod tests {
         let back: Adsr = serde_json::from_str(&json).unwrap();
         assert!((env.attack_time - back.attack_time).abs() < f32::EPSILON);
         assert!((env.sustain_level - back.sustain_level).abs() < f32::EPSILON);
+    }
+
+    #[cfg(feature = "synthesis")]
+    fn pts(spec: &[(f32, f32)]) -> Vec<EnvelopePoint> {
+        spec.iter()
+            .map(|&(t, v)| EnvelopePoint { time: t, value: v })
+            .collect()
+    }
+
+    #[cfg(feature = "synthesis")]
+    #[test]
+    fn test_catmull_rom_passes_through_control_points() {
+        let sr = 44100.0;
+        let mut env =
+            CatmullRomEnvelope::new(pts(&[(0.0, 0.0), (0.25, 1.0), (0.5, 0.3), (1.0, 0.0)]), sr)
+                .unwrap();
+        env.trigger();
+
+        // Sample exactly at each control-point time and verify the spline
+        // hits the target value (Catmull-Rom interpolates its anchors).
+        let want_at = [(0, 0.0), (11_025, 1.0), (22_050, 0.3), (44_100, 0.0)];
+        let mut last_idx = 0usize;
+        let mut current = env.next_value();
+        for (idx, target) in want_at {
+            while last_idx < idx {
+                current = env.next_value();
+                last_idx += 1;
+            }
+            assert!(
+                (current - target).abs() < 1e-3,
+                "at sample {idx}: spline = {current}, expected {target}"
+            );
+        }
+    }
+
+    #[cfg(feature = "synthesis")]
+    #[test]
+    fn test_catmull_rom_smooth_no_kinks() {
+        // C¹-continuity: the absolute first difference shouldn't jump
+        // sharply across control-point boundaries (vs a linear envelope
+        // which has visible kinks).
+        let sr = 44100.0;
+        let mut env =
+            CatmullRomEnvelope::new(pts(&[(0.0, 0.0), (0.1, 1.0), (0.2, 0.0), (0.3, 0.5)]), sr)
+                .unwrap();
+        env.trigger();
+        let n = (0.3 * sr) as usize;
+        let buf: Vec<f32> = (0..n).map(|_| env.next_value()).collect();
+        let max_diff = buf
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0f32, f32::max);
+        // For a 100ms spline rise from 0→1 at 44.1 kHz, max sample-to-sample
+        // delta is well under 0.01 for a smooth Catmull-Rom curve.
+        assert!(
+            max_diff < 0.01,
+            "Catmull-Rom envelope shouldn't have kinks; max |Δ| = {max_diff}"
+        );
+    }
+
+    #[cfg(feature = "synthesis")]
+    #[test]
+    fn test_catmull_rom_deactivates_after_last_point() {
+        let sr = 44100.0;
+        let mut env =
+            CatmullRomEnvelope::new(pts(&[(0.0, 0.0), (0.05, 0.7), (0.1, 0.3)]), sr).unwrap();
+        env.trigger();
+        // Crossing the last control point returns its value once, then
+        // deactivates — subsequent calls return 0 like other envelopes.
+        let last_idx = (0.1 * sr) as usize;
+        for i in 0..=last_idx {
+            let v = env.next_value();
+            if i == last_idx {
+                assert!(
+                    (v - 0.3).abs() < 1e-3,
+                    "at last control point: got {v}, expected 0.3"
+                );
+            }
+        }
+        assert!(
+            !env.is_active(),
+            "envelope should deactivate after last point"
+        );
+        // Past the end: behaves like MultiStageEnvelope (returns 0 when inactive).
+        assert!(env.next_value().abs() < f32::EPSILON);
+    }
+
+    #[cfg(feature = "synthesis")]
+    #[test]
+    fn test_catmull_rom_invalid_inputs() {
+        let sr = 44100.0;
+        // <2 points
+        assert!(CatmullRomEnvelope::new(pts(&[(0.0, 0.0)]), sr).is_err());
+        // Non-monotone times
+        assert!(CatmullRomEnvelope::new(pts(&[(0.0, 0.0), (0.5, 1.0), (0.5, 0.0)]), sr).is_err());
+        // Bad sample rate
+        assert!(CatmullRomEnvelope::new(pts(&[(0.0, 0.0), (0.1, 1.0)]), -1.0).is_err());
+    }
+
+    #[cfg(feature = "synthesis")]
+    #[test]
+    fn test_catmull_rom_serde_roundtrip() {
+        let env = CatmullRomEnvelope::new(
+            pts(&[(0.0, 0.0), (0.1, 1.0), (0.3, 0.5), (0.5, 0.0)]),
+            48000.0,
+        )
+        .unwrap();
+        let json = serde_json::to_string(&env).unwrap();
+        let back: CatmullRomEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(env.num_points(), back.num_points());
     }
 }
