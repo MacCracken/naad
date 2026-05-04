@@ -198,6 +198,52 @@ pub fn power_spectrum(input: &[f32]) -> Vec<f32> {
         .collect()
 }
 
+/// 256-entry lookup table mapping dB to linear amplitude over `[-80, +20] dB`.
+///
+/// Built lazily on first access via `LazyLock`. Resolution is ~0.39 dB per
+/// entry; consumers should use [`db_to_amplitude_lut`] which interpolates
+/// between adjacent entries — the residual error of a smooth exponential
+/// at sub-half-dB spacing is well below audibility for dynamics processing.
+const DB_LUT_SIZE: usize = 256;
+const DB_LUT_MIN: f32 = -80.0;
+const DB_LUT_MAX: f32 = 20.0;
+const DB_LUT_RANGE: f32 = DB_LUT_MAX - DB_LUT_MIN;
+
+static DB_TO_AMP_LUT: std::sync::LazyLock<[f32; DB_LUT_SIZE]> = std::sync::LazyLock::new(|| {
+    let mut table = [0.0f32; DB_LUT_SIZE];
+    for (i, slot) in table.iter_mut().enumerate() {
+        let t = i as f32 / (DB_LUT_SIZE - 1) as f32;
+        let db = DB_LUT_MIN + t * DB_LUT_RANGE;
+        *slot = 10.0f32.powf(db / 20.0);
+    }
+    table
+});
+
+/// Fast `dB → linear amplitude` via a 256-entry LUT with linear interp.
+///
+/// Avoids `powf` in inner loops — the compressor / limiter / de-esser gain
+/// stages call this every sample. Inputs outside `[-80, +20] dB` clamp to
+/// the table edges (silence / `+20 dB ≈ 10×`). For one-shot conversions
+/// where exact accuracy matters more than throughput, prefer
+/// [`db_to_amplitude`].
+#[inline]
+#[must_use]
+pub fn db_to_amplitude_lut(db: f32) -> f32 {
+    let table = &*DB_TO_AMP_LUT;
+    if db <= DB_LUT_MIN {
+        return table[0];
+    }
+    if db >= DB_LUT_MAX {
+        return table[DB_LUT_SIZE - 1];
+    }
+    let normalized = (db - DB_LUT_MIN) / DB_LUT_RANGE;
+    let idx = normalized * (DB_LUT_SIZE - 1) as f32;
+    let i0 = idx as usize;
+    let i1 = (i0 + 1).min(DB_LUT_SIZE - 1);
+    let frac = idx - i0 as f32;
+    table[i0] * (1.0 - frac) + table[i1] * frac
+}
+
 /// One step of the Marsaglia xorshift32 PRNG.
 ///
 /// Updates `state` in place and returns the new value. Includes a
@@ -389,6 +435,40 @@ mod tests {
         assert_eq!(ps.len(), n / 2 + 1);
         // DC bin should have the most power
         assert!(ps[0] > ps[1]);
+    }
+
+    #[test]
+    fn test_db_to_amplitude_lut_matches_reference() {
+        // Sweep -80..+20 dB; LUT should be within 0.5% of the powf reference
+        // across the table range. Linear interpolation between 256 entries
+        // gives sub-half-dB accuracy on a smooth exponential.
+        for i in 0..=200 {
+            let db = -80.0 + (i as f32) * 0.5;
+            let exact = db_to_amplitude(db);
+            let lut = db_to_amplitude_lut(db);
+            let rel_err = if exact > 0.0 {
+                ((lut - exact) / exact).abs()
+            } else {
+                (lut - exact).abs()
+            };
+            assert!(
+                rel_err < 0.005,
+                "LUT diverges at {db} dB: exact={exact}, lut={lut}, rel_err={rel_err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_db_to_amplitude_lut_clamps_out_of_range() {
+        // Below table min — clamps to the silence floor.
+        let very_quiet = db_to_amplitude_lut(-200.0);
+        let table_floor = db_to_amplitude_lut(-80.0);
+        assert!((very_quiet - table_floor).abs() < f32::EPSILON);
+
+        // Above table max — clamps to +20 dB ≈ 10×.
+        let very_loud = db_to_amplitude_lut(60.0);
+        let table_ceil = db_to_amplitude_lut(20.0);
+        assert!((very_loud - table_ceil).abs() < f32::EPSILON);
     }
 
     #[test]

@@ -117,35 +117,75 @@ impl Compressor {
         self.ratio = ratio.max(1.0);
     }
 
-    /// Compute gain reduction in dB for a given input level in dB.
+    /// Hard-knee gain reduction (`knee_db == 0.0` fast path).
+    ///
+    /// Skips the soft-knee branch and the `(input_db - t).abs() > k*0.5`
+    /// check — both are dead when the knee is zero. Inlined into
+    /// [`Self::process_sample`] for the common hard-knee case.
     #[inline]
-    fn compute_gain_db(&self, input_db: f32) -> f32 {
+    fn compute_gain_db_hard(&self, input_db: f32) -> f32 {
+        if input_db <= self.threshold_db {
+            0.0
+        } else {
+            (self.threshold_db + (input_db - self.threshold_db) / self.ratio) - input_db
+        }
+    }
+
+    /// Soft-knee gain reduction (`knee_db > 0.0`).
+    ///
+    /// Uses the quadratic interpolation between unity gain and full ratio
+    /// across the knee width. Hard-knee callers hit [`Self::compute_gain_db_hard`]
+    /// instead — `process_sample` dispatches once per sample.
+    #[inline]
+    fn compute_gain_db_soft(&self, input_db: f32) -> f32 {
         let t = self.threshold_db;
         let r = self.ratio;
         let k = self.knee_db;
 
-        if k <= 0.0 || (input_db - t).abs() > k * 0.5 {
-            // Hard knee
+        if (input_db - t).abs() > k * 0.5 {
+            // Outside the soft-knee window — full hard-knee math.
             if input_db <= t {
                 0.0
             } else {
                 (t + (input_db - t) / r) - input_db
             }
         } else {
-            // Soft knee
+            // Inside the soft-knee window — quadratic interpolation.
             let x = input_db - t + k * 0.5;
             (1.0 / r - 1.0) * x * x / (2.0 * k)
         }
     }
 
+    /// Compute gain reduction in dB for a given input level in dB.
+    ///
+    /// Public entry point that dispatches to the hard or soft path.
+    #[inline]
+    #[must_use]
+    pub fn compute_gain_db(&self, input_db: f32) -> f32 {
+        if self.knee_db <= 0.0 {
+            self.compute_gain_db_hard(input_db)
+        } else {
+            self.compute_gain_db_soft(input_db)
+        }
+    }
+
     /// Process a single sample.
+    ///
+    /// Uses [`dsp_util::db_to_amplitude_lut`] (256-entry table, linear
+    /// interp) for the gain-stage `dB → linear` step, avoiding `powf` in
+    /// the inner loop. The hard-knee path bypasses the soft-knee
+    /// conditional entirely.
     #[inline]
     #[must_use]
     pub fn process_sample(&mut self, input: f32) -> f32 {
         let env = self.detector.process(input);
         let env_db = dsp_util::amplitude_to_db(env);
-        let gain_db = self.compute_gain_db(env_db) + self.makeup_db;
-        input * dsp_util::db_to_amplitude(gain_db)
+        let gain_db = if self.knee_db <= 0.0 {
+            self.compute_gain_db_hard(env_db)
+        } else {
+            self.compute_gain_db_soft(env_db)
+        } + self.makeup_db;
+        input * dsp_util::db_to_amplitude_lut(gain_db)
     }
 
     /// Process a buffer in place.

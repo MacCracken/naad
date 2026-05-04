@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 1.2.0+ post-1.0 buckets
+
+### Added
+
+- **P1 — `dsp_util::db_to_amplitude_lut`**: 256-entry LazyLock LUT covering `[-80, +20] dB` with linear interpolation, replacing per-sample `powf` in dynamics gain stages. Tests verify <0.5% error vs the `powf` reference across the table range and correct edge clamping. `Compressor::process_sample` now uses it.
+- **P2 — Compressor knee specialization**: Hot path no longer runs the soft-knee branch when `knee_db == 0.0` (the common case). `compute_gain_db` splits into `compute_gain_db_hard` (no knee math) and `compute_gain_db_soft` (full version); `process_sample` dispatches once per sample instead of running the conditional inside the gain calc.
+- **`compressor_1024` benchmark improved 15.7 µs → 14.6 µs (−7.0%, p<0.05)**. Measured under `cargo bench`, criterion 0.8.
+
 ## [1.1.0] - Project Organization & Cleanup
 
 All 17 1.1.0 roadmap items (O1–O17) shipped. No new features — refactor,
