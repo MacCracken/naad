@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **H8 — Spectral analysis suite in `dsp_util`**: Three new primitives for offline analysis (svara composition tools, dhvani spectral metering):
+  - `SpectralWindow` enum (`Rectangular` / `Hann` / `Hamming` / `Blackman`) with an in-place `apply` method.
+  - `stft_magnitudes(signal, window_size, hop_size, window)` — short-time Fourier transform returning per-frame magnitude vectors. Tests verify dimensions match the spec, sine peaks land in the right bin (within 1.5 bins), and invalid inputs (non-power-of-two window, hop=0, undersized signal) return empty.
+  - `chromagram(stft_frames, window_size, sample_rate)` — folds linear-frequency bins into the 12 chromatic pitch classes (A0–C8 range only). Test confirms a 440 Hz sine peaks at pitch class A (index 9) on every frame.
+  - `detect_onsets(stft_frames, hop_size, sample_rate, threshold_factor)` — spectral-flux onset detector with running-median adaptive thresholding. Test confirms a 50ms burst at t=0.25s is detected within ±50ms.
+  - All three behind the `synthesis` feature.
+
 - **H6 — `envelope::CatmullRomEnvelope`**: Smooth-curve envelope generator that interpolates user-placed `EnvelopePoint` control points with Catmull-Rom cubics via `hisab::calc::catmull_rom`. C¹-continuous (no kinks at control points), unlike `MultiStageEnvelope`'s linear segments. Suited to organic/vocal amplitude shapes that linear ADSRs can't capture without dozens of segments. Phantom-endpoint clamping prevents overshoot before t=0 and after the last point. Tests verify the curve passes through control values, has no sharp deltas (max sample-to-sample |Δ| < 0.01 across a 100ms 0→1 rise), and rejects fewer-than-2 points / non-monotone times. Behind the `synthesis` feature.
 
 - **H7 — `dsp_util::detect_pitch_autocorr`**: Autocorrelation-based pitch detection with sub-sample peak refinement via Newton-Raphson (`hisab::num::newton_raphson`) on a Catmull-Rom cubic interpolant through the four samples around the discrete peak. Falls back to closed-form parabolic interpolation as the NR initial guess. Tests confirm <5 cents accuracy on 220 Hz, 440 Hz, 880 Hz, 1100 Hz sines, *and* on 437.3 Hz (non-integer-period — the NR refinement is what keeps this within 5 cents). Rejects noise (<30 % autocorr-peak/r0 ratio), short buffers, and degenerate min/max ranges. Behind the `synthesis` feature.

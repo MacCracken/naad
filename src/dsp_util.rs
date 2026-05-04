@@ -198,6 +198,208 @@ pub fn power_spectrum(input: &[f32]) -> Vec<f32> {
         .collect()
 }
 
+/// Window function for spectral analysis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum SpectralWindow {
+    /// Rectangular (no window) — best frequency resolution, worst leakage.
+    Rectangular,
+    /// Hann (raised cosine) — general-purpose default.
+    Hann,
+    /// Hamming — slightly better sidelobe attenuation than Hann at the cost of higher first sidelobe.
+    Hamming,
+    /// Blackman — strong sidelobe rejection, wider main lobe.
+    Blackman,
+}
+
+impl SpectralWindow {
+    /// Apply this window to a buffer in place.
+    fn apply(self, buffer: &mut [f32]) {
+        let len = buffer.len();
+        if len == 0 {
+            return;
+        }
+        let inv = 1.0 / len as f32;
+        match self {
+            Self::Rectangular => {}
+            Self::Hann => {
+                for (i, s) in buffer.iter_mut().enumerate() {
+                    let w = 0.5 * (1.0 - (std::f32::consts::TAU * i as f32 * inv).cos());
+                    *s *= w;
+                }
+            }
+            Self::Hamming => {
+                for (i, s) in buffer.iter_mut().enumerate() {
+                    let w = 0.54 - 0.46 * (std::f32::consts::TAU * i as f32 * inv).cos();
+                    *s *= w;
+                }
+            }
+            Self::Blackman => {
+                for (i, s) in buffer.iter_mut().enumerate() {
+                    let t = i as f32 * inv;
+                    let w = 0.42 - 0.5 * (std::f32::consts::TAU * t).cos()
+                        + 0.08 * (2.0 * std::f32::consts::TAU * t).cos();
+                    *s *= w;
+                }
+            }
+        }
+    }
+}
+
+/// Compute the Short-Time Fourier Transform magnitude spectrogram of a signal.
+///
+/// Slides a windowed FFT of length `window_size` across `signal` with
+/// `hop_size` samples between frames. Each frame is windowed (per
+/// `window`), zero-padded if necessary, FFT'd, and returned as a vector
+/// of magnitudes of length `window_size / 2 + 1` (DC through Nyquist).
+///
+/// Returns an empty `Vec` if the signal is shorter than `window_size`,
+/// `window_size` is not a power of two, or `hop_size == 0`. Each inner
+/// `Vec` has length `window_size / 2 + 1`.
+///
+/// Common parameter choices:
+/// - `window_size = 2048`, `hop_size = 512` — typical speech/music analysis
+/// - `window_size = 1024`, `hop_size = 256` — finer time resolution
+///
+/// Requires the `synthesis` feature (uses hisab FFT).
+#[cfg(feature = "synthesis")]
+#[must_use]
+pub fn stft_magnitudes(
+    signal: &[f32],
+    window_size: usize,
+    hop_size: usize,
+    window: SpectralWindow,
+) -> Vec<Vec<f32>> {
+    if signal.len() < window_size
+        || hop_size == 0
+        || !window_size.is_power_of_two()
+        || window_size == 0
+    {
+        return Vec::new();
+    }
+
+    let num_frames = (signal.len() - window_size) / hop_size + 1;
+    let half = window_size / 2 + 1;
+    let mut frames = Vec::with_capacity(num_frames);
+
+    let mut frame = vec![0.0f32; window_size];
+    for f in 0..num_frames {
+        let start = f * hop_size;
+        frame.copy_from_slice(&signal[start..start + window_size]);
+        window.apply(&mut frame);
+        let mag = fft_magnitudes(&frame);
+        if mag.len() < half {
+            // FFT failure — bail out cleanly.
+            return Vec::new();
+        }
+        frames.push(mag);
+    }
+
+    frames
+}
+
+/// Compute a chromagram (12-bin pitch-class profile) from an STFT magnitude spectrogram.
+///
+/// Folds linear-frequency bins into the 12 chromatic pitch classes (C, C#,
+/// D, ..., B), summing magnitudes for all bins whose centre frequency
+/// falls within a given pitch class regardless of octave. The result has
+/// shape `[num_frames][12]`, with bin 0 = C, bin 11 = B.
+///
+/// `sample_rate` is the original signal's sample rate. Bins below 27.5 Hz
+/// (A0) and above 4186 Hz (C8) are ignored — outside the standard piano
+/// range chroma estimates are unreliable.
+///
+/// Requires the `synthesis` feature.
+#[cfg(feature = "synthesis")]
+#[must_use]
+pub fn chromagram(magnitudes: &[Vec<f32>], window_size: usize, sample_rate: f32) -> Vec<[f32; 12]> {
+    let mut chroma_frames = Vec::with_capacity(magnitudes.len());
+    if window_size == 0 || sample_rate <= 0.0 {
+        return chroma_frames;
+    }
+    let bin_hz = sample_rate / window_size as f32;
+
+    for frame in magnitudes {
+        let mut chroma = [0.0f32; 12];
+        for (bin, &m) in frame.iter().enumerate().skip(1) {
+            let freq = bin as f32 * bin_hz;
+            if !(27.5..=4186.0).contains(&freq) {
+                continue;
+            }
+            // MIDI note number, fractional. Pitch class = MIDI mod 12.
+            let midi = 69.0 + 12.0 * (freq / 440.0).log2();
+            let pc = midi.rem_euclid(12.0);
+            let pc_idx = pc.floor() as usize % 12;
+            chroma[pc_idx] += m;
+        }
+        chroma_frames.push(chroma);
+    }
+    chroma_frames
+}
+
+/// Detect onset times (in seconds) from an STFT magnitude spectrogram via spectral flux.
+///
+/// Spectral flux is the L2 norm of the half-wave-rectified frame-to-frame
+/// magnitude difference — onsets correspond to local maxima of this curve
+/// above an adaptive threshold.
+///
+/// `hop_size` and `sample_rate` convert frame indices back to seconds in
+/// the source signal. `threshold_factor` (typically `1.2`–`2.0`) scales
+/// the running median used as the picking threshold; lower = more
+/// sensitive.
+///
+/// Requires the `synthesis` feature.
+#[cfg(feature = "synthesis")]
+#[must_use]
+pub fn detect_onsets(
+    magnitudes: &[Vec<f32>],
+    hop_size: usize,
+    sample_rate: f32,
+    threshold_factor: f32,
+) -> Vec<f32> {
+    if magnitudes.len() < 3 || hop_size == 0 || sample_rate <= 0.0 {
+        return Vec::new();
+    }
+
+    // Spectral flux per frame (frame 0 has no flux).
+    let mut flux = Vec::with_capacity(magnitudes.len());
+    flux.push(0.0f32);
+    for i in 1..magnitudes.len() {
+        let prev = &magnitudes[i - 1];
+        let cur = &magnitudes[i];
+        let len = cur.len().min(prev.len());
+        let mut sum = 0.0f32;
+        for k in 0..len {
+            let diff = cur[k] - prev[k];
+            if diff > 0.0 {
+                sum += diff * diff;
+            }
+        }
+        flux.push(sum.sqrt());
+    }
+
+    // Running-median threshold over a small window (±5 frames).
+    let window = 5usize;
+    let mut onsets = Vec::new();
+    for i in 1..(flux.len() - 1) {
+        // Local maximum check
+        if flux[i] <= flux[i - 1] || flux[i] <= flux[i + 1] {
+            continue;
+        }
+        // Compute median of surrounding window
+        let lo = i.saturating_sub(window);
+        let hi = (i + window + 1).min(flux.len());
+        let mut local: Vec<f32> = flux[lo..hi].to_vec();
+        local.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = local[local.len() / 2];
+        if flux[i] > median * threshold_factor && flux[i] > 1e-6 {
+            let time = (i * hop_size) as f32 / sample_rate;
+            onsets.push(time);
+        }
+    }
+    onsets
+}
+
 /// Detect the fundamental pitch of a buffer via autocorrelation.
 ///
 /// Computes the autocorrelation of `buffer`, locates the dominant peak in
@@ -556,6 +758,109 @@ mod tests {
         (0..n)
             .map(|i| (i as f32 / sample_rate * freq_hz * std::f32::consts::TAU).sin())
             .collect()
+    }
+
+    #[cfg(feature = "synthesis")]
+    #[test]
+    fn test_stft_dimensions_match_spec() {
+        // 4096 samples, window 1024, hop 256 → (4096-1024)/256 + 1 = 13 frames.
+        let signal = vec![0.5f32; 4096];
+        let frames = stft_magnitudes(&signal, 1024, 256, SpectralWindow::Hann);
+        assert_eq!(frames.len(), 13);
+        for f in &frames {
+            assert_eq!(f.len(), 1024 / 2 + 1);
+        }
+    }
+
+    #[cfg(feature = "synthesis")]
+    #[test]
+    fn test_stft_locates_sine_peak() {
+        let sr = 44100.0;
+        let freq = 1000.0;
+        let n = 8192;
+        let signal: Vec<f32> = (0..n)
+            .map(|i| (i as f32 / sr * freq * std::f32::consts::TAU).sin())
+            .collect();
+        let frames = stft_magnitudes(&signal, 2048, 512, SpectralWindow::Hann);
+        assert!(!frames.is_empty());
+
+        // Each frame's peak bin should map to ~freq.
+        let bin_hz = sr / 2048.0;
+        for frame in &frames {
+            let (peak_bin, _) = frame
+                .iter()
+                .enumerate()
+                .skip(1)
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .unwrap();
+            let peak_freq = peak_bin as f32 * bin_hz;
+            assert!(
+                (peak_freq - freq).abs() < bin_hz * 1.5,
+                "STFT peak at {peak_freq} Hz, expected ~{freq} Hz"
+            );
+        }
+    }
+
+    #[cfg(feature = "synthesis")]
+    #[test]
+    fn test_stft_rejects_invalid_inputs() {
+        // Non-power-of-2 window
+        assert!(stft_magnitudes(&vec![0.0; 4096], 1000, 256, SpectralWindow::Hann).is_empty());
+        // Hop = 0
+        assert!(stft_magnitudes(&vec![0.0; 4096], 1024, 0, SpectralWindow::Hann).is_empty());
+        // Signal shorter than window
+        assert!(stft_magnitudes(&vec![0.0; 100], 1024, 256, SpectralWindow::Hann).is_empty());
+    }
+
+    #[cfg(feature = "synthesis")]
+    #[test]
+    fn test_chromagram_concentrates_on_correct_pitch_class() {
+        // 440 Hz = A4. Pitch class A is index 9 (C=0, C#=1, ..., A=9).
+        let sr = 44100.0;
+        let signal: Vec<f32> = (0..16_384)
+            .map(|i| (i as f32 / sr * 440.0 * std::f32::consts::TAU).sin())
+            .collect();
+        let stft = stft_magnitudes(&signal, 4096, 1024, SpectralWindow::Hann);
+        let chroma = chromagram(&stft, 4096, sr);
+        assert!(!chroma.is_empty());
+        for frame in &chroma {
+            let (peak_pc, _) = frame
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .unwrap();
+            assert_eq!(peak_pc, 9, "440 Hz should peak at pitch-class A (idx 9)");
+        }
+    }
+
+    #[cfg(feature = "synthesis")]
+    #[test]
+    fn test_detect_onsets_finds_burst() {
+        let sr = 44100.0;
+        let n = sr as usize; // 1 second
+        let mut signal = vec![0.0f32; n];
+        // Two onsets: a sine burst at 0.25s and another at 0.6s.
+        let burst_len = (sr * 0.05) as usize;
+        for &start_t in &[0.25f32, 0.6] {
+            let start = (start_t * sr) as usize;
+            for i in 0..burst_len {
+                if start + i < n {
+                    signal[start + i] = (i as f32 / sr * 440.0 * std::f32::consts::TAU).sin() * 0.8;
+                }
+            }
+        }
+        let stft = stft_magnitudes(&signal, 1024, 256, SpectralWindow::Hann);
+        let onsets = detect_onsets(&stft, 256, sr, 1.5);
+        assert!(
+            !onsets.is_empty(),
+            "should detect at least one onset in burst signal"
+        );
+        // First detected onset should land near 0.25s (within 50ms).
+        let first = onsets[0];
+        assert!(
+            (first - 0.25).abs() < 0.05,
+            "first onset {first}s should be near 0.25s"
+        );
     }
 
     #[cfg(feature = "synthesis")]
