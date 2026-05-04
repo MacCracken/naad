@@ -8,6 +8,8 @@ pub mod ambisonics;
 pub mod analysis;
 pub mod binaural;
 pub mod convolution;
+pub mod coupled;
+pub mod directivity;
 pub mod fdn_reverb;
 pub mod room;
 

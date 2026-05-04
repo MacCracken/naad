@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **G1 — `acoustics::analysis::suggest_absorption`**: Wraps `goonj::analysis::suggest_absorption_placement` to return per-wall RT60-sensitivity advice for tuning a virtual mix room toward a target reverb time. New `WallAbsorptionAdvice` struct (naad-side mirror of goonj's type, so future goonj API moves don't break naad's surface).
+- **G2 — `acoustics::coupled` module**: New module wrapping `goonj::coupled::coupled_room_decay`. `CoupledRoomConfig` (two `RoomReverbConfig`s + a `CoupledPortal`) → `CoupledDecayResult` with double-slope RT60 (early/late), early-component amplitude, and coupling strength. Models live-room/control-room pairs, halls with reverberant side chapels, etc.
+- **G3 — `acoustics::directivity` module**: New module exposing `SourceDirectivity` (omni / cardioid family / figure-8) for monitor-placement and spatial-synthesis use cases. Wraps `goonj::directivity::DirectivityPattern`'s closed-form variants; tabulated balloon data deliberately not exposed (the no-IO contract). Provides both 3D `gain(direction, front)` and 2D `gain_polar(theta)` evaluators with a roundtrip test verifying they agree on axisymmetric inputs.
+
 - **P1 — `dsp_util::db_to_amplitude_lut`**: 256-entry LazyLock LUT covering `[-80, +20] dB` with linear interpolation, replacing per-sample `powf` in dynamics gain stages. Tests verify <0.5% error vs the `powf` reference across the table range and correct edge clamping. `Compressor::process_sample` now uses it.
 - **P2 — Compressor knee specialization**: Hot path no longer runs the soft-knee branch when `knee_db == 0.0` (the common case). `compute_gain_db` splits into `compute_gain_db_hard` (no knee math) and `compute_gain_db_soft` (full version); `process_sample` dispatches once per sample instead of running the conditional inside the gain calc.
 - **`compressor_1024` benchmark improved 15.7 µs → 14.6 µs (−7.0%, p<0.05)**. Measured under `cargo bench`, criterion 0.8.

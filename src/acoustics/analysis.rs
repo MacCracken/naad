@@ -8,8 +8,11 @@ use serde::{Deserialize, Serialize};
 
 use goonj::analysis::{clarity_c50, clarity_c80, definition_d50, sti_estimate};
 use goonj::impulse::ImpulseResponse;
+use goonj::room::AcousticRoom;
 
 use crate::error::{NaadError, Result};
+
+use super::room::RoomReverbConfig;
 
 /// Room acoustic metrics computed from an impulse response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +106,62 @@ pub fn estimate_rt60(ir: &[f32], sample_rate: u32) -> f32 {
     ir.len() as f32 / sample_rate as f32
 }
 
+/// One wall's contribution to RT60 if its absorption is increased.
+///
+/// Returned by [`suggest_absorption`] — sort the result by `rt60_sensitivity`
+/// (most-negative first) to find the walls that would shorten reverb time
+/// the most for a given amount of acoustic treatment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WallAbsorptionAdvice {
+    /// Index of the wall in the shoebox geometry (0 = floor, 1 = ceiling, 2-5 = side walls).
+    pub wall_index: usize,
+    /// Change in RT60 (seconds) per unit absorption bump on this wall.
+    /// Negative values shorten reverb (the desirable case for taming a live room).
+    pub rt60_sensitivity: f32,
+    /// Current average absorption of this wall (0.0 = perfectly reflective, 1.0 = perfectly absorptive).
+    pub current_absorption: f32,
+}
+
+/// Recommend acoustic treatment placement to bring a virtual room toward a target RT60.
+///
+/// Builds a goonj [`AcousticRoom`] from `config`, then asks goonj which walls
+/// would have the most impact on reverb time if their absorption coefficient
+/// were increased. Useful for mix-room treatment planning and "what-if"
+/// experiments before buying physical absorbers.
+///
+/// # Errors
+///
+/// Returns [`NaadError::ComputationError`] if the wall material name is
+/// unknown or the room dimensions are invalid.
+pub fn suggest_absorption(
+    config: &RoomReverbConfig,
+    target_rt60: f32,
+) -> Result<Vec<WallAbsorptionAdvice>> {
+    let material = super::material_by_name(&config.wall_material_name).ok_or_else(|| {
+        NaadError::ComputationError {
+            message: format!("unknown wall material: {}", config.wall_material_name),
+        }
+    })?;
+
+    if config.length <= 0.0 || config.width <= 0.0 || config.height <= 0.0 {
+        return Err(NaadError::ComputationError {
+            message: "room dimensions must be positive".into(),
+        });
+    }
+
+    let room = AcousticRoom::shoebox(config.length, config.width, config.height, material);
+    let suggestions = goonj::analysis::suggest_absorption_placement(&room, target_rt60);
+
+    Ok(suggestions
+        .into_iter()
+        .map(|s| WallAbsorptionAdvice {
+            wall_index: s.wall_index,
+            rt60_sensitivity: s.rt60_sensitivity,
+            current_absorption: s.current_absorption,
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,5 +220,54 @@ mod tests {
         let back: RoomMetrics = serde_json::from_str(&json).unwrap();
         assert!((metrics.c50 - back.c50).abs() < f32::EPSILON);
         assert!((metrics.sti - back.sti).abs() < f32::EPSILON);
+    }
+
+    fn live_room() -> RoomReverbConfig {
+        RoomReverbConfig {
+            length: 8.0,
+            width: 6.0,
+            height: 4.0,
+            wall_material_name: "concrete".to_string(),
+            source_position: [4.0, 2.0, 3.0],
+            listener_position: [4.0, 2.0, 3.0],
+            sample_rate: 48000,
+        }
+    }
+
+    #[test]
+    fn test_suggest_absorption_returns_advice() {
+        let advice = suggest_absorption(&live_room(), 0.5).unwrap();
+        assert!(!advice.is_empty(), "should return suggestions for shoebox");
+        for a in &advice {
+            assert!(a.rt60_sensitivity.is_finite());
+            assert!(a.current_absorption.is_finite());
+        }
+    }
+
+    #[test]
+    fn test_suggest_absorption_invalid_material() {
+        let mut cfg = live_room();
+        cfg.wall_material_name = "kryptonite".to_string();
+        assert!(suggest_absorption(&cfg, 0.5).is_err());
+    }
+
+    #[test]
+    fn test_suggest_absorption_invalid_dimensions() {
+        let mut cfg = live_room();
+        cfg.length = -1.0;
+        assert!(suggest_absorption(&cfg, 0.5).is_err());
+    }
+
+    #[test]
+    fn test_advice_serde_roundtrip() {
+        let advice = WallAbsorptionAdvice {
+            wall_index: 2,
+            rt60_sensitivity: -0.15,
+            current_absorption: 0.05,
+        };
+        let json = serde_json::to_string(&advice).unwrap();
+        let back: WallAbsorptionAdvice = serde_json::from_str(&json).unwrap();
+        assert_eq!(advice.wall_index, back.wall_index);
+        assert!((advice.rt60_sensitivity - back.rt60_sensitivity).abs() < f32::EPSILON);
     }
 }
