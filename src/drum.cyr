@@ -1,0 +1,456 @@
+# drum.cyr -- analog drum synthesis models: kick, snare, hi-hat.
+#
+# Ports rust-old/src/synth/drum.rs. f32 -> f64 throughout. Pitch-swept
+# sine bodies, noise bursts, and decay envelopes -- all generated from
+# primitives, no samples. The `noise_state: u32` PRNG field becomes an
+# alloc(8) pointer-state slot (load64/store64) stepped via dsp_util's
+# xorshift32_signed_f32 (matching the noise.cyr idiom). The BiquadFilter
+# fields hold filter struct pointers; the fixed `[f32; 6]` phase/frequency
+# arrays become stdlib vecs. Constructors return the struct pointer on
+# success or a negative ERR_* (was Result<Self>). serde/Display tests dropped.
+#
+# Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE/TWO/
+# HALF/TAU, f64_add/sub/mul/div/neg/clamp/from/sin/floor), error.cyr
+# (validate_sample_rate, flush_denormal, naad_is_err, ERR_*), and filter.cyr
+# (filter_biquad_new, filter_biquad_process_sample, FILTER_*). No `include`.
+
+# ================================================================
+# Non-integer float literals (IEEE-754 bit patterns).
+# ================================================================
+var DRUM_NEG_6_9 = 0xC01B99999999999A;   # -6.9  (decay: e^(-6.9) ~ 0.1% over N samples)
+var DRUM_C0_005  = 0x3F747AE147AE147B;   # 0.005 (click decay window, 5ms)
+var DRUM_C0_03   = 0x3F9EB851EB851EB8;   # 0.03  (pitch envelope window, 30ms)
+var DRUM_C1E_6   = 0x3EB0C6F7A0B5ED8D;   # 1e-6  (deactivation threshold)
+var DRUM_C0_1    = 0x3FB999999999999A;   # 0.1   (snare tone decay window, 100ms)
+var DRUM_C0_15   = 0x3FC3333333333333;   # 0.15  (snare noise decay window, 150ms)
+var DRUM_C1_5    = 0x3FF8000000000000;   # 1.5   (snare bandpass Q)
+var DRUM_C0_8    = 0x3FE999999999999A;   # 0.8   (snare noise level)
+var DRUM_C0_707  = 0x3FE69FBE76C8B439;   # 0.707 (hi-hat highpass Q)
+
+# Hi-hat inharmonic metallic frequencies (classic 808 ratios).
+var DRUM_F205_3 = 0x4069A9999999999A;   # 205.3
+var DRUM_F304_4 = 0x4073066666666666;   # 304.4
+var DRUM_F369_6 = 0x407719999999999A;   # 369.6
+var DRUM_F522_7 = 0x408055999999999A;   # 522.7
+var DRUM_F540_5 = 0x4080E40000000000;   # 540.5
+var DRUM_F800_6 = 0x408904CCCCCCCCCD;   # 800.6
+
+# ================================================================
+# _drum_decay_coeff -- e^(-6.9 / samples), or 0.0 if samples <= 0.
+# Shared decay-coefficient helper (Rust inlined this per field).
+# ================================================================
+#must_use
+fn _drum_decay_coeff(samples) {
+    if (f64_gt(samples, 0) == 1) {
+        return f64_exp(f64_div(DRUM_NEG_6_9, samples));
+    }
+    return 0;
+}
+
+# ================================================================
+# KickDrum -- pitch-swept sine body + noise click transient.
+#   start_freq, end_freq : body pitch sweep endpoints (Hz)
+#   phase                : body oscillator phase (0..1)
+#   pitch_env            : pitch envelope (0..1), decays toward 0
+#   body_amp, click_amp  : amplitude envelopes (0..1)
+#   body_decay, click_decay, pitch_decay : per-sample decay coefficients
+#   click_level          : click noise level (clamped 0..1)
+#   rng                  : pointer to an 8-byte slot holding the u32 PRNG state
+#   sample_rate          : Hz
+#   active               : 1 if currently producing output, else 0
+# ================================================================
+#derive(accessors)
+struct KickDrum {
+    start_freq;
+    end_freq;
+    phase;
+    pitch_env;
+    body_amp;
+    click_amp;
+    body_decay;
+    click_decay;
+    click_level;
+    pitch_decay;
+    rng;
+    sample_rate;
+    active;
+}
+
+# ================================================================
+# drum_kick_new -- create a kick drum. Mirrors KickDrum::new. Returns the
+# struct pointer on success, or ERR_INVALID_SAMPLE_RATE on invalid sample_rate.
+# ================================================================
+#must_use
+fn drum_kick_new(start_freq, end_freq, body_decay_ms, click_level, sample_rate) {
+    var e = validate_sample_rate(sample_rate);
+    if (naad_is_err(e) == 1) { return e; }
+
+    var body_decay_samples = f64_mul(f64_div(body_decay_ms, f64_from(1000)), sample_rate);
+    var body_decay = _drum_decay_coeff(body_decay_samples);
+
+    # Click decays much faster than body (5ms).
+    var click_decay_samples = f64_mul(DRUM_C0_005, sample_rate);
+    var click_decay = _drum_decay_coeff(click_decay_samples);
+
+    # Pitch envelope decays over ~30ms.
+    var pitch_decay_samples = f64_mul(DRUM_C0_03, sample_rate);
+    var pitch_decay = _drum_decay_coeff(pitch_decay_samples);
+
+    var rng = alloc(8);
+    store64(rng, 12345);
+
+    var self = alloc(sizeof(KickDrum));
+    KickDrum_set_start_freq(self, start_freq);
+    KickDrum_set_end_freq(self, end_freq);
+    KickDrum_set_phase(self, 0);
+    KickDrum_set_pitch_env(self, 0);
+    KickDrum_set_body_amp(self, 0);
+    KickDrum_set_click_amp(self, 0);
+    KickDrum_set_body_decay(self, body_decay);
+    KickDrum_set_click_decay(self, click_decay);
+    KickDrum_set_click_level(self, f64_clamp(click_level, 0, F64_ONE));
+    KickDrum_set_pitch_decay(self, pitch_decay);
+    KickDrum_set_rng(self, rng);
+    KickDrum_set_sample_rate(self, sample_rate);
+    KickDrum_set_active(self, 0);
+    return self;
+}
+
+# Trigger the kick drum: reset phase and envelopes, mark active.
+fn drum_kick_trigger(self) {
+    KickDrum_set_phase(self, 0);
+    KickDrum_set_pitch_env(self, F64_ONE);
+    KickDrum_set_body_amp(self, F64_ONE);
+    KickDrum_set_click_amp(self, F64_ONE);
+    KickDrum_set_active(self, 1);
+    return 0;
+}
+
+# ================================================================
+# drum_kick_next_sample -- one sample of body + click, advancing all state.
+# ================================================================
+#inline
+#must_use
+fn drum_kick_next_sample(self) {
+    if (KickDrum_active(self) == 0) { return 0; }
+
+    var start_freq = KickDrum_start_freq(self);
+    var end_freq = KickDrum_end_freq(self);
+    var sample_rate = KickDrum_sample_rate(self);
+
+    # Pitch sweep: interpolate from start_freq to end_freq.
+    var pitch_env = KickDrum_pitch_env(self);
+    var freq = f64_add(end_freq, f64_mul(f64_sub(start_freq, end_freq), pitch_env));
+    pitch_env = flush_denormal(f64_mul(pitch_env, KickDrum_pitch_decay(self)));
+    KickDrum_set_pitch_env(self, pitch_env);
+
+    # Body: sine oscillator.
+    var phase = KickDrum_phase(self);
+    var body_amp = KickDrum_body_amp(self);
+    var body = f64_mul(f64_sin(f64_mul(phase, F64_TAU)), body_amp);
+    phase = f64_add(phase, f64_div(freq, sample_rate));
+    phase = f64_sub(phase, f64_floor(phase));
+    KickDrum_set_phase(self, phase);
+    body_amp = flush_denormal(f64_mul(body_amp, KickDrum_body_decay(self)));
+    KickDrum_set_body_amp(self, body_amp);
+
+    # Click: noise burst.
+    var noise = xorshift32_signed_f32(KickDrum_rng(self));
+    var click_amp = KickDrum_click_amp(self);
+    var click = f64_mul(f64_mul(noise, click_amp), KickDrum_click_level(self));
+    click_amp = flush_denormal(f64_mul(click_amp, KickDrum_click_decay(self)));
+    KickDrum_set_click_amp(self, click_amp);
+
+    # Deactivate when both envelopes are negligible.
+    if (f64_lt(body_amp, DRUM_C1E_6) == 1 && f64_lt(click_amp, DRUM_C1E_6) == 1) {
+        KickDrum_set_active(self, 0);
+    }
+
+    return f64_add(body, click);
+}
+
+# Fill a vec buffer in place with successive kick samples.
+#inline
+fn drum_kick_fill_buffer(self, buffer) {
+    var n = vec_len(buffer);
+    var i = 0;
+    while (i < n) {
+        vec_set(buffer, i, drum_kick_next_sample(self));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 1 if the kick is currently producing output, else 0.
+#must_use
+fn drum_kick_is_active(self) {
+    return KickDrum_active(self);
+}
+
+# ================================================================
+# SnareDrum -- sine tone body + bandpass-filtered noise.
+#   phase        : tone oscillator phase
+#   tone_freq    : tone frequency (Hz)
+#   tone_amp, noise_amp : amplitude envelopes
+#   tone_decay, noise_decay : per-sample decay coefficients
+#   noise_level  : noise level relative to tone
+#   noise_filter : BiquadFilter pointer (bandpass over the noise)
+#   rng          : pointer to an 8-byte slot holding the u32 PRNG state
+#   sample_rate  : Hz
+#   active       : 1 if currently producing output, else 0
+# ================================================================
+#derive(accessors)
+struct SnareDrum {
+    phase;
+    tone_freq;
+    tone_amp;
+    tone_decay;
+    noise_amp;
+    noise_decay;
+    noise_level;
+    noise_filter;
+    rng;
+    sample_rate;
+    active;
+}
+
+# ================================================================
+# drum_snare_new -- create a snare drum. Mirrors SnareDrum::new. Returns the
+# struct pointer on success, or a negative ERR_* on invalid sample_rate or an
+# invalid bandpass filter (propagated from filter_biquad_new).
+# ================================================================
+#must_use
+fn drum_snare_new(sample_rate) {
+    var e = validate_sample_rate(sample_rate);
+    if (naad_is_err(e) == 1) { return e; }
+
+    var tone_decay = _drum_decay_coeff(f64_mul(DRUM_C0_1, sample_rate));     # 100ms
+    var noise_decay = _drum_decay_coeff(f64_mul(DRUM_C0_15, sample_rate));   # 150ms
+
+    var noise_filter = filter_biquad_new(FILTER_BANDPASS, sample_rate, f64_from(1500), DRUM_C1_5);
+    if (naad_is_err(noise_filter) == 1) { return noise_filter; }
+
+    var rng = alloc(8);
+    store64(rng, 67890);
+
+    var self = alloc(sizeof(SnareDrum));
+    SnareDrum_set_phase(self, 0);
+    SnareDrum_set_tone_freq(self, f64_from(200));
+    SnareDrum_set_tone_amp(self, 0);
+    SnareDrum_set_tone_decay(self, tone_decay);
+    SnareDrum_set_noise_amp(self, 0);
+    SnareDrum_set_noise_decay(self, noise_decay);
+    SnareDrum_set_noise_level(self, DRUM_C0_8);
+    SnareDrum_set_noise_filter(self, noise_filter);
+    SnareDrum_set_rng(self, rng);
+    SnareDrum_set_sample_rate(self, sample_rate);
+    SnareDrum_set_active(self, 0);
+    return self;
+}
+
+# Trigger the snare drum: reset phase and envelopes, mark active.
+fn drum_snare_trigger(self) {
+    SnareDrum_set_phase(self, 0);
+    SnareDrum_set_tone_amp(self, F64_ONE);
+    SnareDrum_set_noise_amp(self, F64_ONE);
+    SnareDrum_set_active(self, 1);
+    return 0;
+}
+
+# ================================================================
+# drum_snare_next_sample -- one sample of tone + bandpassed noise.
+# ================================================================
+#inline
+#must_use
+fn drum_snare_next_sample(self) {
+    if (SnareDrum_active(self) == 0) { return 0; }
+
+    # Tone component: sine at ~200 Hz.
+    var phase = SnareDrum_phase(self);
+    var tone_amp = SnareDrum_tone_amp(self);
+    var tone = f64_mul(f64_sin(f64_mul(phase, F64_TAU)), tone_amp);
+    phase = f64_add(phase, f64_div(SnareDrum_tone_freq(self), SnareDrum_sample_rate(self)));
+    phase = f64_sub(phase, f64_floor(phase));
+    SnareDrum_set_phase(self, phase);
+    tone_amp = flush_denormal(f64_mul(tone_amp, SnareDrum_tone_decay(self)));
+    SnareDrum_set_tone_amp(self, tone_amp);
+
+    # Noise component: bandpass-filtered white noise.
+    var noise_raw = xorshift32_signed_f32(SnareDrum_rng(self));
+    var noise_filtered = filter_biquad_process_sample(SnareDrum_noise_filter(self), noise_raw);
+    var noise_amp = SnareDrum_noise_amp(self);
+    var noise = f64_mul(f64_mul(noise_filtered, noise_amp), SnareDrum_noise_level(self));
+    noise_amp = flush_denormal(f64_mul(noise_amp, SnareDrum_noise_decay(self)));
+    SnareDrum_set_noise_amp(self, noise_amp);
+
+    if (f64_lt(tone_amp, DRUM_C1E_6) == 1 && f64_lt(noise_amp, DRUM_C1E_6) == 1) {
+        SnareDrum_set_active(self, 0);
+    }
+
+    return f64_add(tone, noise);
+}
+
+# Fill a vec buffer in place with successive snare samples.
+#inline
+fn drum_snare_fill_buffer(self, buffer) {
+    var n = vec_len(buffer);
+    var i = 0;
+    while (i < n) {
+        vec_set(buffer, i, drum_snare_next_sample(self));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 1 if the snare is currently producing output, else 0.
+#must_use
+fn drum_snare_is_active(self) {
+    return SnareDrum_active(self);
+}
+
+# ================================================================
+# HiHat -- detuned square oscillators through highpass + bandpass.
+#   phases       : vec of 6 metallic oscillator phases
+#   frequencies  : vec of 6 detuned inharmonic frequencies (Hz)
+#   amp          : amplitude envelope
+#   decay        : per-sample decay coefficient
+#   highpass, bandpass : BiquadFilter pointers (filter chain)
+#   sample_rate  : Hz
+#   active       : 1 if currently producing output, else 0
+# ================================================================
+#derive(accessors)
+struct HiHat {
+    phases;
+    frequencies;
+    amp;
+    decay;
+    highpass;
+    bandpass;
+    sample_rate;
+    active;
+}
+
+# Number of metallic oscillators.
+var DRUM_HIHAT_OSCILLATORS = 6;
+
+# ================================================================
+# drum_hihat_new -- create a hi-hat. Mirrors HiHat::new. `open` (1/0) selects
+# a longer decay. Returns the struct pointer on success, or a negative ERR_*
+# on invalid sample_rate or an invalid filter (propagated from the biquads).
+# ================================================================
+#must_use
+fn drum_hihat_new(open, sample_rate) {
+    var e = validate_sample_rate(sample_rate);
+    if (naad_is_err(e) == 1) { return e; }
+
+    var decay_ms = f64_from(30);
+    if (open == 1) { decay_ms = f64_from(200); }
+    var decay_samples = f64_mul(f64_div(decay_ms, f64_from(1000)), sample_rate);
+    var decay = f64_exp(f64_div(DRUM_NEG_6_9, decay_samples));
+
+    # Inharmonic metallic frequencies (classic 808 ratios).
+    var frequencies = vec_new();
+    vec_push(frequencies, DRUM_F205_3);
+    vec_push(frequencies, DRUM_F304_4);
+    vec_push(frequencies, DRUM_F369_6);
+    vec_push(frequencies, DRUM_F522_7);
+    vec_push(frequencies, DRUM_F540_5);
+    vec_push(frequencies, DRUM_F800_6);
+
+    var phases = vec_new();
+    var i = 0;
+    while (i < DRUM_HIHAT_OSCILLATORS) {
+        vec_push(phases, 0);
+        i = i + 1;
+    }
+
+    var highpass = filter_biquad_new(FILTER_HIGHPASS, sample_rate, f64_from(6000), DRUM_C0_707);
+    if (naad_is_err(highpass) == 1) { return highpass; }
+    var bandpass = filter_biquad_new(FILTER_BANDPASS, sample_rate, f64_from(10000), F64_ONE);
+    if (naad_is_err(bandpass) == 1) { return bandpass; }
+
+    var self = alloc(sizeof(HiHat));
+    HiHat_set_phases(self, phases);
+    HiHat_set_frequencies(self, frequencies);
+    HiHat_set_amp(self, 0);
+    HiHat_set_decay(self, decay);
+    HiHat_set_highpass(self, highpass);
+    HiHat_set_bandpass(self, bandpass);
+    HiHat_set_sample_rate(self, sample_rate);
+    HiHat_set_active(self, 0);
+    return self;
+}
+
+# Trigger the hi-hat: reset all phases and amplitude, mark active.
+fn drum_hihat_trigger(self) {
+    var phases = HiHat_phases(self);
+    var i = 0;
+    while (i < DRUM_HIHAT_OSCILLATORS) {
+        vec_set(phases, i, 0);
+        i = i + 1;
+    }
+    HiHat_set_amp(self, F64_ONE);
+    HiHat_set_active(self, 1);
+    return 0;
+}
+
+# ================================================================
+# drum_hihat_next_sample -- summed detuned squares through highpass -> bandpass.
+# ================================================================
+#inline
+#must_use
+fn drum_hihat_next_sample(self) {
+    if (HiHat_active(self) == 0) { return 0; }
+
+    var phases = HiHat_phases(self);
+    var frequencies = HiHat_frequencies(self);
+    var sample_rate = HiHat_sample_rate(self);
+
+    # Sum of detuned square oscillators for metallic tone.
+    var metallic = 0;
+    var i = 0;
+    while (i < DRUM_HIHAT_OSCILLATORS) {
+        var ph = vec_get(phases, i);
+        var sq = F64_ONE;
+        if (f64_lt(ph, F64_HALF) == 0) { sq = f64_neg(F64_ONE); }
+        metallic = f64_add(metallic, sq);
+        ph = f64_add(ph, f64_div(vec_get(frequencies, i), sample_rate));
+        ph = f64_sub(ph, f64_floor(ph));
+        vec_set(phases, i, ph);
+        i = i + 1;
+    }
+    metallic = f64_div(metallic, f64_from(DRUM_HIHAT_OSCILLATORS));
+
+    # Filter chain: highpass -> bandpass.
+    var hp = filter_biquad_process_sample(HiHat_highpass(self), metallic);
+    var bp = filter_biquad_process_sample(HiHat_bandpass(self), hp);
+    var amp = HiHat_amp(self);
+    var out = f64_mul(bp, amp);
+
+    amp = flush_denormal(f64_mul(amp, HiHat_decay(self)));
+    HiHat_set_amp(self, amp);
+
+    if (f64_lt(amp, DRUM_C1E_6) == 1) {
+        HiHat_set_active(self, 0);
+    }
+
+    return out;
+}
+
+# Fill a vec buffer in place with successive hi-hat samples.
+#inline
+fn drum_hihat_fill_buffer(self, buffer) {
+    var n = vec_len(buffer);
+    var i = 0;
+    while (i < n) {
+        vec_set(buffer, i, drum_hihat_next_sample(self));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 1 if the hi-hat is currently producing output, else 0.
+#must_use
+fn drum_hihat_is_active(self) {
+    return HiHat_active(self);
+}

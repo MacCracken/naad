@@ -1,0 +1,163 @@
+# noise.cyr -- noise generators: white, pink (Voss-McCartney), brown.
+#
+# Ports rust-old/src/noise.rs. f32 -> f64 throughout. The Rust `NoiseType`
+# enum becomes integer constants; the nested `Xorshift32` struct is folded
+# into a single pointer-state slot (a `rng` field holding an alloc(8) pointer
+# whose 64-bit slot carries the u32 PRNG state, stepped via dsp_util's
+# xorshift32_signed_f32). The fixed `[f32; 16]` pink octave array becomes a
+# stdlib vec of 16 f64. serde round-trip test dropped.
+#
+# Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE/TWO,
+# f64_add/sub/mul/div/neg/clamp/from) and dsp_util (xorshift32_signed_f32).
+# The module file itself has no `include` lines.
+
+# ================================================================
+# NoiseType (enum) -> integer constants.
+# ================================================================
+var NOISE_WHITE = 0;
+var NOISE_PINK  = 1;
+var NOISE_BROWN = 2;
+
+# Number of octaves for Voss-McCartney pink noise (Rust PINK_OCTAVES).
+var NOISE_PINK_OCTAVES = 16;
+
+# u32 wrap mask for the pink counter (matches wrapping_add/wrapping_sub).
+var NOISE_U32_MASK = 0xFFFFFFFF;
+
+# Non-integer float literals (IEEE-754 bit patterns).
+var NOISE_C0_02  = 0x3F947AE147AE147B;   # 0.02  (brown integration step)
+var NOISE_C0_999 = 0x3FEFF7CED916872B;   # 0.999 (brown leaky integrator)
+
+# ================================================================
+# NoiseGenerator -- stateful generator for white / pink / brown noise.
+#   noise_type       : NOISE_* constant
+#   rng              : pointer to an 8-byte slot holding the u32 PRNG state
+#   pink_octaves     : vec of 16 f64 (Voss-McCartney octave values)
+#   pink_counter     : u32 counter for the octave-update tree
+#   pink_running_sum : running sum of the octave values
+#   brown_prev       : previous brown-noise sample (leaky integrator state)
+# ================================================================
+#derive(accessors)
+struct NoiseGenerator { noise_type; rng; pink_octaves; pink_counter; pink_running_sum; brown_prev; }
+
+# ================================================================
+# noise_new -- create a generator. Mirrors NoiseGenerator::new: seeds the
+# PRNG (0 -> 1 to avoid the dead zero state) and, for pink noise only,
+# primes the 16 octave values plus their running sum.
+# ================================================================
+#must_use
+fn noise_new(noise_type, seed) {
+    var rng = alloc(8);
+    var state = seed;
+    if (state == 0) { state = 1; }
+    store64(rng, state);
+
+    var pink_octaves = vec_new();
+    var i = 0;
+    while (i < NOISE_PINK_OCTAVES) {
+        vec_push(pink_octaves, 0);
+        i = i + 1;
+    }
+
+    var pink_running_sum = 0;
+    if (noise_type == NOISE_PINK) {
+        i = 0;
+        while (i < NOISE_PINK_OCTAVES) {
+            var val = xorshift32_signed_f32(rng);
+            vec_set(pink_octaves, i, val);
+            pink_running_sum = f64_add(pink_running_sum, val);
+            i = i + 1;
+        }
+    }
+
+    var g = alloc(sizeof(NoiseGenerator));
+    NoiseGenerator_set_noise_type(g, noise_type);
+    NoiseGenerator_set_rng(g, rng);
+    NoiseGenerator_set_pink_octaves(g, pink_octaves);
+    NoiseGenerator_set_pink_counter(g, 0);
+    NoiseGenerator_set_pink_running_sum(g, pink_running_sum);
+    NoiseGenerator_set_brown_prev(g, 0);
+    return g;
+}
+
+# ================================================================
+# noise_next_sample -- dispatch on the noise type (Rust next_sample match).
+# ================================================================
+#must_use
+fn noise_next_sample(self) {
+    var nt = NoiseGenerator_noise_type(self);
+    if (nt == NOISE_WHITE) { return noise_white(self); }
+    if (nt == NOISE_PINK) { return noise_pink(self); }
+    return noise_brown(self);
+}
+
+# White noise: a single signed PRNG step.
+fn noise_white(self) {
+    return xorshift32_signed_f32(NoiseGenerator_rng(self));
+}
+
+# ================================================================
+# noise_pink -- Voss-McCartney pink noise. Each counter increment flips a
+# set of trailing bits; every flipped bit i re-rolls octave i. A final white
+# component is added and the whole sum is normalized by (octaves + 1).
+# ================================================================
+fn noise_pink(self) {
+    var counter = (NoiseGenerator_pink_counter(self) + 1) & NOISE_U32_MASK;
+    NoiseGenerator_set_pink_counter(self, counter);
+    var prev = (counter - 1) & NOISE_U32_MASK;
+    var changed_bits = counter ^ prev;
+
+    var rng = NoiseGenerator_rng(self);
+    var octaves = NoiseGenerator_pink_octaves(self);
+    var running_sum = NoiseGenerator_pink_running_sum(self);
+
+    var i = 0;
+    while (i < NOISE_PINK_OCTAVES) {
+        if ((changed_bits & (1 << i)) != 0) {
+            running_sum = f64_sub(running_sum, vec_get(octaves, i));
+            var new_val = xorshift32_signed_f32(rng);
+            vec_set(octaves, i, new_val);
+            running_sum = f64_add(running_sum, new_val);
+        }
+        i = i + 1;
+    }
+    NoiseGenerator_set_pink_running_sum(self, running_sum);
+
+    var white = xorshift32_signed_f32(rng);
+    return f64_div(f64_add(running_sum, white), f64_from(NOISE_PINK_OCTAVES + 1));
+}
+
+# ================================================================
+# noise_brown -- integrated white noise with a leaky integrator + clamp.
+# ================================================================
+fn noise_brown(self) {
+    var white = xorshift32_signed_f32(NoiseGenerator_rng(self));
+    var prev = NoiseGenerator_brown_prev(self);
+    prev = f64_add(prev, f64_mul(white, NOISE_C0_02));
+    prev = f64_clamp(prev, f64_neg(F64_ONE), F64_ONE);
+    prev = f64_mul(prev, NOISE_C0_999);
+    NoiseGenerator_set_brown_prev(self, prev);
+    return prev;
+}
+
+# ================================================================
+# noise_fill_buffer -- fill a vec buffer in place with successive samples.
+# ================================================================
+fn noise_fill_buffer(self, buffer) {
+    var n = vec_len(buffer);
+    var i = 0;
+    while (i < n) {
+        vec_set(buffer, i, noise_next_sample(self));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# noise_white_noise_sample -- stateless convenience: one signed white sample
+# from a PRNG state slot (`&mut u32` -> pointer to a 64-bit slot).
+# ================================================================
+#must_use
+fn noise_white_noise_sample(seed) {
+    return xorshift32_signed_f32(seed);
+}

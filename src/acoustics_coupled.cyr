@@ -1,0 +1,154 @@
+# acoustics_coupled.cyr -- naad coupled-room decay analysis (goonj wrapper).
+#
+# Ports rust-old/src/acoustics/coupled.rs. Wraps goonj's coupled-rooms
+# simulation: two acoustic spaces joined by a portal (e.g. live room <->
+# control room, stage <-> audience). The combined decay is *not* a single
+# exponential -- energy in the smaller, more absorptive room decays first
+# ("early"), then is sustained by spillover from the larger / more
+# reverberant room ("late"), giving the characteristic double-slope decay
+# of coupled-volume halls and cathedrals with reverberant side chapels.
+# f32 -> f64 throughout. Rust's serde derives are dropped.
+#
+# Cross-crate goonj mapping (discovered from lib/goonj.cyr + goonj src/tests):
+#   goonj::portal::Portal{..}          -> portal_new(pos, normal, w, h)
+#   goonj::room::AcousticRoom::shoebox -> acoustic_room_shoebox(l, w, h, mat)
+#   goonj::coupled::CoupledRooms{..}    -> CoupledRooms struct + CoupledRooms_set_*
+#   goonj::coupled::coupled_room_decay  -> coupled_room_decay(coupled)
+#   goonj::coupled::CoupledDecay.<f>    -> CoupledDecay_rt60_early/rt60_late/
+#                                          early_amplitude/coupling_strength
+#   hisab::Vec3::new                    -> hvec3_new(x, y, z)  (positions/normals)
+# The wall material name resolves through naad_acoustics_material_by_name
+# (src/acoustics.cyr); the room config reuses RoomReverbConfig from
+# src/acoustics_room.cyr. Result<Self> -> struct pointer on success or a
+# negative ERR_COMPUTATION on unknown material / non-positive dimensions.
+#
+# Requires (from the build/test unit): stdlib alloc + math (f64_le), hisab
+# (hvec3_new), the goonj bundle (portal_new, acoustic_room_shoebox,
+# CoupledRooms, coupled_room_decay, CoupledDecay_*), and the naad L0 modules
+# error.cyr (ERR_COMPUTATION, naad_is_err) + acoustics.cyr
+# (naad_acoustics_material_by_name) + acoustics_room.cyr (RoomReverbConfig_*).
+# This file has no `include` lines.
+
+# ================================================================
+# CoupledPortal -- a portal opening connecting two rooms.
+#   position: centre of the opening, HVec3 [x, y, z] in metres
+#             (in room_a's coordinate frame)
+#   normal  : direction HVec3 [x, y, z] (unit-ish), pointing from room_a
+#             into room_b
+#   width   : opening width in metres
+#   height  : opening height in metres
+# The Rust `[f32; 3]` position/normal arrays map to hisab HVec3 points.
+# ================================================================
+#derive(accessors)
+struct CoupledPortal {
+    position;
+    normal;
+    width;
+    height;
+}
+
+# Build a CoupledPortal. `position` / `normal` are HVec3 pointers
+# (hvec3_new). Ports the Rust struct literal.
+#must_use
+fn naad_coupled_portal_new(position, normal, width, height) {
+    var p = alloc(sizeof(CoupledPortal));
+    CoupledPortal_set_position(p, position);
+    CoupledPortal_set_normal(p, normal);
+    CoupledPortal_set_width(p, width);
+    CoupledPortal_set_height(p, height);
+    return p;
+}
+
+# ================================================================
+# CoupledRoomConfig -- configuration for a two-room coupled-decay sim.
+#   room_a: the first (typically smaller / more absorptive) room config
+#   room_b: the second (typically larger / more reverberant) room config
+#   portal: CoupledPortal connecting the two rooms
+# room_a / room_b are naad RoomReverbConfig pointers (src/acoustics_room.cyr).
+# ================================================================
+#derive(accessors)
+struct CoupledRoomConfig {
+    room_a;
+    room_b;
+    portal;
+}
+
+# Build a CoupledRoomConfig. Ports the Rust struct literal.
+#must_use
+fn naad_coupled_room_config_new(room_a, room_b, portal) {
+    var c = alloc(sizeof(CoupledRoomConfig));
+    CoupledRoomConfig_set_room_a(c, room_a);
+    CoupledRoomConfig_set_room_b(c, room_b);
+    CoupledRoomConfig_set_portal(c, portal);
+    return c;
+}
+
+# ================================================================
+# CoupledDecayResult -- result of a coupled-decay analysis. Two RT60
+# values describe the double-slope: rt60_early is the initial fast decay
+# (energy escaping through the portal + absorbed by the first room),
+# rt60_late the slower tail sustained by spillover. early_amplitude is the
+# relative amplitude of the early component (0..1); coupling_strength
+# summarises how strongly the rooms exchange energy (0 = isolated,
+# 1 = fully coupled).
+# ================================================================
+#derive(accessors)
+struct CoupledDecayResult {
+    rt60_early;
+    rt60_late;
+    early_amplitude;
+    coupling_strength;
+}
+
+# ================================================================
+# naad_coupled_build_room -- build a goonj AcousticRoom from a naad
+# RoomReverbConfig. Returns the room pointer on success, or a negative
+# ERR_COMPUTATION if the wall material name is unknown or the room
+# dimensions are not positive. Ports the private `build_room` helper.
+# ================================================================
+#must_use
+fn naad_coupled_build_room(config) {
+    var material = naad_acoustics_material_by_name(RoomReverbConfig_wall_material_name(config));
+    if (material == 0) { return ERR_COMPUTATION; }
+
+    if (f64_le(RoomReverbConfig_length(config), 0) == 1) { return ERR_COMPUTATION; }
+    if (f64_le(RoomReverbConfig_width(config), 0) == 1) { return ERR_COMPUTATION; }
+    if (f64_le(RoomReverbConfig_height(config), 0) == 1) { return ERR_COMPUTATION; }
+
+    return acoustic_room_shoebox(RoomReverbConfig_length(config),
+    RoomReverbConfig_width(config), RoomReverbConfig_height(config), material);
+}
+
+# ================================================================
+# naad_coupled_analyze_decay -- run the coupled-decay analysis for a
+# two-room configuration. Builds the underlying goonj rooms + portal, then
+# asks goonj for the double-slope decay parameters. Returns the
+# CoupledDecayResult pointer on success, or a negative ERR_COMPUTATION if
+# either room's material name is unknown or any room dimension is
+# non-positive. Ports `analyze_coupled_decay`.
+# ================================================================
+#must_use
+fn naad_coupled_analyze_decay(config) {
+    var room_a = naad_coupled_build_room(CoupledRoomConfig_room_a(config));
+    if (naad_is_err(room_a) == 1) { return ERR_COMPUTATION; }
+    var room_b = naad_coupled_build_room(CoupledRoomConfig_room_b(config));
+    if (naad_is_err(room_b) == 1) { return ERR_COMPUTATION; }
+
+    var np = CoupledRoomConfig_portal(config);
+    var portal = portal_new(CoupledPortal_position(np), CoupledPortal_normal(np),
+    CoupledPortal_width(np), CoupledPortal_height(np));
+
+    var coupled = alloc(sizeof(CoupledRooms));
+    CoupledRooms_set_room_a(coupled, room_a);
+    CoupledRooms_set_room_b(coupled, room_b);
+    CoupledRooms_set_portal(coupled, portal);
+
+    var decay = coupled_room_decay(coupled);
+
+    var out = alloc(sizeof(CoupledDecayResult));
+    CoupledDecayResult_set_rt60_early(out, CoupledDecay_rt60_early(decay));
+    CoupledDecayResult_set_rt60_late(out, CoupledDecay_rt60_late(decay));
+    CoupledDecayResult_set_early_amplitude(out, CoupledDecay_early_amplitude(decay));
+    CoupledDecayResult_set_coupling_strength(out, CoupledDecay_coupling_strength(decay));
+    return out;
+}

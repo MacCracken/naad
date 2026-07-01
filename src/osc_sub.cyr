@@ -1,0 +1,115 @@
+# osc_sub.cyr -- sub-oscillator: plays 1 or 2 octaves below a frequency.
+#
+# Ports rust-old/src/oscillator/sub.rs. f32 -> f64 throughout. The
+# `SubOctave` enum becomes integer constants; serde derives/tests are
+# dropped; the constructor returns the struct pointer or a negative ERR_*.
+# The sub embeds an Oscillator pointer (built via osc_new from osc_core.cyr).
+#
+# Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE/TWO,
+# f64_div/mul/max/from) and error.cyr (naad_is_err, ERR_NONE) and
+# osc_core.cyr (osc_new/osc_next_sample/osc_set_frequency, WAVEFORM_*).
+# No `include` lines.
+
+# ================================================================
+# SubOctave (enum) -> integer constants.
+# ================================================================
+var SUBOCT_DOWN1 = 0;   # one octave below (half frequency)
+var SUBOCT_DOWN2 = 1;   # two octaves below (quarter frequency)
+
+# Minimum sub frequency floor (Rust `.max(0.1)`).
+var SUBOSC_C0_1 = 0x3FB999999999999A;   # 0.1
+
+# ================================================================
+# SubOscillator -- octave-down oscillator with an independent waveform.
+#   osc            : embedded Oscillator pointer
+#   octave         : SUBOCT_* constant
+#   base_frequency : base Hz (before octave division)
+#   level          : mix level (0..1); pub field in Rust
+# ================================================================
+#derive(accessors)
+struct SubOscillator { osc; octave; base_frequency; level; }
+
+# ================================================================
+# subosc_new -- construct. Divides base_frequency by 2 (Down1) or 4 (Down2),
+# floored at 0.1 Hz. Returns the struct pointer, or a negative ERR_* if the
+# underlying Oscillator failed to build.
+# ================================================================
+#must_use
+fn subosc_new(waveform, base_frequency, octave, sample_rate) {
+    var divisor = F64_TWO;
+    if (octave == SUBOCT_DOWN2) { divisor = f64_from(4); }
+    var sub_freq = f64_div(base_frequency, divisor);
+    var osc = osc_new(waveform, f64_max(sub_freq, SUBOSC_C0_1), sample_rate);
+    if (naad_is_err(osc) == 1) { return osc; }
+
+    var self = alloc(sizeof(SubOscillator));
+    SubOscillator_set_osc(self, osc);
+    SubOscillator_set_octave(self, octave);
+    SubOscillator_set_base_frequency(self, base_frequency);
+    SubOscillator_set_level(self, F64_ONE);
+    return self;
+}
+
+# ================================================================
+# subosc_next_sample -- next sample scaled by level.
+# ================================================================
+#inline
+#must_use
+fn subosc_next_sample(self) {
+    return f64_mul(osc_next_sample(SubOscillator_osc(self)), SubOscillator_level(self));
+}
+
+# ================================================================
+# subosc_set_base_frequency -- update base frequency (sub freq derived).
+# Validates before mutating. Returns ERR_NONE or a negative ERR_*.
+# ================================================================
+fn subosc_set_base_frequency(self, freq) {
+    var divisor = F64_TWO;
+    if (SubOscillator_octave(self) == SUBOCT_DOWN2) { divisor = f64_from(4); }
+    var e = osc_set_frequency(SubOscillator_osc(self), f64_max(f64_div(freq, divisor), SUBOSC_C0_1));
+    if (naad_is_err(e) == 1) { return e; }
+    SubOscillator_set_base_frequency(self, freq);
+    return ERR_NONE;
+}
+
+# ================================================================
+# subosc_set_octave -- change octave division. Returns ERR_NONE or ERR_*.
+# ================================================================
+fn subosc_set_octave(self, octave) {
+    var divisor = F64_TWO;
+    if (octave == SUBOCT_DOWN2) { divisor = f64_from(4); }
+    var base = SubOscillator_base_frequency(self);
+    var e = osc_set_frequency(SubOscillator_osc(self), f64_max(f64_div(base, divisor), SUBOSC_C0_1));
+    if (naad_is_err(e) == 1) { return e; }
+    SubOscillator_set_octave(self, octave);
+    return ERR_NONE;
+}
+
+# ================================================================
+# Accessors.
+# ================================================================
+#inline
+#must_use
+fn subosc_octave(self) {
+    return SubOscillator_octave(self);
+}
+
+#inline
+#must_use
+fn subosc_base_frequency(self) {
+    return SubOscillator_base_frequency(self);
+}
+
+# ================================================================
+# subosc_fill_buffer -- fill a vec buffer in place.
+# ================================================================
+#inline
+fn subosc_fill_buffer(self, buffer) {
+    var n = vec_len(buffer);
+    var i = 0;
+    while (i < n) {
+        vec_set(buffer, i, subosc_next_sample(self));
+        i = i + 1;
+    }
+    return 0;
+}

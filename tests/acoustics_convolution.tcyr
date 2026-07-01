@@ -1,0 +1,138 @@
+# acoustics_convolution.tcyr -- parity test for src/acoustics_convolution.cyr.
+# Ports the #[test] blocks from rust-old/src/acoustics/convolution.rs
+# one-for-one. The serde-roundtrip test is dropped (Cyrius has no serde).
+# f32 tolerances are loosened to f64. An extra from_room case exercises the
+# goonj cross-crate mapping (the room path the oracle only drives indirectly).
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "src/error.cyr"
+include "src/dsp_util.cyr"
+include "src/acoustics.cyr"
+include "src/acoustics_room.cyr"
+include "src/acoustics_convolution.cyr"
+
+# --- float literals used by the ported tests (IEEE-754 bit patterns) ---
+var CV_0_1  = 0x3fb999999999999a;   # 0.1
+var CV_0_2  = 0x3fc999999999999a;   # 0.2
+var CV_0_3  = 0x3fd3333333333333;   # 0.3
+var CV_0_7  = 0x3fe6666666666666;   # 0.7
+var CV_0_01 = 0x3f847ae147ae147b;   # 0.01
+
+# 1 if |a - b| < tol, else 0.
+fn approx(a, b, tol) {
+    if (f64_lt(f64_abs(f64_sub(a, b)), tol) == 1) { return 1; }
+    return 0;
+}
+
+# 1.5 metres = 1.0 + 0.5 (ear height in the room fixture).
+fn ear_height() { return f64_add(F64_ONE, F64_HALF); }
+
+# Build a vec of f64 from four values.
+fn vec4(a, b, c, d) {
+    var v = vec_new();
+    vec_push(v, a);
+    vec_push(v, b);
+    vec_push(v, c);
+    vec_push(v, d);
+    return v;
+}
+
+alloc_init();
+
+# ================================================================
+# from_ir produces output. Simple echo IR: identity + delayed tap.
+test_group("from_ir_produces_output");
+var fi_ir = vec4(F64_ONE, 0, 0, F64_HALF);
+var fi_rev = naad_convolution_from_ir(fi_ir, F64_ONE);
+var fi_out = naad_convolution_process_sample(fi_rev, F64_ONE);
+assert_eq(naad_is_finite(fi_out), 1, "impulse output should be finite");
+assert(f64_gt(f64_abs(fi_out), 0), "should produce output for impulse");
+# Process silence, check finite.
+var fi_i = 0;
+var fi_ok = 1;
+while (fi_i < 10) {
+    var fi_s = naad_convolution_process_sample(fi_rev, 0);
+    if (naad_is_finite(fi_s) == 0) { fi_ok = 0; }
+    fi_i = fi_i + 1;
+}
+assert_eq(fi_ok, 1, "silence tail should be finite");
+
+# ================================================================
+# mix = 0 passes the dry signal through.
+test_group("dry_passthrough");
+var dp_ir = vec_new();
+vec_push(dp_ir, F64_HALF);
+vec_push(dp_ir, CV_0_3);
+vec_push(dp_ir, CV_0_1);
+var dp_rev = naad_convolution_from_ir(dp_ir, 0);
+var dp_out = naad_convolution_process_sample(dp_rev, CV_0_7);
+assert(approx(dp_out, CV_0_7, CV_0_01), "mix=0 should pass dry signal");
+
+# ================================================================
+# FFT block processing. Delay IR: identity at tap 0, echo at tap 3.
+test_group("fft_block_processing");
+var fb_ir = vec4(F64_ONE, 0, 0, F64_HALF);
+var fb_rev = naad_convolution_from_ir(fb_ir, F64_ONE);
+var fb_in = vec_new();
+var fb_out = vec_new();
+var fb_k = 0;
+while (fb_k < 8) {
+    var fb_v = 0;
+    if (fb_k == 0) { fb_v = F64_ONE; }
+    vec_push(fb_in, fb_v);
+    vec_push(fb_out, 0);
+    fb_k = fb_k + 1;
+}
+naad_convolution_process_block(fb_rev, fb_in, fb_out);
+# output[0] ~ 1.0 (identity), output[3] ~ 0.5 (echo).
+assert(f64_gt(f64_abs(vec_get(fb_out, 0)), F64_HALF), "identity tap > 0.5");
+assert(f64_gt(f64_abs(vec_get(fb_out, 3)), CV_0_2), "echo tap > 0.2");
+var fb_fin = 1;
+var fb_j = 0;
+while (fb_j < 8) {
+    if (naad_is_finite(vec_get(fb_out, fb_j)) == 0) { fb_fin = 0; }
+    fb_j = fb_j + 1;
+}
+assert_eq(fb_fin, 1, "all block outputs finite");
+
+# ================================================================
+# from_room maps the goonj cross-crate path (added coverage). 8x6x3 concrete
+# shoebox, source [2, 1.5, 3], listener [6, 1.5, 3] at 48 kHz.
+test_group("from_room_creates_loaded_reverb");
+var fr_source = hvec3_new(F64_TWO, ear_height(), f64_from(3));
+var fr_listener = hvec3_new(f64_from(6), ear_height(), f64_from(3));
+var fr_cfg = naad_room_reverb_config_new(f64_from(8), f64_from(6), f64_from(3),
+"concrete", fr_source, fr_listener, 48000);
+var fr_rev = naad_convolution_from_room(fr_cfg);
+assert_eq(naad_is_err(fr_rev), 0, "from_room should succeed for a valid config");
+assert_eq(naad_convolution_is_loaded(fr_rev), 1, "generated IR should be loaded");
+assert(f64_gt(f64_from(naad_convolution_ir_len(fr_rev)), 0), "IR should be non-empty");
+var fr_out = naad_convolution_process_sample(fr_rev, F64_ONE);
+assert_eq(naad_is_finite(fr_out), 1, "room-convolved output should be finite");
+
+# ================================================================
+# from_room rejects bad material and non-positive dimensions.
+test_group("from_room_rejects_invalid");
+var bm_cfg = naad_room_reverb_config_new(f64_from(8), f64_from(6), f64_from(3),
+"unobtanium", hvec3_new(F64_TWO, ear_height(), f64_from(3)),
+hvec3_new(f64_from(6), ear_height(), f64_from(3)), 48000);
+assert_eq(naad_is_err(naad_convolution_from_room(bm_cfg)), 1, "unknown material -> error");
+var bd_cfg = naad_room_reverb_config_new(f64_neg(F64_ONE), f64_from(6), f64_from(3),
+"concrete", hvec3_new(F64_TWO, ear_height(), f64_from(3)),
+hvec3_new(f64_from(6), ear_height(), f64_from(3)), 48000);
+assert_eq(naad_is_err(naad_convolution_from_room(bd_cfg)), 1, "negative dimension -> error");
+
+# ================================================================
+# rebuild_from_ir restores a fresh IR + buffer state.
+test_group("rebuild_from_ir");
+var rb_rev = naad_convolution_from_ir(vec_new(), F64_HALF);
+assert_eq(naad_convolution_is_loaded(rb_rev), 0, "empty IR -> not loaded");
+naad_convolution_rebuild_from_ir(rb_rev, vec4(F64_ONE, 0, 0, F64_HALF));
+assert_eq(naad_convolution_is_loaded(rb_rev), 1, "rebuilt IR -> loaded");
+assert_eq(naad_convolution_ir_len(rb_rev), 4, "rebuilt IR length is 4");
+var rb_out = naad_convolution_process_sample(rb_rev, F64_ONE);
+assert_eq(naad_is_finite(rb_out), 1, "rebuilt reverb output finite");
+
+var rc = assert_summary();
+syscall(60, rc);

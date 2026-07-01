@@ -1,0 +1,59 @@
+# delay.tcyr -- parity tests for src/delay.cyr.
+# Ported from the #[test] blocks in rust-old/src/delay.rs. The serde
+# round-trip test (test_serde_roundtrip) is dropped (no serde in Cyrius).
+
+include "src/error.cyr"
+include "src/delay.cyr"
+
+alloc_init();
+
+var C0_5 = 0x3FE0000000000000;   # 0.5
+
+# ================================================================
+test_group("delay_line_basic");
+# Reading with delay 0 returns the just-written sample.
+var dl1 = delay_line_new(10);
+delay_line_write(dl1, F64_ONE);
+var v1 = delay_line_read(dl1, 0);
+assert(f64_lt(f64_abs(f64_sub(v1, F64_ONE)), NAAD_EPSILON), "delay 0 returns last write");
+
+# ================================================================
+test_group("delay_line_delayed");
+# A 5-sample delay recalls the sample written 5 writes ago.
+var dl2 = delay_line_new(10);
+delay_line_write(dl2, F64_ONE);
+var z = 0;
+while (z < 5) {
+    delay_line_write(dl2, 0);
+    z = z + 1;
+}
+var v2 = delay_line_read(dl2, f64_from(5));
+assert(f64_lt(f64_abs(f64_sub(v2, F64_ONE)), NAAD_EPSILON), "expected 1.0 at 5 sample delay");
+
+# ================================================================
+test_group("delay_fractional");
+# A fractional delay interpolates between neighbouring samples.
+var dl3 = delay_line_new(10);
+delay_line_write(dl3, 0);
+delay_line_write(dl3, F64_ONE);
+var v3 = delay_line_read(dl3, C0_5);
+var frac_ok = 0;
+if (f64_gt(v3, 0) == 1) {
+    if (f64_lt(v3, F64_ONE) == 1) { frac_ok = 1; }
+}
+assert(frac_ok, "fractional delay should interpolate");
+
+# ================================================================
+test_group("comb_filter");
+var comb = comb_filter_new(100, C0_5);
+var co = comb_filter_process_sample(comb, F64_ONE);
+assert(naad_is_finite(co), "comb output is finite");
+
+# ================================================================
+test_group("allpass_delay");
+var ap = allpass_delay_new(100, C0_5);
+var ao = allpass_delay_process_sample(ap, F64_ONE);
+assert(naad_is_finite(ao), "allpass output is finite");
+
+var rc = assert_summary();
+syscall(60, rc);

@@ -1,0 +1,368 @@
+# fm.cyr -- Multi-operator FM (Frequency Modulation) synthesis.
+#
+# Ports rust-old/src/synth/fm.rs. f32 -> f64 throughout. Classic FM synthesis
+# with up to 6 operators routed through configurable algorithms. Each operator
+# is a sine oscillator with its own ADSR envelope (reused from envelope.cyr),
+# output level, and optional self-feedback.
+#
+# The `FmAlgorithm` enum becomes integer FM_ALGO_* constants. The
+# `SmallVec<[FmOperator; 6]>` operator storage becomes a stdlib vec of
+# FmOperator pointers. serde/Display derives + tests are dropped. Constructors
+# return the struct pointer on success or a negative ERR_* on failure (was
+# Result<Self>). `Option<()>` setters return 1 (Some) / 0 (None) for out-of-
+# range indices; `Option<&FmOperator>` accessors return the pointer or 0 (null).
+# Methods become free `fm_*` functions taking the struct pointer.
+#
+# Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE/HALF/
+# TAU, f64_clamp), builtins (f64_add/sub/mul/div/sin/floor/from/lt/gt),
+# error.cyr (validate_sample_rate, flush_denormal, naad_is_err, ERR_*), and
+# envelope.cyr (envelope_adsr_with_sample_rate/next_value/gate_on/gate_off/
+# is_active). No `include` lines.
+
+# ================================================================
+# Maximum number of FM operators supported (was const MAX_OPERATORS).
+# ================================================================
+var FM_MAX_OPERATORS = 6;
+
+# ================================================================
+# FmAlgorithm -> integer constants (was `enum FmAlgorithm`).
+#   SERIAL2   : op0 modulates op1, op1 is carrier.
+#   PARALLEL2 : op0 and op1 both output (additive).
+#   SERIAL4   : op0 -> op1 -> op2 -> op3 (carrier).
+#   STACK4    : (op0+op1) modulates (op2+op3), latter pair is carrier.
+#   CUSTOM    : caller manages modulation externally (parallel, no mod).
+# ================================================================
+var FM_ALGO_SERIAL2   = 0;
+var FM_ALGO_PARALLEL2 = 1;
+var FM_ALGO_SERIAL4   = 2;
+var FM_ALGO_STACK4    = 3;
+var FM_ALGO_CUSTOM    = 4;
+
+# ================================================================
+# Default ADSR parameters for a new operator (IEEE-754 bit patterns).
+# ================================================================
+var FM_C0_01 = 0x3f847ae147ae147b;   # 0.01 (attack seconds)
+var FM_C0_1  = 0x3fb999999999999a;   # 0.1  (decay seconds)
+var FM_C0_8  = 0x3fe999999999999a;   # 0.8  (sustain level)
+var FM_C0_3  = 0x3fd3333333333333;   # 0.3  (release seconds)
+
+# Default operator frequency (440 Hz) as an integer literal.
+var FM_DEFAULT_FREQ = 440;
+
+# ================================================================
+# FmOperator -- a single FM operator: sine oscillator + envelope + level +
+# feedback.
+#   frequency      : frequency in Hz
+#   phase          : current oscillator phase (0..1)
+#   envelope       : Adsr pointer for this operator
+#   output_level   : output level (0.0..1.0)
+#   feedback       : self-feedback amount (0.0..1.0)
+#   feedback_state : previous output for the feedback path
+#   sample_rate    : sample rate in Hz
+# ================================================================
+#derive(accessors)
+struct FmOperator {
+    frequency;
+    phase;
+    envelope;
+    output_level;
+    feedback;
+    feedback_state;
+    sample_rate;
+}
+
+# Create a new FM operator at the given frequency. Returns the struct pointer
+# on success, or a negative ERR_* if the envelope/sample_rate is invalid.
+#must_use
+fn fm_operator_new(frequency, sample_rate) {
+    var envelope = envelope_adsr_with_sample_rate(FM_C0_01, FM_C0_1, FM_C0_8, FM_C0_3, sample_rate);
+    if (naad_is_err(envelope) == 1) { return envelope; }
+
+    var self = alloc(sizeof(FmOperator));
+    FmOperator_set_frequency(self, frequency);
+    FmOperator_set_phase(self, 0);
+    FmOperator_set_envelope(self, envelope);
+    FmOperator_set_output_level(self, F64_ONE);
+    FmOperator_set_feedback(self, 0);
+    FmOperator_set_feedback_state(self, 0);
+    FmOperator_set_sample_rate(self, sample_rate);
+    return self;
+}
+
+# Set the operator frequency.
+fn fm_operator_set_frequency(self, freq) {
+    FmOperator_set_frequency(self, freq);
+    return 0;
+}
+
+# Set the output level (clamped to 0.0..1.0).
+fn fm_operator_set_level(self, level) {
+    FmOperator_set_output_level(self, f64_clamp(level, 0, F64_ONE));
+    return 0;
+}
+
+# Set the self-feedback amount (clamped to 0.0..1.0).
+fn fm_operator_set_feedback(self, amount) {
+    FmOperator_set_feedback(self, f64_clamp(amount, 0, F64_ONE));
+    return 0;
+}
+
+# Trigger the operator envelope.
+fn fm_operator_gate_on(self) {
+    envelope_adsr_gate_on(FmOperator_envelope(self));
+    return 0;
+}
+
+# Release the operator envelope.
+fn fm_operator_gate_off(self) {
+    envelope_adsr_gate_off(FmOperator_envelope(self));
+    return 0;
+}
+
+# Generate the next sample with external phase modulation input.
+# `phase_mod` is added to the operator's phase before computing sine.
+#inline
+#must_use
+fn fm_operator_next_sample(self, phase_mod) {
+    var fb = f64_mul(FmOperator_feedback(self), FmOperator_feedback_state(self));
+    var mod_phase = f64_add(f64_add(FmOperator_phase(self), phase_mod), fb);
+    var out = f64_sin(f64_mul(mod_phase, F64_TAU));
+    var env = envelope_adsr_next_value(FmOperator_envelope(self));
+    var result = f64_mul(f64_mul(out, env), FmOperator_output_level(self));
+
+    FmOperator_set_feedback_state(self, flush_denormal(result));
+
+    # Advance phase and wrap into [0, 1).
+    var phase_inc = f64_div(FmOperator_frequency(self), FmOperator_sample_rate(self));
+    var new_phase = f64_add(FmOperator_phase(self), phase_inc);
+    FmOperator_set_phase(self, f64_sub(new_phase, f64_floor(new_phase)));
+
+    return result;
+}
+
+# Returns the operator's envelope pointer (mutable view).
+fn fm_operator_envelope_mut(self) {
+    return FmOperator_envelope(self);
+}
+
+# Returns the operator's envelope pointer (shared view).
+#must_use
+fn fm_operator_envelope(self) {
+    return FmOperator_envelope(self);
+}
+
+# ================================================================
+# FmSynthEngine -- multi-operator FM synthesis engine.
+#   operators   : vec of FmOperator pointers (up to 6)
+#   algorithm   : FM_ALGO_* routing constant
+#   sample_rate : sample rate in Hz
+# ================================================================
+#derive(accessors)
+struct FmSynthEngine {
+    operators;
+    algorithm;
+    sample_rate;
+}
+
+# Create a new FM synth engine with `num_operators` 440 Hz sine operators.
+# Returns the struct pointer on success, or a negative ERR_* if num_operators
+# is 0 or > 6, or sample_rate is invalid.
+#must_use
+fn fm_engine_new(num_operators, sample_rate) {
+    if (num_operators == 0) { return ERR_INVALID_PARAMETER; }
+    if (num_operators > FM_MAX_OPERATORS) { return ERR_INVALID_PARAMETER; }
+    var e = validate_sample_rate(sample_rate);
+    if (naad_is_err(e) == 1) { return e; }
+
+    var operators = vec_new();
+    var i = 0;
+    while (i < num_operators) {
+        var op = fm_operator_new(f64_from(FM_DEFAULT_FREQ), sample_rate);
+        if (naad_is_err(op) == 1) { return op; }
+        vec_push(operators, op);
+        i = i + 1;
+    }
+
+    var self = alloc(sizeof(FmSynthEngine));
+    FmSynthEngine_set_operators(self, operators);
+    FmSynthEngine_set_algorithm(self, FM_ALGO_SERIAL2);
+    FmSynthEngine_set_sample_rate(self, sample_rate);
+    return self;
+}
+
+# Set the routing algorithm.
+fn fm_engine_set_algorithm(self, algorithm) {
+    FmSynthEngine_set_algorithm(self, algorithm);
+    return 0;
+}
+
+# Set the frequency of an operator by index. Returns 1 (Some) on success or
+# 0 (None) if `index` is out of range.
+fn fm_engine_set_operator_freq(self, index, freq) {
+    var operators = FmSynthEngine_operators(self);
+    if (index < 0) { return 0; }
+    if (index >= vec_len(operators)) { return 0; }
+    fm_operator_set_frequency(vec_get(operators, index), freq);
+    return 1;
+}
+
+# Set the output level of an operator by index. Returns 1 (Some) on success or
+# 0 (None) if `index` is out of range.
+fn fm_engine_set_operator_level(self, index, level) {
+    var operators = FmSynthEngine_operators(self);
+    if (index < 0) { return 0; }
+    if (index >= vec_len(operators)) { return 0; }
+    fm_operator_set_level(vec_get(operators, index), level);
+    return 1;
+}
+
+# Trigger all operator envelopes (note on).
+fn fm_engine_note_on(self) {
+    var operators = FmSynthEngine_operators(self);
+    var n = vec_len(operators);
+    var i = 0;
+    while (i < n) {
+        fm_operator_gate_on(vec_get(operators, i));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Release all operator envelopes (note off).
+fn fm_engine_note_off(self) {
+    var operators = FmSynthEngine_operators(self);
+    var n = vec_len(operators);
+    var i = 0;
+    while (i < n) {
+        fm_operator_gate_off(vec_get(operators, i));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Returns the operator pointer at `index` (mutable view), or 0 (null) if out
+# of range.
+fn fm_engine_operator_mut(self, index) {
+    var operators = FmSynthEngine_operators(self);
+    if (index < 0) { return 0; }
+    if (index >= vec_len(operators)) { return 0; }
+    return vec_get(operators, index);
+}
+
+# Returns the operator pointer at `index` (shared view), or 0 (null) if out
+# of range.
+#must_use
+fn fm_engine_operator(self, index) {
+    var operators = FmSynthEngine_operators(self);
+    if (index < 0) { return 0; }
+    if (index >= vec_len(operators)) { return 0; }
+    return vec_get(operators, index);
+}
+
+# Serial2: op[0] -> op[1] -> out (uses first 2 operators).
+#inline
+fn fm_engine_process_serial2(self, n) {
+    var operators = FmSynthEngine_operators(self);
+    if (n < 2) {
+        return fm_operator_next_sample(vec_get(operators, 0), 0);
+    }
+    var mod_out = fm_operator_next_sample(vec_get(operators, 0), 0);
+    return fm_operator_next_sample(vec_get(operators, 1), mod_out);
+}
+
+# Parallel2: (op[0] + op[1]) / 2 -> out.
+#inline
+fn fm_engine_process_parallel2(self, n) {
+    var operators = FmSynthEngine_operators(self);
+    if (n < 2) {
+        return fm_operator_next_sample(vec_get(operators, 0), 0);
+    }
+    var a = fm_operator_next_sample(vec_get(operators, 0), 0);
+    var b = fm_operator_next_sample(vec_get(operators, 1), 0);
+    return f64_mul(f64_add(a, b), F64_HALF);
+}
+
+# Serial4: op[0] -> op[1] -> op[2] -> op[3] -> out.
+#inline
+fn fm_engine_process_serial4(self, n) {
+    var operators = FmSynthEngine_operators(self);
+    var mod_signal = 0;
+    var count = n;
+    if (count > 4) { count = 4; }
+    var i = 0;
+    while (i < count) {
+        mod_signal = fm_operator_next_sample(vec_get(operators, i), mod_signal);
+        i = i + 1;
+    }
+    return mod_signal;
+}
+
+# Stack4: (op[0]+op[1]) modulates (op[2]+op[3]).
+#inline
+fn fm_engine_process_stack4(self, n) {
+    if (n < 4) {
+        return fm_engine_process_serial4(self, n);
+    }
+    var operators = FmSynthEngine_operators(self);
+    var mod_a = fm_operator_next_sample(vec_get(operators, 0), 0);
+    var mod_b = fm_operator_next_sample(vec_get(operators, 1), 0);
+    var mod_sum = f64_mul(f64_add(mod_a, mod_b), F64_HALF);
+    var car_a = fm_operator_next_sample(vec_get(operators, 2), mod_sum);
+    var car_b = fm_operator_next_sample(vec_get(operators, 3), mod_sum);
+    return f64_mul(f64_add(car_a, car_b), F64_HALF);
+}
+
+# Generate the next output sample by routing operators through the current
+# algorithm.
+#inline
+#must_use
+fn fm_engine_next_sample(self) {
+    var operators = FmSynthEngine_operators(self);
+    var n = vec_len(operators);
+    var algo = FmSynthEngine_algorithm(self);
+    if (algo == FM_ALGO_SERIAL2) {
+        return fm_engine_process_serial2(self, n);
+    } elif (algo == FM_ALGO_PARALLEL2) {
+        return fm_engine_process_parallel2(self, n);
+    } elif (algo == FM_ALGO_SERIAL4) {
+        return fm_engine_process_serial4(self, n);
+    } elif (algo == FM_ALGO_STACK4) {
+        return fm_engine_process_stack4(self, n);
+    }
+    # Custom: all operators output in parallel (no modulation).
+    var sum = 0;
+    var i = 0;
+    while (i < n) {
+        sum = f64_add(sum, fm_operator_next_sample(vec_get(operators, i), 0));
+        i = i + 1;
+    }
+    var divisor = n;
+    if (divisor < 1) { divisor = 1; }
+    return f64_div(sum, f64_from(divisor));
+}
+
+# Fill a buffer (vec of f64 slots) with samples.
+#inline
+fn fm_engine_fill_buffer(self, buffer) {
+    var n = vec_len(buffer);
+    var i = 0;
+    while (i < n) {
+        vec_set(buffer, i, fm_engine_next_sample(self));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Check if any operator envelope is still active. Returns 1/0.
+#must_use
+fn fm_engine_is_active(self) {
+    var operators = FmSynthEngine_operators(self);
+    var n = vec_len(operators);
+    var i = 0;
+    while (i < n) {
+        var op = vec_get(operators, i);
+        if (envelope_adsr_is_active(FmOperator_envelope(op)) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}

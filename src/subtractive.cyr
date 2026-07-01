@@ -1,0 +1,241 @@
+# subtractive.cyr -- single-voice subtractive synthesis signal chain.
+#
+# Ports rust-old/src/synth/subtractive.rs. f32 -> f64 throughout. serde
+# derives dropped. Signal flow: oscillator(s) -> state-variable filter ->
+# amplitude envelope -> output, with an optional second oscillator and a
+# filter envelope modulating cutoff (in octaves). The consumer (dhvani)
+# handles voice allocation and polyphony; this module is one voice.
+#
+# Reuses the already-ported dep symbols: Oscillator (osc_*), the
+# StateVariableFilter (filter_svf_*), and Adsr (envelope_adsr_*). The
+# `Result<T>` / `Option<T>` returns become pointer-or-negative-ERR_* / null
+# (0) sentinels, exactly mirroring the oracle's fallible constructors.
+#
+# Requires (from the build/test unit): stdlib alloc/vec + math/ganita
+# (F64_ONE/TWO/HALF, f64_clamp/max/pow), error.cyr (naad_is_err, ERR_NONE),
+# osc_core.cyr (osc_new/osc_next_sample/osc_set_frequency, WAVEFORM_*),
+# filter.cyr (filter_svf_new/filter_svf_set_params/filter_svf_q/
+# filter_svf_process_sample_lowpass), and envelope.cyr
+# (envelope_adsr_with_sample_rate/gate_on/gate_off/next_value/is_active).
+# No `include` lines -- the test entry orders the deps.
+
+# ================================================================
+# Non-integer float literals (IEEE-754 bit patterns).
+# ================================================================
+var SUB_C0_1   = 0x3FB999999999999A;   # 0.1  (min resonance / amp decay)
+var SUB_C0_7   = 0x3FE6666666666666;   # 0.7  (amp sustain)
+var SUB_C0_3   = 0x3FD3333333333333;   # 0.3  (amp release)
+var SUB_C0_01  = 0x3F847AE147AE147B;   # 0.01 (attack for both envelopes)
+var SUB_C0_2   = 0x3FC999999999999A;   # 0.2  (filter-env decay)
+var SUB_C0_49  = 0x3FDF5C28F5C28F5C;   # 0.49 (Nyquist headroom factor)
+
+# ================================================================
+# SubtractiveSynth -- one subtractive voice.
+#   osc1                 : primary Oscillator pointer
+#   osc2                 : optional second Oscillator pointer (0 = None)
+#   osc2_mix             : osc2 blend level (0.0..1.0)
+#   filter               : StateVariableFilter pointer
+#   amp_env              : amplitude Adsr pointer
+#   filter_env           : filter-cutoff Adsr pointer
+#   filter_env_depth     : filter-env depth in octaves (-4.0..+4.0)
+#   base_cutoff          : base filter cutoff (Hz)
+#   sample_rate          : Hz
+#   prev_modulated_cutoff: last applied cutoff (skips redundant recompute)
+# ================================================================
+#derive(accessors)
+struct SubtractiveSynth {
+    osc1;
+    osc2;
+    osc2_mix;
+    filter;
+    amp_env;
+    filter_env;
+    filter_env_depth;
+    base_cutoff;
+    sample_rate;
+    prev_modulated_cutoff;
+}
+
+# ================================================================
+# subtractive_new -- construct a voice. Returns the struct pointer on
+# success, or the first negative ERR_* encountered while building the
+# oscillator / filter / envelopes (mirrors the oracle's `?` propagation).
+# resonance is floored at 0.1 (resonance.max(0.1)); the two envelopes use
+# the oracle's fixed ADSR presets.
+# ================================================================
+#must_use
+fn subtractive_new(waveform, frequency, cutoff, resonance, sample_rate) {
+    var osc1 = osc_new(waveform, frequency, sample_rate);
+    if (naad_is_err(osc1) == 1) { return osc1; }
+    var res = f64_max(resonance, SUB_C0_1);
+    var filter = filter_svf_new(cutoff, res, sample_rate);
+    if (naad_is_err(filter) == 1) { return filter; }
+    var amp_env = envelope_adsr_with_sample_rate(SUB_C0_01, SUB_C0_1, SUB_C0_7, SUB_C0_3, sample_rate);
+    if (naad_is_err(amp_env) == 1) { return amp_env; }
+    var filter_env = envelope_adsr_with_sample_rate(SUB_C0_01, SUB_C0_2, F64_HALF, F64_HALF, sample_rate);
+    if (naad_is_err(filter_env) == 1) { return filter_env; }
+
+    var self = alloc(sizeof(SubtractiveSynth));
+    SubtractiveSynth_set_osc1(self, osc1);
+    SubtractiveSynth_set_osc2(self, 0);
+    SubtractiveSynth_set_osc2_mix(self, F64_HALF);
+    SubtractiveSynth_set_filter(self, filter);
+    SubtractiveSynth_set_amp_env(self, amp_env);
+    SubtractiveSynth_set_filter_env(self, filter_env);
+    SubtractiveSynth_set_filter_env_depth(self, F64_TWO);
+    SubtractiveSynth_set_base_cutoff(self, cutoff);
+    SubtractiveSynth_set_sample_rate(self, sample_rate);
+    SubtractiveSynth_set_prev_modulated_cutoff(self, cutoff);
+    return self;
+}
+
+# ================================================================
+# subtractive_set_osc2 -- enable the second oscillator. Returns ERR_NONE on
+# success, or a negative ERR_* if the oscillator parameters are invalid.
+# The mix level is clamped to [0.0, 1.0].
+# ================================================================
+fn subtractive_set_osc2(self, waveform, frequency, mix) {
+    var osc2 = osc_new(waveform, frequency, SubtractiveSynth_sample_rate(self));
+    if (naad_is_err(osc2) == 1) { return osc2; }
+    SubtractiveSynth_set_osc2(self, osc2);
+    SubtractiveSynth_set_osc2_mix(self, f64_clamp(mix, 0, F64_ONE));
+    return ERR_NONE;
+}
+
+# ================================================================
+# subtractive_clear_osc2 -- disable the second oscillator (osc2 -> None).
+# ================================================================
+fn subtractive_clear_osc2(self) {
+    SubtractiveSynth_set_osc2(self, 0);
+    return 0;
+}
+
+# ================================================================
+# subtractive_note_on -- trigger the voice (gate on both envelopes).
+# ================================================================
+fn subtractive_note_on(self) {
+    envelope_adsr_gate_on(SubtractiveSynth_amp_env(self));
+    envelope_adsr_gate_on(SubtractiveSynth_filter_env(self));
+    return 0;
+}
+
+# ================================================================
+# subtractive_note_off -- release the voice (gate off both envelopes).
+# ================================================================
+fn subtractive_note_off(self) {
+    envelope_adsr_gate_off(SubtractiveSynth_amp_env(self));
+    envelope_adsr_gate_off(SubtractiveSynth_filter_env(self));
+    return 0;
+}
+
+# ================================================================
+# subtractive_set_frequency -- retune both oscillators. Returns ERR_NONE on
+# success or a negative ERR_* if osc1's frequency is invalid; osc2's retune
+# result is ignored (mirrors the oracle's `let _ = osc2.set_frequency(..)`).
+# ================================================================
+fn subtractive_set_frequency(self, freq) {
+    var e = osc_set_frequency(SubtractiveSynth_osc1(self), freq);
+    if (naad_is_err(e) == 1) { return e; }
+    var osc2 = SubtractiveSynth_osc2(self);
+    if (osc2 != 0) {
+        osc_set_frequency(osc2, freq);
+    }
+    return ERR_NONE;
+}
+
+# ================================================================
+# subtractive_set_filter_env_depth -- set filter-env depth in octaves,
+# clamped to [-4.0, +4.0].
+# ================================================================
+fn subtractive_set_filter_env_depth(self, octaves) {
+    SubtractiveSynth_set_filter_env_depth(self, f64_clamp(octaves, f64_neg(f64_from(4)), f64_from(4)));
+    return 0;
+}
+
+# ================================================================
+# subtractive_set_cutoff -- set the base filter cutoff and reapply it to the
+# filter (preserving its current Q). Returns ERR_NONE or a negative ERR_*.
+# ================================================================
+fn subtractive_set_cutoff(self, cutoff) {
+    SubtractiveSynth_set_base_cutoff(self, cutoff);
+    var filter = SubtractiveSynth_filter(self);
+    return filter_svf_set_params(filter, cutoff, filter_svf_q(filter));
+}
+
+# ================================================================
+# subtractive_next_sample -- oscillator mix -> envelope-modulated filter ->
+# amplitude envelope. Filter coefficients are only recomputed when the
+# modulated cutoff moves more than 0.5 Hz (matching the oracle's guard).
+# ================================================================
+#inline
+#must_use
+fn subtractive_next_sample(self) {
+    # Oscillator mix.
+    var osc_out = osc_next_sample(SubtractiveSynth_osc1(self));
+    var osc2 = SubtractiveSynth_osc2(self);
+    if (osc2 != 0) {
+        var o2 = osc_next_sample(osc2);
+        var mix = SubtractiveSynth_osc2_mix(self);
+        osc_out = f64_add(f64_mul(osc_out, f64_sub(F64_ONE, mix)), f64_mul(o2, mix));
+    }
+
+    # Filter with envelope modulation (depth in octaves -> 2^mod).
+    var filter_mod = f64_mul(envelope_adsr_next_value(SubtractiveSynth_filter_env(self)),
+    SubtractiveSynth_filter_env_depth(self));
+    var modulated_cutoff = f64_mul(SubtractiveSynth_base_cutoff(self), f64_pow(F64_TWO, filter_mod));
+    var nyq = f64_mul(SubtractiveSynth_sample_rate(self), SUB_C0_49);
+    var clamped = f64_clamp(modulated_cutoff, f64_from(20), nyq);
+    var diff = f64_abs(f64_sub(clamped, SubtractiveSynth_prev_modulated_cutoff(self)));
+    if (f64_gt(diff, F64_HALF) == 1) {
+        var filter = SubtractiveSynth_filter(self);
+        filter_svf_set_params(filter, clamped, filter_svf_q(filter));
+        SubtractiveSynth_set_prev_modulated_cutoff(self, clamped);
+    }
+    var filtered = filter_svf_process_sample_lowpass(SubtractiveSynth_filter(self), osc_out);
+
+    # Amplitude envelope.
+    var amp = envelope_adsr_next_value(SubtractiveSynth_amp_env(self));
+    return f64_mul(filtered, amp);
+}
+
+# ================================================================
+# subtractive_fill_buffer -- fill a vec buffer in place.
+# ================================================================
+#inline
+fn subtractive_fill_buffer(self, buffer) {
+    var n = vec_len(buffer);
+    var i = 0;
+    while (i < n) {
+        vec_set(buffer, i, subtractive_next_sample(self));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# subtractive_is_active -- 1 while the amplitude envelope is not idle.
+# ================================================================
+#must_use
+fn subtractive_is_active(self) {
+    return envelope_adsr_is_active(SubtractiveSynth_amp_env(self));
+}
+
+# ================================================================
+# subtractive_amp_env / subtractive_amp_env_mut -- the amplitude envelope
+# pointer (Rust returned &Adsr / &mut Adsr; here both hand back the pointer).
+# ================================================================
+#must_use
+fn subtractive_amp_env(self) {
+    return SubtractiveSynth_amp_env(self);
+}
+
+fn subtractive_amp_env_mut(self) {
+    return SubtractiveSynth_amp_env(self);
+}
+
+# ================================================================
+# subtractive_filter_env_mut -- the filter envelope pointer (Rust: &mut Adsr).
+# ================================================================
+fn subtractive_filter_env_mut(self) {
+    return SubtractiveSynth_filter_env(self);
+}

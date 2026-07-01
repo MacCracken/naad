@@ -1,0 +1,301 @@
+# dsp_util.cyr -- DSP utility free functions: dB conversion, clipping,
+# interpolation, windows, PRNG, dB LUT. Shared across synthesis/effects.
+#
+# Ports rust-old/src/dsp_util.rs. f32 -> f64 throughout. Buffer args that
+# were `&[f32]` / `&mut [f32]` become stdlib `vec` handles (f64 per slot).
+# The `SmoothingMode` / `SpectralWindow` enums become integer constants.
+# Requires (from the build/test unit): stdlib alloc/vec + math/ganita
+# (F64_* constants, f64_ln/pow/tanh/sin/cos/sqrt/clamp). No `include` lines.
+#
+# PENDING (hisab-interop analysis block, tracked in port-audit.md): the
+# `synthesis`-gated spectral functions -- fft_magnitudes, power_spectrum,
+# stft_magnitudes, chromagram, detect_onsets, detect_pitch_autocorr,
+# bspline_eval_1d, fit_polynomial. They wrap hisab num_fft / calc_bspline /
+# num_newton / least-squares and land in a dedicated follow-up. The scalar
+# core below (which every dependent module actually needs) is complete;
+# `eval_polynomial` is pure-f64 and included here.
+
+# ================================================================
+# Enums -> integer constants.
+# ================================================================
+var SMOOTHING_EXPONENTIAL = 0;
+var SMOOTHING_LINEAR      = 1;
+
+var WINDOW_RECTANGULAR = 0;
+var WINDOW_HANN        = 1;
+var WINDOW_HAMMING     = 2;
+var WINDOW_BLACKMAN    = 3;
+
+# Extra IEEE-754 literals not in the stdlib.
+var DSP_C2_5 = 0x4004000000000000;   # 2.5   (hermite coefficient)
+var DSP_C1_5 = 0x3FF8000000000000;   # 1.5   (hermite coefficient)
+
+# ================================================================
+# dB <-> linear amplitude.
+# ================================================================
+
+# 20 * log10(amplitude); -inf for amplitude <= 0. log10(x) = ln(x)/ln(10).
+#inline
+#must_use
+fn amplitude_to_db(amplitude) {
+    if (f64_le(amplitude, 0) == 1) { return NAAD_NEG_INF; }
+    var log10 = f64_div(f64_ln(amplitude), F64_LN10);
+    return f64_mul(f64_from(20), log10);
+}
+
+# 10^(db/20); 0.0 for db == -inf.
+#inline
+#must_use
+fn db_to_amplitude(db) {
+    if (db == NAAD_NEG_INF) { return 0; }
+    return f64_pow(f64_from(10), f64_div(db, f64_from(20)));
+}
+
+# ================================================================
+# Buffer ops (operate on a stdlib vec of f64 in place / read-only).
+# ================================================================
+
+# Scale a buffer so its peak absolute value is 1.0. No-op if all zeros.
+fn normalize(buffer) {
+    var n = vec_len(buffer);
+    var peak = 0;
+    var i = 0;
+    while (i < n) {
+        var a = f64_abs(vec_get(buffer, i));
+        if (f64_gt(a, peak) == 1) { peak = a; }
+        i = i + 1;
+    }
+    if (f64_gt(peak, 0) == 1) {
+        var inv = f64_div(F64_ONE, peak);
+        i = 0;
+        while (i < n) {
+            vec_set(buffer, i, f64_mul(vec_get(buffer, i), inv));
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+# Root mean square of a buffer (0.0 if empty).
+#inline
+#must_use
+fn rms(buffer) {
+    var n = vec_len(buffer);
+    if (n == 0) { return 0; }
+    var sum_sq = 0;
+    var i = 0;
+    while (i < n) {
+        var s = vec_get(buffer, i);
+        sum_sq = f64_add(sum_sq, f64_mul(s, s));
+        i = i + 1;
+    }
+    return f64_sqrt(f64_div(sum_sq, f64_from(n)));
+}
+
+# Peak absolute value of a buffer.
+#inline
+#must_use
+fn peak(buffer) {
+    var n = vec_len(buffer);
+    var p = 0;
+    var i = 0;
+    while (i < n) {
+        var a = f64_abs(vec_get(buffer, i));
+        if (f64_gt(a, p) == 1) { p = a; }
+        i = i + 1;
+    }
+    return p;
+}
+
+# ================================================================
+# Scalar shaping / interpolation.
+# ================================================================
+
+# Hard-limit (clip) a sample to [-limit, +limit].
+#inline
+#must_use
+fn hard_limit(sample, limit) {
+    return f64_clamp(sample, f64_neg(limit), limit);
+}
+
+# tanh soft-clip; `drive` controls saturation (1.0 mild, higher = more).
+#inline
+#must_use
+fn soft_clip_tanh(sample, drive) {
+    return f64_tanh(f64_mul(sample, drive));
+}
+
+# Linear interpolation: a + (b - a) * t.
+#inline
+#must_use
+fn lerp(a, b, t) {
+    return f64_add(a, f64_mul(f64_sub(b, a), t));
+}
+
+# Cubic Hermite interpolation through y0..y3 at fractional t in [0,1]
+# between y1 and y2.
+#inline
+#must_use
+fn hermite_interpolate(y0, y1, y2, y3, t) {
+    var c0 = y1;
+    var c1 = f64_mul(F64_HALF, f64_sub(y2, y0));
+    # c2 = y0 - 2.5*y1 + 2*y2 - 0.5*y3
+    var c2 = f64_sub(f64_add(f64_sub(y0, f64_mul(DSP_C2_5, y1)), f64_mul(F64_TWO, y2)), f64_mul(F64_HALF, y3));
+    # c3 = 0.5*(y3 - y0) + 1.5*(y1 - y2)
+    var c3 = f64_add(f64_mul(F64_HALF, f64_sub(y3, y0)), f64_mul(DSP_C1_5, f64_sub(y1, y2)));
+    # ((c3*t + c2)*t + c1)*t + c0
+    var r = f64_add(f64_mul(c3, t), c2);
+    r = f64_add(f64_mul(r, t), c1);
+    r = f64_add(f64_mul(r, t), c0);
+    return r;
+}
+
+# Equal-power crossfade: mix 0.0 = full dry, 1.0 = full wet.
+#inline
+#must_use
+fn crossfade_equal_power(dry, wet, mix) {
+    var angle = f64_mul(mix, F64_PI_2);
+    return f64_add(f64_mul(dry, f64_cos(angle)), f64_mul(wet, f64_sin(angle)));
+}
+
+# ================================================================
+# Windows (in place over a vec).
+# ================================================================
+
+# Hann window: w(i) = 0.5 * (1 - cos(TAU * i / len)).
+fn apply_hann_window(buffer) {
+    var len = vec_len(buffer);
+    if (len == 0) { return 0; }
+    var inv = f64_div(F64_ONE, f64_from(len));
+    var i = 0;
+    while (i < len) {
+        var phase = f64_mul(f64_mul(F64_TAU, f64_from(i)), inv);
+        var w = f64_mul(F64_HALF, f64_sub(F64_ONE, f64_cos(phase)));
+        vec_set(buffer, i, f64_mul(vec_get(buffer, i), w));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Blackman window: 0.42 - 0.5*cos(TAU*t) + 0.08*cos(2*TAU*t), t = i/len.
+fn apply_blackman_window(buffer) {
+    var len = vec_len(buffer);
+    if (len == 0) { return 0; }
+    var inv = f64_div(F64_ONE, f64_from(len));
+    var c042 = 0x3FDAE147AE147AE1;   # 0.42
+    var c008 = 0x3FB47AE147AE147B;   # 0.08
+    var i = 0;
+    while (i < len) {
+        var t = f64_mul(f64_from(i), inv);
+        var tau_t = f64_mul(F64_TAU, t);
+        var w = f64_sub(c042, f64_mul(F64_HALF, f64_cos(tau_t)));
+        w = f64_add(w, f64_mul(c008, f64_cos(f64_mul(F64_TWO, tau_t))));
+        vec_set(buffer, i, f64_mul(vec_get(buffer, i), w));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# eval_polynomial -- Horner evaluation of ascending-degree coeffs (vec of
+# f64) at x. Empty coeffs -> 0.0. Pure f64 (no hisab), so ported here; its
+# companion fit_polynomial (hisab least-squares) is in the pending block.
+# ================================================================
+#inline
+#must_use
+fn eval_polynomial(coeffs, x) {
+    var n = vec_len(coeffs);
+    if (n == 0) { return 0; }
+    var acc = vec_get(coeffs, n - 1);
+    var i = n - 1;
+    while (i > 0) {
+        i = i - 1;
+        acc = f64_add(f64_mul(acc, x), vec_get(coeffs, i));
+    }
+    return acc;
+}
+
+# ================================================================
+# dB -> linear amplitude via a 256-entry LUT with linear interpolation.
+# Rust used a LazyLock<[f32;256]>; here the table is a module-global vec
+# built on first access. Range [-80, +20] dB; inputs outside clamp to the
+# edges. Avoids powf in per-sample gain stages (compressor/limiter/de-esser).
+# ================================================================
+var DB_LUT_MIN   = 0xC054000000000000;   # -80.0
+var DB_LUT_MAX   = 0x4034000000000000;   #  20.0
+var DB_LUT_RANGE = 0x4059000000000000;   # 100.0
+var _DB_LUT      = 0;                     # 0 = not yet built
+
+#must_use
+fn _db_lut() {
+    if (_DB_LUT != 0) { return _DB_LUT; }
+    var t = vec_new();
+    var i = 0;
+    while (i < 256) {
+        var frac = f64_div(f64_from(i), f64_from(255));
+        var db = f64_add(DB_LUT_MIN, f64_mul(frac, DB_LUT_RANGE));
+        vec_push(t, f64_pow(f64_from(10), f64_div(db, f64_from(20))));
+        i = i + 1;
+    }
+    _DB_LUT = t;
+    return t;
+}
+
+#inline
+#must_use
+fn db_to_amplitude_lut(db) {
+    var table = _db_lut();
+    if (f64_le(db, DB_LUT_MIN) == 1) { return vec_get(table, 0); }
+    if (f64_ge(db, DB_LUT_MAX) == 1) { return vec_get(table, 255); }
+    var normalized = f64_div(f64_sub(db, DB_LUT_MIN), DB_LUT_RANGE);
+    var idx = f64_mul(normalized, f64_from(255));
+    var i0 = f64_to(idx);
+    var i1 = i0 + 1;
+    if (i1 > 255) { i1 = 255; }
+    var frac = f64_sub(idx, f64_from(i0));
+    var lo = f64_mul(vec_get(table, i0), f64_sub(F64_ONE, frac));
+    var hi = f64_mul(vec_get(table, i1), frac);
+    return f64_add(lo, hi);
+}
+
+# ================================================================
+# xorshift32 PRNG -- the canonical PRNG for every noise site in the crate
+# (white/pink/brown noise, granular spray, drum clicks, physical exciters).
+# Rust took `&mut u32`; here `sp` is a POINTER to a 64-bit slot holding the
+# u32 state (load64/store64). u32 wrap is emulated with a 0xFFFFFFFF mask
+# after each left shift. Zero-state guard: a 0 state is reset to 1 (0 would
+# loop forever). Returns the new state (== the raw output).
+# ================================================================
+var U32_MASK = 0xFFFFFFFF;
+var U32_MAXF = 0x41EFFFFFFFE00000;   # not used; kept for reference (u32::MAX as f64)
+
+fn xorshift32(sp) {
+    var x = load64(sp) & U32_MASK;
+    if (x == 0) { x = 1; }
+    x = (x ^ ((x << 13) & U32_MASK)) & U32_MASK;
+    x = x ^ (x >> 17);
+    x = (x ^ ((x << 5) & U32_MASK)) & U32_MASK;
+    store64(sp, x);
+    return x;
+}
+
+# One step mapped to a signed f32 in [-1.0, 1.0): raw/u32::MAX * 2 - 1.
+#must_use
+fn xorshift32_signed_f32(sp) {
+    var raw = xorshift32(sp);
+    var unit = f64_div(f64_from(raw), f64_from(4294967295));
+    return f64_sub(f64_mul(unit, F64_TWO), F64_ONE);
+}
+
+# One step mapped to an unsigned f32 in [0.0, 1.0): raw/u32::MAX.
+#must_use
+fn xorshift32_unit_f32(sp) {
+    var raw = xorshift32(sp);
+    return f64_div(f64_from(raw), f64_from(4294967295));
+}
+
+# Single white-noise sample from a state slot (convenience; == signed step).
+#must_use
+fn white_noise_sample(sp) {
+    return xorshift32_signed_f32(sp);
+}

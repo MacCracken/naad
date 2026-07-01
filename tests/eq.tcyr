@@ -1,0 +1,52 @@
+# eq.tcyr -- parity tests for src/eq.cyr.
+# Ported from the non-serde #[test] blocks in rust-old/src/eq.rs
+# (test_serde_roundtrip_* dropped -- no serde). f32 tolerances widened to f64.
+
+include "src/error.cyr"
+include "src/dsp_util.cyr"
+include "src/filter.cyr"
+include "src/eq.cyr"
+
+alloc_init();
+
+var C0_5 = 0x3FE0000000000000;   # 0.5
+
+var SR = 44100;
+
+# ================================================================
+test_group("parametric eq passthrough");
+# No bands = passthrough.
+var eq = eq_parametric_new(f64_from(SR));
+var out = eq_process_sample(eq, C0_5);
+assert(f64_lt(f64_abs(f64_sub(out, C0_5)), NAAD_EPSILON), "no bands -> passthrough");
+
+# ================================================================
+test_group("parametric eq with band");
+var eq2 = eq_parametric_new(f64_from(SR));
+assert_eq(eq_add_band(eq2, FILTER_PEAK, f64_from(1000), F64_ONE, f64_from(6)), ERR_NONE, "add_band ok");
+assert_eq(eq_num_bands(eq2), 1, "num_bands == 1");
+var out2 = eq_process_sample(eq2, C0_5);
+assert(naad_is_finite(out2), "process_sample finite");
+
+# ================================================================
+test_group("graphic eq");
+var geq = eq_graphic_new(f64_from(SR));
+assert_eq(eq_graphic_num_bands(geq), 10, "graphic num_bands == 10");
+# Set a boost: band 4 (500 Hz) +6 dB.
+assert_eq(eq_graphic_set_band_gain(geq, 4, f64_from(6)), ERR_NONE, "set_band_gain(4, 6) ok");
+var out3 = eq_graphic_process_sample(geq, C0_5);
+assert(naad_is_finite(out3), "graphic process_sample finite");
+
+# ================================================================
+test_group("graphic eq invalid band");
+var geq2 = eq_graphic_new(f64_from(SR));
+assert(naad_is_err(eq_graphic_set_band_gain(geq2, 20, f64_from(6))), "set_band_gain(20) err");
+
+# ================================================================
+test_group("deesser");
+var de = eq_deesser_new(f64_from(6000), f64_neg(f64_from(20)), f64_from(SR));
+var out4 = eq_deesser_process_sample(de, C0_5);
+assert(naad_is_finite(out4), "deesser process_sample finite");
+
+var rc = assert_summary();
+syscall(60, rc);

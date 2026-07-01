@@ -1,0 +1,276 @@
+# osc_unison.cyr -- unison oscillator: N detuned voices mixed together.
+#
+# Ports rust-old/src/oscillator/unison.rs. f32 -> f64 throughout. The fixed
+# `[f32; 8]` phase and detune-ratio arrays become stdlib vecs of 8 f64; the
+# `bool ratios_dirty` becomes an i64 flag (1/0). The `(f32, f32)` stereo
+# tuple return becomes a `UnisonStereo` pair struct. serde derives/tests are
+# dropped; the constructor returns the struct pointer or a negative ERR_*.
+# Per-voice waveform generation reuses osc_stateless_waveform_sample from
+# osc_core.cyr, matching the oracle.
+#
+# Requires (from the build/test unit): stdlib alloc/vec + math/ganita
+# (F64_ONE/TWO/HALF/PI_2/FRAC_1_SQRT2, f64_pow/sin/cos/clamp/max) and
+# error.cyr (validate_*, naad_is_err, ERR_*), dsp_util.cyr
+# (xorshift32_unit_f32), osc_core.cyr (osc_stateless_waveform_sample,
+# WAVEFORM_*). No `include` lines.
+
+# ================================================================
+# UnisonStereo -- (left, right) sample pair (was a Rust tuple return).
+# ================================================================
+#derive(accessors)
+struct UnisonStereo { left; right; }
+
+# ================================================================
+# UnisonOscillator -- N detuned copies of a waveform mixed together.
+#   waveform      : WAVEFORM_* constant (shared by all voices)
+#   frequency     : base Hz
+#   sample_rate   : Hz
+#   num_voices    : 1..8
+#   detune_cents  : total detune spread in cents (>= 0)
+#   stereo_spread : 0 (mono) .. 1 (full width)
+#   phases        : vec of 8 f64 per-voice phases
+#   detune_ratios : vec of 8 f64 precomputed frequency ratios
+#   ratios_dirty  : 1 if ratios need recomputing, else 0
+# ================================================================
+#derive(accessors)
+struct UnisonOscillator { waveform; frequency; sample_rate; num_voices; detune_cents;
+    stereo_spread; phases; detune_ratios; ratios_dirty; }
+
+# ================================================================
+# unison_new -- construct. Clamps num_voices to 1..8, randomizes initial
+# phases (xorshift32 seeded 12345), primes detune ratios. Returns the struct
+# pointer on success, or a negative ERR_* on invalid sample_rate/frequency.
+# ================================================================
+#must_use
+fn unison_new(waveform, frequency, num_voices, detune_cents, sample_rate) {
+    var e = validate_sample_rate(sample_rate);
+    if (naad_is_err(e) == 1) { return e; }
+    e = validate_frequency(frequency, sample_rate);
+    if (naad_is_err(e) == 1) { return e; }
+
+    var nv = num_voices;
+    if (nv < 1) { nv = 1; }
+    if (nv > 8) { nv = 8; }
+
+    var phases = vec_new();
+    var i = 0;
+    while (i < 8) {
+        vec_push(phases, 0);
+        i = i + 1;
+    }
+    var seed = alloc(8);
+    store64(seed, 12345);
+    i = 0;
+    while (i < nv) {
+        vec_set(phases, i, xorshift32_unit_f32(seed));
+        i = i + 1;
+    }
+
+    var detune_ratios = vec_new();
+    i = 0;
+    while (i < 8) {
+        vec_push(detune_ratios, F64_ONE);
+        i = i + 1;
+    }
+
+    var self = alloc(sizeof(UnisonOscillator));
+    UnisonOscillator_set_waveform(self, waveform);
+    UnisonOscillator_set_frequency(self, frequency);
+    UnisonOscillator_set_sample_rate(self, sample_rate);
+    UnisonOscillator_set_num_voices(self, nv);
+    UnisonOscillator_set_detune_cents(self, f64_max(detune_cents, 0));
+    UnisonOscillator_set_stereo_spread(self, F64_HALF);
+    UnisonOscillator_set_phases(self, phases);
+    UnisonOscillator_set_detune_ratios(self, detune_ratios);
+    UnisonOscillator_set_ratios_dirty(self, 1);
+    unison_recompute_ratios(self);
+    return self;
+}
+
+# ================================================================
+# unison_recompute_ratios -- rebuild detune ratios from the cents spread.
+# Voices are spread symmetrically over [-cents/2, +cents/2]; each ratio is
+# 2^(cents_offset/1200).
+# ================================================================
+fn unison_recompute_ratios(self) {
+    var nv = UnisonOscillator_num_voices(self);
+    var ratios = UnisonOscillator_detune_ratios(self);
+    var dc = UnisonOscillator_detune_cents(self);
+    if (nv <= 1) {
+        vec_set(ratios, 0, F64_ONE);
+    } else {
+        var denom = f64_from(nv - 1);
+        var i = 0;
+        while (i < nv) {
+            var t = f64_div(f64_from(i), denom);
+            var cents_offset = f64_mul(f64_sub(t, F64_HALF), dc);
+            var expo = f64_div(cents_offset, f64_from(1200));
+            vec_set(ratios, i, f64_pow(F64_TWO, expo));
+            i = i + 1;
+        }
+    }
+    UnisonOscillator_set_ratios_dirty(self, 0);
+    return 0;
+}
+
+# ================================================================
+# unison_next_sample -- next mono sample (all voices averaged).
+# ================================================================
+#inline
+#must_use
+fn unison_next_sample(self) {
+    if (UnisonOscillator_ratios_dirty(self) == 1) {
+        unison_recompute_ratios(self);
+    }
+    var wf = UnisonOscillator_waveform(self);
+    var freq_base = UnisonOscillator_frequency(self);
+    var sr = UnisonOscillator_sample_rate(self);
+    var ratios = UnisonOscillator_detune_ratios(self);
+    var phases = UnisonOscillator_phases(self);
+    var nv = UnisonOscillator_num_voices(self);
+
+    var sum = 0;
+    var i = 0;
+    while (i < nv) {
+        var freq = f64_mul(freq_base, vec_get(ratios, i));
+        var dt = f64_div(freq, sr);
+        var t = vec_get(phases, i);
+        sum = f64_add(sum, osc_stateless_waveform_sample(wf, t, dt));
+        var ph = f64_add(t, dt);
+        if (f64_ge(ph, F64_ONE) == 1) { ph = f64_sub(ph, F64_ONE); }
+        vec_set(phases, i, ph);
+        i = i + 1;
+    }
+    return f64_div(sum, f64_from(nv));
+}
+
+# ================================================================
+# unison_next_sample_stereo -- next stereo pair. Voices are equal-power
+# panned across the field per stereo_spread. Returns a UnisonStereo pointer.
+# ================================================================
+#must_use
+fn unison_next_sample_stereo(self) {
+    if (UnisonOscillator_ratios_dirty(self) == 1) {
+        unison_recompute_ratios(self);
+    }
+    var wf = UnisonOscillator_waveform(self);
+    var freq_base = UnisonOscillator_frequency(self);
+    var sr = UnisonOscillator_sample_rate(self);
+    var ratios = UnisonOscillator_detune_ratios(self);
+    var phases = UnisonOscillator_phases(self);
+    var nv = UnisonOscillator_num_voices(self);
+    var spread = UnisonOscillator_stereo_spread(self);
+
+    var left = 0;
+    var right = 0;
+    var i = 0;
+    while (i < nv) {
+        var freq = f64_mul(freq_base, vec_get(ratios, i));
+        var dt = f64_div(freq, sr);
+        var t = vec_get(phases, i);
+        var sample = osc_stateless_waveform_sample(wf, t, dt);
+        if (nv > 1) {
+            var pan = f64_div(f64_from(i), f64_from(nv - 1));
+            var w = f64_mul(spread, F64_HALF);
+            var pan_scaled = f64_add(F64_HALF, f64_mul(f64_mul(f64_sub(pan, F64_HALF), w), F64_TWO));
+            var angle = f64_mul(pan_scaled, F64_PI_2);
+            left = f64_add(left, f64_mul(sample, f64_cos(angle)));
+            right = f64_add(right, f64_mul(sample, f64_sin(angle)));
+        } else {
+            left = f64_add(left, f64_mul(sample, F64_FRAC_1_SQRT2));
+            right = f64_add(right, f64_mul(sample, F64_FRAC_1_SQRT2));
+        }
+        var ph = f64_add(t, dt);
+        if (f64_ge(ph, F64_ONE) == 1) { ph = f64_sub(ph, F64_ONE); }
+        vec_set(phases, i, ph);
+        i = i + 1;
+    }
+    var inv = f64_div(F64_ONE, f64_from(nv));
+    var out = alloc(sizeof(UnisonStereo));
+    UnisonStereo_set_left(out, f64_mul(left, inv));
+    UnisonStereo_set_right(out, f64_mul(right, inv));
+    return out;
+}
+
+# ================================================================
+# unison_fill_buffer -- fill a mono vec buffer in place.
+# ================================================================
+#inline
+fn unison_fill_buffer(self, buffer) {
+    var n = vec_len(buffer);
+    var i = 0;
+    while (i < n) {
+        vec_set(buffer, i, unison_next_sample(self));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# unison_fill_buffer_stereo -- fill left/right vecs (over the shorter length).
+# ================================================================
+#inline
+fn unison_fill_buffer_stereo(self, left, right) {
+    var n = vec_len(left);
+    var nr = vec_len(right);
+    if (nr < n) { n = nr; }
+    var i = 0;
+    while (i < n) {
+        var pair = unison_next_sample_stereo(self);
+        vec_set(left, i, UnisonStereo_left(pair));
+        vec_set(right, i, UnisonStereo_right(pair));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# Setters.
+# ================================================================
+fn unison_set_num_voices(self, n) {
+    var nv = n;
+    if (nv < 1) { nv = 1; }
+    if (nv > 8) { nv = 8; }
+    UnisonOscillator_set_num_voices(self, nv);
+    UnisonOscillator_set_ratios_dirty(self, 1);
+    return 0;
+}
+
+fn unison_set_detune_cents(self, cents) {
+    UnisonOscillator_set_detune_cents(self, f64_max(cents, 0));
+    UnisonOscillator_set_ratios_dirty(self, 1);
+    return 0;
+}
+
+fn unison_set_stereo_spread(self, spread) {
+    UnisonOscillator_set_stereo_spread(self, f64_clamp(spread, 0, F64_ONE));
+    return 0;
+}
+
+fn unison_set_frequency(self, freq) {
+    var e = validate_frequency(freq, UnisonOscillator_sample_rate(self));
+    if (naad_is_err(e) == 1) { return e; }
+    UnisonOscillator_set_frequency(self, freq);
+    return ERR_NONE;
+}
+
+# ================================================================
+# Accessors.
+# ================================================================
+#inline
+#must_use
+fn unison_num_voices(self) {
+    return UnisonOscillator_num_voices(self);
+}
+
+#inline
+#must_use
+fn unison_frequency(self) {
+    return UnisonOscillator_frequency(self);
+}
+
+#inline
+#must_use
+fn unison_detune_cents(self) {
+    return UnisonOscillator_detune_cents(self);
+}

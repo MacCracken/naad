@@ -1,0 +1,331 @@
+# dynamics.cyr -- Dynamics processors: compressor, limiter, and noise gate.
+#
+# Ports rust-old/src/dynamics.rs. f32 -> f64 throughout. serde/Display derives
+# dropped and the `debug!` construction log dropped (logging is a separate
+# module). All processors operate sample-by-sample for real-time use.
+#
+# The detector-mode split is a soft/hard-knee dispatch inside the compressor
+# (no free-standing enum in the oracle); knee <= 0.0 selects the hard path.
+# Structs compose by pointer: a Compressor owns a LevelDetector; a Limiter
+# owns a Compressor. `&mut [f32]` buffers -> stdlib `vec` (mutated in place).
+# Methods become free `dynamics_*` functions on the struct pointer.
+#
+# Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE/TWO/
+# HALF, f64_max, f64_clamp), builtins (f64_exp/abs), dsp_util.cyr
+# (amplitude_to_db, db_to_amplitude_lut) and error.cyr (flush_denormal,
+# naad_is_finite). No `include` lines -- the entry orders the modules.
+
+# ================================================================
+# Detector-knee dispatch tags (documentation constants; the compressor
+# selects between them by inspecting knee_db each sample, exactly as the
+# oracle branches on `self.knee_db <= 0.0`).
+# ================================================================
+var DETECTOR_HARD_KNEE = 0;
+var DETECTOR_SOFT_KNEE = 1;
+
+# Non-integer IEEE-754 literals used by the constructors.
+var DYN_C0_001  = 0x3f50624dd2f1a9fc;   # 0.001  (noise-gate min attack)
+var DYN_C0_0001 = 0x3f1a36e2eb1c432d;   # 0.0001 (limiter attack time)
+var DYN_F32_MAX = 0x47efffffe0000000;   # f32::MAX = 3.4028235e38 (limiter ratio)
+
+# ================================================================
+# LevelDetector -- smoothed abs-value envelope with split attack/release
+# time constants (was `EnvelopeDetector`, renamed in 1.1.0).
+#   current       : current envelope value (linear)
+#   attack_coeff  : attack smoothing coefficient
+#   release_coeff : release smoothing coefficient
+# ================================================================
+#derive(accessors)
+struct LevelDetector {
+    current;
+    attack_coeff;
+    release_coeff;
+}
+
+# Convert an attack/release time (seconds) to a one-pole coefficient.
+# time <= 0.0 collapses to an instantaneous (coeff = 1.0) response.
+#must_use
+fn dynamics_time_to_coeff(time, sample_rate) {
+    if (f64_le(time, 0) == 1) { return F64_ONE; }
+    var e = f64_exp(f64_div(f64_neg(F64_ONE), f64_mul(time, sample_rate)));
+    return f64_sub(F64_ONE, e);
+}
+
+# Create a level detector. `attack`/`release` are times in seconds.
+#must_use
+fn dynamics_level_detector_new(attack, release, sample_rate) {
+    var self = alloc(sizeof(LevelDetector));
+    LevelDetector_set_current(self, 0);
+    LevelDetector_set_attack_coeff(self, dynamics_time_to_coeff(attack, sample_rate));
+    LevelDetector_set_release_coeff(self, dynamics_time_to_coeff(release, sample_rate));
+    return self;
+}
+
+# Process a sample and return the envelope level. Non-finite input -> level 0.
+#inline
+#must_use
+fn dynamics_level_detector_process(self, input) {
+    var level = 0;
+    if (naad_is_finite(input) == 1) { level = f64_abs(input); }
+    var cur = LevelDetector_current(self);
+    var coeff = LevelDetector_release_coeff(self);
+    if (f64_gt(level, cur) == 1) { coeff = LevelDetector_attack_coeff(self); }
+    var newcur = f64_add(cur, f64_mul(coeff, f64_sub(level, cur)));
+    newcur = flush_denormal(newcur);
+    LevelDetector_set_current(self, newcur);
+    return newcur;
+}
+
+# ================================================================
+# Compressor -- soft-knee dynamics compressor.
+#   threshold_db : threshold in dB (direct-read; no validation)
+#   ratio        : compression ratio, clamped >= 1.0 (private invariant)
+#   knee_db      : knee width in dB (0.0 = hard knee)
+#   makeup_db    : makeup gain in dB
+#   detector     : LevelDetector pointer
+# ================================================================
+#derive(accessors)
+struct Compressor {
+    threshold_db;
+    ratio;
+    knee_db;
+    makeup_db;
+    detector;
+}
+
+# Create a compressor. `ratio` clamped to >= 1.0; knee/makeup default 0.0.
+#must_use
+fn dynamics_compressor_new(threshold_db, ratio, attack, release, sample_rate) {
+    var self = alloc(sizeof(Compressor));
+    Compressor_set_threshold_db(self, threshold_db);
+    Compressor_set_ratio(self, f64_max(ratio, F64_ONE));
+    Compressor_set_knee_db(self, 0);
+    Compressor_set_makeup_db(self, 0);
+    Compressor_set_detector(self, dynamics_level_detector_new(attack, release, sample_rate));
+    return self;
+}
+
+# Current compression ratio.
+#must_use
+fn dynamics_compressor_ratio(self) {
+    return Compressor_ratio(self);
+}
+
+# Set the compression ratio. Clamped to >= 1.0.
+fn dynamics_compressor_set_ratio(self, ratio) {
+    Compressor_set_ratio(self, f64_max(ratio, F64_ONE));
+    return 0;
+}
+
+# Hard-knee gain reduction (dB) -- `knee_db == 0.0` fast path.
+#inline
+fn dynamics_compressor_compute_gain_db_hard(self, input_db) {
+    var t = Compressor_threshold_db(self);
+    if (f64_le(input_db, t) == 1) { return 0; }
+    var r = Compressor_ratio(self);
+    # (t + (input_db - t) / r) - input_db
+    return f64_sub(f64_add(t, f64_div(f64_sub(input_db, t), r)), input_db);
+}
+
+# Soft-knee gain reduction (dB) -- `knee_db > 0.0`.
+#inline
+fn dynamics_compressor_compute_gain_db_soft(self, input_db) {
+    var t = Compressor_threshold_db(self);
+    var r = Compressor_ratio(self);
+    var k = Compressor_knee_db(self);
+    var half_k = f64_mul(k, F64_HALF);
+    if (f64_gt(f64_abs(f64_sub(input_db, t)), half_k) == 1) {
+        # Outside the soft-knee window -- full hard-knee math.
+        if (f64_le(input_db, t) == 1) { return 0; }
+        return f64_sub(f64_add(t, f64_div(f64_sub(input_db, t), r)), input_db);
+    }
+    # Inside the soft-knee window -- quadratic interpolation.
+    # x = input_db - t + k * 0.5 ; (1/r - 1) * x * x / (2 * k)
+    var x = f64_add(f64_sub(input_db, t), half_k);
+    var coeff = f64_sub(f64_div(F64_ONE, r), F64_ONE);
+    var num = f64_mul(f64_mul(coeff, x), x);
+    return f64_div(num, f64_mul(F64_TWO, k));
+}
+
+# Compute gain reduction (dB) for an input level in dB -- dispatch entry.
+#inline
+#must_use
+fn dynamics_compressor_compute_gain_db(self, input_db) {
+    if (f64_le(Compressor_knee_db(self), 0) == 1) {
+        return dynamics_compressor_compute_gain_db_hard(self, input_db);
+    }
+    return dynamics_compressor_compute_gain_db_soft(self, input_db);
+}
+
+# Process a single sample. dB->linear via db_to_amplitude_lut (no powf).
+#inline
+#must_use
+fn dynamics_compressor_process_sample(self, input) {
+    var env = dynamics_level_detector_process(Compressor_detector(self), input);
+    var env_db = amplitude_to_db(env);
+    var gain_db = 0;
+    if (f64_le(Compressor_knee_db(self), 0) == 1) {
+        gain_db = dynamics_compressor_compute_gain_db_hard(self, env_db);
+    } else {
+        gain_db = dynamics_compressor_compute_gain_db_soft(self, env_db);
+    }
+    gain_db = f64_add(gain_db, Compressor_makeup_db(self));
+    return f64_mul(input, db_to_amplitude_lut(gain_db));
+}
+
+# Process a buffer (vec of f64) in place.
+#inline
+fn dynamics_compressor_process_buffer(self, buffer) {
+    var n = vec_len(buffer);
+    var i = 0;
+    while (i < n) {
+        vec_set(buffer, i, dynamics_compressor_process_sample(self, vec_get(buffer, i)));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# Limiter -- brick-wall limiter (fast attack, infinite ratio).
+#   ceiling_db : ceiling in dB (private; shadows the compressor threshold)
+#   release    : release time in seconds (private)
+#   compressor : Compressor pointer (infinity ratio)
+# ================================================================
+#derive(accessors)
+struct Limiter {
+    ceiling_db;
+    release;
+    compressor;
+}
+
+# Create a limiter. `ceiling_db` is the max output level, `release` in seconds.
+#must_use
+fn dynamics_limiter_new(ceiling_db, release, sample_rate) {
+    var comp = dynamics_compressor_new(ceiling_db, DYN_F32_MAX, DYN_C0_0001, release, sample_rate);
+    Compressor_set_knee_db(comp, 0);
+    var self = alloc(sizeof(Limiter));
+    Limiter_set_ceiling_db(self, ceiling_db);
+    Limiter_set_release(self, release);
+    Limiter_set_compressor(self, comp);
+    return self;
+}
+
+# Current ceiling in dB.
+#must_use
+fn dynamics_limiter_ceiling_db(self) {
+    return Limiter_ceiling_db(self);
+}
+
+# Set the ceiling in dB. Propagates to the internal gain stage.
+fn dynamics_limiter_set_ceiling_db(self, ceiling_db) {
+    Limiter_set_ceiling_db(self, ceiling_db);
+    Compressor_set_threshold_db(Limiter_compressor(self), ceiling_db);
+    return 0;
+}
+
+# Current release time in seconds.
+#must_use
+fn dynamics_limiter_release(self) {
+    return Limiter_release(self);
+}
+
+# Process a single sample.
+#inline
+#must_use
+fn dynamics_limiter_process_sample(self, input) {
+    return dynamics_compressor_process_sample(Limiter_compressor(self), input);
+}
+
+# Process a buffer (vec of f64) in place.
+#inline
+fn dynamics_limiter_process_buffer(self, buffer) {
+    var n = vec_len(buffer);
+    var i = 0;
+    while (i < n) {
+        vec_set(buffer, i, dynamics_limiter_process_sample(self, vec_get(buffer, i)));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# NoiseGate -- silences signal below a threshold with attack/hold/release.
+#   threshold_db  : threshold in dB (direct-read each sample)
+#   detector      : LevelDetector pointer
+#   gate_gain     : current gate gain (0.0 closed, 1.0 open)
+#   hold_counter  : samples remaining before release (u32 -> i64 slot)
+#   hold_samples  : hold time in samples (u32 -> i64 slot)
+#   attack_coeff  : gate-opening smoothing coefficient (fast)
+#   release_coeff : gate-closing smoothing coefficient (matches release)
+# ================================================================
+#derive(accessors)
+struct NoiseGate {
+    threshold_db;
+    detector;
+    gate_gain;
+    hold_counter;
+    hold_samples;
+    attack_coeff;
+    release_coeff;
+}
+
+# Create a noise gate. Times (attack/hold/release) in seconds; attack floored
+# at 1ms to avoid clicks. release <= 0.0 gives an instantaneous close.
+#must_use
+fn dynamics_noise_gate_new(threshold_db, attack, hold, release, sample_rate) {
+    var attack_time = f64_max(attack, DYN_C0_001);
+    var self = alloc(sizeof(NoiseGate));
+    NoiseGate_set_threshold_db(self, threshold_db);
+    NoiseGate_set_detector(self, dynamics_level_detector_new(attack, release, sample_rate));
+    NoiseGate_set_gate_gain(self, 0);
+    NoiseGate_set_hold_counter(self, 0);
+    NoiseGate_set_hold_samples(self, f64_to(f64_mul(hold, sample_rate)));
+    NoiseGate_set_attack_coeff(self,
+    f64_sub(F64_ONE, f64_exp(f64_div(f64_neg(F64_ONE), f64_mul(attack_time, sample_rate)))));
+    var rc = F64_ONE;
+    if (f64_gt(release, 0) == 1) {
+        rc = f64_sub(F64_ONE, f64_exp(f64_div(f64_neg(F64_ONE), f64_mul(release, sample_rate))));
+    }
+    NoiseGate_set_release_coeff(self, rc);
+    return self;
+}
+
+# Process a single sample.
+#inline
+#must_use
+fn dynamics_noise_gate_process_sample(self, input) {
+    var env = dynamics_level_detector_process(NoiseGate_detector(self), input);
+    var env_db = amplitude_to_db(env);
+
+    var target = 0;
+    if (f64_ge(env_db, NoiseGate_threshold_db(self)) == 1) {
+        NoiseGate_set_hold_counter(self, NoiseGate_hold_samples(self));
+        target = F64_ONE;
+    } elif (NoiseGate_hold_counter(self) > 0) {
+        NoiseGate_set_hold_counter(self, NoiseGate_hold_counter(self) - 1);
+        target = F64_ONE;
+    } else {
+        target = 0;
+    }
+
+    # Smooth the gate gain: fast attack, slow release.
+    var gg = NoiseGate_gate_gain(self);
+    var coeff = NoiseGate_release_coeff(self);
+    if (f64_gt(target, gg) == 1) { coeff = NoiseGate_attack_coeff(self); }
+    var newgg = f64_add(gg, f64_mul(coeff, f64_sub(target, gg)));
+    newgg = flush_denormal(newgg);
+    NoiseGate_set_gate_gain(self, newgg);
+    return f64_mul(input, newgg);
+}
+
+# Process a buffer (vec of f64) in place.
+#inline
+fn dynamics_noise_gate_process_buffer(self, buffer) {
+    var n = vec_len(buffer);
+    var i = 0;
+    while (i < n) {
+        vec_set(buffer, i, dynamics_noise_gate_process_sample(self, vec_get(buffer, i)));
+        i = i + 1;
+    }
+    return 0;
+}

@@ -1,0 +1,66 @@
+# hotpath.bcyr -- per-sample hot-path benchmarks for naad.
+# Run: cyrius bench tests/hotpath.bcyr
+# Covers the inner-loop functions dhvani/svara call per audio sample:
+# oscillator, state-variable filter, ADSR envelope, pink-noise generator.
+
+include "lib/hisab.cyr"
+include "src/error.cyr"
+include "src/dsp_util.cyr"
+include "src/noise.cyr"
+include "src/filter.cyr"
+include "src/envelope.cyr"
+include "src/osc_core.cyr"
+include "src/osc_unison.cyr"
+include "src/osc_sub.cyr"
+include "src/osc_sync.cyr"
+
+fn bench(name, fp, n) {
+    var b = bench_new(name);
+    bench_run(b, fp, n);
+    bench_report(b);
+    return 0;
+}
+
+# Fixtures (built in main).
+var _osc = 0;
+var _svf = 0;
+var _env = 0;
+var _noise = 0;
+var _half = 0;
+
+fn b_osc_next_sample() {
+    return osc_next_sample(_osc);
+}
+
+fn b_svf_lowpass() {
+    return filter_svf_process_sample_lowpass(_svf, _half);
+}
+
+fn b_env_next_value() {
+    return envelope_adsr_next_value(_env);
+}
+
+fn b_noise_pink() {
+    return noise_next_sample(_noise);
+}
+
+fn main() {
+    alloc_init();
+    _half = F64_HALF;
+
+    _osc = osc_new(WAVEFORM_SINE, f64_from(440), f64_from(44100));
+    _svf = filter_svf_new(f64_from(2000), F64_HALF, f64_from(44100));
+    _env = envelope_adsr_with_sample_rate(F64_HALF, F64_HALF, F64_HALF, F64_HALF, f64_from(44100));
+    envelope_adsr_gate_on(_env);
+    _noise = noise_new(NOISE_PINK, 42);
+
+    bench("osc_next_sample (sine)", &b_osc_next_sample, 200000);
+    bench("filter_svf lowpass", &b_svf_lowpass, 200000);
+    bench("envelope_adsr next_value", &b_env_next_value, 200000);
+    bench("noise pink (Voss-McCartney)", &b_noise_pink, 200000);
+
+    return 0;
+}
+
+var r = main();
+syscall(60, r);

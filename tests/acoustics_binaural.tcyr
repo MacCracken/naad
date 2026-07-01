@@ -1,0 +1,50 @@
+# acoustics_binaural.tcyr -- parity tests for src/acoustics_binaural.cyr.
+# Ports the non-serde #[test] blocks from rust-old/src/acoustics/binaural.rs
+# (test_serde_roundtrip dropped -- no serde in Cyrius). f32 tolerances widened
+# to f64. Result<Self> is a struct pointer (success) or ERR_COMPUTATION; is_ok
+# maps to naad_is_err == 0, is_err to naad_is_err == 1.
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "src/error.cyr"
+include "src/acoustics_binaural.cyr"
+
+var C1E_6 = 0x3eb0c6f7a0b5ed8d;   # 1e-6 (stereo-difference threshold)
+
+alloc_init();
+
+# ================================================================
+test_group("binaural creates");
+var proc1 = naad_binaural_new(F64_HALF, f64_from(0), 48000);
+assert(naad_is_err(proc1) == 0, "should create binaural processor");
+
+# ================================================================
+test_group("binaural produces stereo");
+var proc2 = naad_binaural_new(F64_HALF, f64_from(0), 48000);
+var s2 = naad_binaural_process_sample(proc2, F64_ONE);
+assert(naad_is_finite(BinauralStereo_left(s2)) == 1, "left output finite");
+assert(naad_is_finite(BinauralStereo_right(s2)) == 1, "right output finite");
+
+# ================================================================
+test_group("binaural stereo differs at side");
+# At π/2 azimuth, left and right ears should differ.
+var proc3 = naad_binaural_new(F64_PI_2, f64_from(0), 48000);
+var diff_found = 0;
+var i = 0;
+while (i < 1000) {
+    var input = 0;
+    if (i == 0) { input = F64_ONE; }
+    var s3 = naad_binaural_process_sample(proc3, input);
+    var d = f64_abs(f64_sub(BinauralStereo_left(s3), BinauralStereo_right(s3)));
+    if (f64_gt(d, C1E_6) == 1) { diff_found = 1; }
+    i = i + 1;
+}
+assert(diff_found == 1, "stereo output should differ for side source");
+
+# ================================================================
+test_group("zero sample rate errors");
+var proc4 = naad_binaural_new(f64_from(0), f64_from(0), 0);
+assert(naad_is_err(proc4) == 1, "zero sample rate should error");
+
+var rc = assert_summary();
+syscall(60, rc);

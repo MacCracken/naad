@@ -1,0 +1,63 @@
+# voice.tcyr -- parity tests for src/voice.cyr.
+# Ported from the non-serde #[test] blocks in rust-old/src/voice.rs.
+# The serde-roundtrip test is dropped (no serde in the Cyrius port).
+
+include "src/error.cyr"
+include "src/voice.cyr"
+
+alloc_init();
+
+var C0_8 = 0x3FE999999999999A;   # 0.8
+var C0_7 = 0x3FE6666666666666;   # 0.7
+var C0_9 = 0x3FECCCCCCCCCCCCD;   # 0.9
+
+# ================================================================
+test_group("note on / off");
+var vm = voice_manager_new(4, POLY_MODE_POLY, STEAL_MODE_OLDEST);
+var idx = voice_manager_note_on(vm, 60, C0_8);
+assert_eq(voice_manager_active_count(vm), 1, "one active after note_on");
+var voices = voice_manager_voices(vm);
+assert_eq(Voice_note(vec_get(voices, idx)), 60, "voice note is 60");
+voice_manager_note_off(vm, 60);
+assert_eq(voice_manager_active_count(vm), 0, "zero active after note_off");
+
+# ================================================================
+test_group("poly fill and steal");
+var vm2 = voice_manager_new(2, POLY_MODE_POLY, STEAL_MODE_OLDEST);
+var _on1 = voice_manager_note_on(vm2, 60, C0_8);
+voice_manager_tick(vm2);
+var _on2 = voice_manager_note_on(vm2, 64, C0_7);
+voice_manager_tick(vm2);
+assert_eq(voice_manager_active_count(vm2), 2, "two active after filling pool");
+# Third note should steal oldest.
+var idx3 = voice_manager_note_on(vm2, 67, C0_9);
+var voices2 = voice_manager_voices(vm2);
+assert_eq(Voice_note(vec_get(voices2, idx3)), 67, "stolen voice plays 67");
+assert_eq(voice_manager_active_count(vm2), 2, "still two active after steal");
+
+# ================================================================
+test_group("steal none");
+var vm3 = voice_manager_new(1, POLY_MODE_POLY, STEAL_MODE_NONE);
+var _on3 = voice_manager_note_on(vm3, 60, C0_8);
+assert_eq(voice_manager_note_on(vm3, 64, C0_7), VOICE_NONE, "note_on returns None when full");
+
+# ================================================================
+test_group("mono mode");
+var vm4 = voice_manager_new(4, POLY_MODE_MONO, STEAL_MODE_OLDEST);
+var _on4 = voice_manager_note_on(vm4, 60, C0_8);
+var _on5 = voice_manager_note_on(vm4, 64, C0_7);
+# Mono always uses voice 0.
+var voices4 = voice_manager_voices(vm4);
+assert_eq(Voice_note(vec_get(voices4, 0)), 64, "mono voice 0 plays latest note");
+assert_eq(voice_manager_active_count(vm4), 1, "mono keeps one active voice");
+
+# ================================================================
+test_group("all notes off");
+var vm5 = voice_manager_new(4, POLY_MODE_POLY, STEAL_MODE_OLDEST);
+var _on6 = voice_manager_note_on(vm5, 60, C0_8);
+var _on7 = voice_manager_note_on(vm5, 64, C0_7);
+voice_manager_all_notes_off(vm5);
+assert_eq(voice_manager_active_count(vm5), 0, "all_notes_off clears voices");
+
+var rc = assert_summary();
+syscall(60, rc);

@@ -1,0 +1,88 @@
+# panning.cyr -- stereo panning utilities: equal-power / linear pan laws
+# and stereo balance for placing signals in the stereo field.
+#
+# Ports rust-old/src/panning.rs. f32 -> f64 throughout. The `PanLaw` enum
+# becomes integer constants (PAN_LAW_*). Rust's serde derives are dropped.
+# The `(f32, f32)` tuple returns of `pan_mono` / `stereo_balance` become a
+# `PanPair` struct (left, right); `pan_gains` returns a `PanGains` struct.
+# Requires (from the build/test unit): stdlib alloc + math (F64_ONE/HALF/
+# PI_2, f64_add/sub/mul/clamp/neg, f64_sin/cos, f64_lt). No `include` lines.
+
+# ================================================================
+# PanLaw -- panning law used for stereo positioning (was `enum PanLaw`).
+#   EQUAL_POWER : constant-power panning via sin/cos (preserves loudness).
+#   LINEAR      : linear panning (loudness dips at center).
+# ================================================================
+var PAN_LAW_EQUAL_POWER = 0;
+var PAN_LAW_LINEAR      = 1;
+
+# ================================================================
+# PanGains -- stereo panning gains (left/right channel multipliers).
+# ================================================================
+#derive(accessors)
+struct PanGains { left; right; }
+
+# ================================================================
+# PanPair -- a (left, right) sample pair; replaces Rust's `(f32, f32)`
+# tuple returns from pan_mono / stereo_balance.
+# ================================================================
+#derive(accessors)
+struct PanPair { left; right; }
+
+# ================================================================
+# panning_pan_gains -- stereo gains for a pan position. `pan` ranges from
+# -1.0 (full left) to +1.0 (full right), 0.0 = center. Ports pan_gains.
+# ================================================================
+#inline
+#must_use
+fn panning_pan_gains(pan, law) {
+    var p = f64_clamp(pan, f64_neg(F64_ONE), F64_ONE);
+    # Map -1..+1 to 0..1.
+    var t = f64_mul(f64_add(p, F64_ONE), F64_HALF);
+    var g = alloc(sizeof(PanGains));
+    if (law == PAN_LAW_EQUAL_POWER) {
+        var angle = f64_mul(t, F64_PI_2);
+        PanGains_set_left(g, f64_cos(angle));
+        PanGains_set_right(g, f64_sin(angle));
+    } else {
+        PanGains_set_left(g, f64_sub(F64_ONE, t));
+        PanGains_set_right(g, t);
+    }
+    return g;
+}
+
+# ================================================================
+# panning_pan_mono -- apply panning to a mono sample, returning (left,
+# right) as a PanPair. Ports pan_mono.
+# ================================================================
+#inline
+#must_use
+fn panning_pan_mono(sample, pan, law) {
+    var g = panning_pan_gains(pan, law);
+    var out = alloc(sizeof(PanPair));
+    PanPair_set_left(out, f64_mul(sample, PanGains_left(g)));
+    PanPair_set_right(out, f64_mul(sample, PanGains_right(g)));
+    return out;
+}
+
+# ================================================================
+# panning_stereo_balance -- attenuate one channel to shift the image.
+# `balance` ranges from -1.0 (left only) to +1.0 (right only). Returns the
+# adjusted (left, right) as a PanPair. Ports stereo_balance.
+# ================================================================
+#inline
+#must_use
+fn panning_stereo_balance(left, right, balance) {
+    var b = f64_clamp(balance, f64_neg(F64_ONE), F64_ONE);
+    var out = alloc(sizeof(PanPair));
+    if (f64_lt(b, 0) == 1) {
+        # Attenuate right.
+        PanPair_set_left(out, left);
+        PanPair_set_right(out, f64_mul(right, f64_add(F64_ONE, b)));
+    } else {
+        # Attenuate left.
+        PanPair_set_left(out, f64_mul(left, f64_sub(F64_ONE, b)));
+        PanPair_set_right(out, right);
+    }
+    return out;
+}

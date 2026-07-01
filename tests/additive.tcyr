@@ -1,0 +1,178 @@
+# additive.tcyr -- parity tests for src/additive.cyr.
+# Ported from the non-serde #[test] blocks in rust-old/src/synth/additive.rs
+# (test_serde_roundtrip dropped -- no serde). f32 tolerances widened to f64.
+
+include "lib/hisab.cyr"
+include "src/error.cyr"
+include "src/dsp_util.cyr"
+include "src/additive.cyr"
+
+alloc_init();
+
+var C0_5   = 0x3fe0000000000000;   # 0.5
+var C0_05  = 0x3fa999999999999a;   # 0.05
+var C1E_4  = 0x3f1a36e2eb1c432d;   # 1e-4
+var C0_15  = 0x3fc3333333333333;   # 0.15
+var C1E_6  = 0x3eb0c6f7a0b5ed8d;   # 1e-6
+
+var SR   = 44100;
+var A440 = 440;
+
+# ================================================================
+test_group("single partial is sine");
+var s1 = additive_new(f64_from(A440), 1, f64_from(SR));
+var buf1 = vec_new();
+var bi = 0;
+while (bi < 1024) { vec_push(buf1, 0); bi = bi + 1; }
+additive_fill_buffer(s1, buf1);
+var any1 = 0;
+var fin1 = 1;
+var peak1 = 0;
+bi = 0;
+while (bi < 1024) {
+    var sv = vec_get(buf1, bi);
+    var a = f64_abs(sv);
+    if (f64_gt(a, C0_5) == 1) { any1 = 1; }
+    if (naad_is_finite(sv) == 0) { fin1 = 0; }
+    if (f64_gt(a, peak1) == 1) { peak1 = a; }
+    bi = bi + 1;
+}
+assert(any1, "single partial should produce sine output");
+assert(fin1, "single partial all finite");
+assert(f64_lt(f64_abs(f64_sub(peak1, F64_ONE)), C0_05), "peak should be near 1.0");
+
+# ================================================================
+test_group("harmonic series");
+var s2 = additive_new(f64_from(A440), 8, f64_from(SR));
+var buf2 = vec_new();
+bi = 0;
+while (bi < 1024) { vec_push(buf2, 0); bi = bi + 1; }
+additive_fill_buffer(s2, buf2);
+var any2 = 0;
+var fin2 = 1;
+bi = 0;
+while (bi < 1024) {
+    var sv2 = vec_get(buf2, bi);
+    if (f64_gt(f64_abs(sv2), C0_5) == 1) { any2 = 1; }
+    if (naad_is_finite(sv2) == 0) { fin2 = 0; }
+    bi = bi + 1;
+}
+assert(any2, "harmonic series produces output");
+assert(fin2, "harmonic series all finite");
+
+# ================================================================
+test_group("set partial");
+var s3 = additive_new(f64_from(A440), 4, f64_from(SR));
+additive_set_partial(s3, 0, F64_ONE, 0);
+additive_set_partial(s3, 1, F64_TWO, F64_ONE);
+var buf3 = vec_new();
+bi = 0;
+while (bi < 1024) { vec_push(buf3, 0); bi = bi + 1; }
+additive_fill_buffer(s3, buf3);
+var any3 = 0;
+bi = 0;
+while (bi < 1024) {
+    if (f64_gt(f64_abs(vec_get(buf3, bi)), C0_5) == 1) { any3 = 1; }
+    bi = bi + 1;
+}
+assert(any3, "set_partial still produces output from partial 1");
+
+# ================================================================
+test_group("nyquist filtering");
+# At 8000 Hz sample rate, partials above 4000 Hz should be silent.
+var s5 = additive_new(f64_from(1000), 8, f64_from(8000));
+var p5 = AdditiveSynth_partials(s5);
+var nyq_ok = 1;
+var i5 = 4;
+while (i5 < vec_len(p5)) {
+    if (Partial_amplitude(vec_get(p5, i5)) != 0) { nyq_ok = 0; }
+    i5 = i5 + 1;
+}
+assert(nyq_ok, "partials above Nyquist should be zeroed");
+
+# ================================================================
+test_group("dct full roundtrip preserves amplitudes");
+var s6 = additive_new(f64_from(A440), 16, f64_from(SR));
+var p6 = AdditiveSynth_partials(s6);
+var orig6 = vec_new();
+var j6 = 0;
+while (j6 < 16) { vec_push(orig6, Partial_amplitude(vec_get(p6, j6))); j6 = j6 + 1; }
+var coeffs6 = additive_compress_amplitudes_dct(s6, additive_num_partials(s6));
+assert_eq(vec_len(coeffs6), 16, "full roundtrip keeps 16 coeffs");
+assert_eq(additive_restore_amplitudes_dct(s6, coeffs6), ERR_NONE, "restore ok");
+var rt_ok = 1;
+j6 = 0;
+while (j6 < 16) {
+    var diff6 = f64_abs(f64_sub(vec_get(orig6, j6), Partial_amplitude(vec_get(p6, j6))));
+    if (f64_ge(diff6, C1E_4) == 1) { rt_ok = 0; }
+    j6 = j6 + 1;
+}
+assert(rt_ok, "full DCT roundtrip recovers amplitudes within 1e-4");
+
+# ================================================================
+test_group("dct truncated is lossy approximation");
+var s7 = additive_new(f64_from(A440), 16, f64_from(SR));
+var p7 = AdditiveSynth_partials(s7);
+var orig7 = vec_new();
+var j7 = 0;
+while (j7 < 16) { vec_push(orig7, Partial_amplitude(vec_get(p7, j7))); j7 = j7 + 1; }
+var coeffs7 = additive_compress_amplitudes_dct(s7, 4);
+assert_eq(vec_len(coeffs7), 4, "truncated keeps 4 coeffs");
+assert_eq(additive_restore_amplitudes_dct(s7, coeffs7), ERR_NONE, "restore truncated ok");
+var sse7 = 0;
+j7 = 0;
+while (j7 < 16) {
+    var e7 = f64_sub(vec_get(orig7, j7), Partial_amplitude(vec_get(p7, j7)));
+    sse7 = f64_add(sse7, f64_mul(e7, e7));
+    j7 = j7 + 1;
+}
+var rmse7 = f64_sqrt(f64_div(sse7, f64_from(16)));
+assert(f64_lt(rmse7, C0_15), "truncated DCT roundtrip RMSE < 0.15");
+assert(f64_gt(rmse7, C1E_6), "truncated RMSE not exactly zero");
+
+# ================================================================
+test_group("dct compress clamps num_coeffs");
+var s8 = additive_new(f64_from(A440), 8, f64_from(SR));
+var c8a = additive_compress_amplitudes_dct(s8, 100);
+assert_eq(vec_len(c8a), 8, "num_coeffs > num_partials clamps to 8");
+var c8b = additive_compress_amplitudes_dct(s8, 0);
+assert_eq(vec_len(c8b), 1, "num_coeffs == 0 clamps to 1");
+
+# ================================================================
+test_group("dct restore rejects invalid lengths");
+var s9 = additive_new(f64_from(A440), 8, f64_from(SR));
+var empty9 = vec_new();
+assert(naad_is_err(additive_restore_amplitudes_dct(s9, empty9)), "empty coeffs rejected");
+var long9 = vec_new();
+var j9 = 0;
+while (j9 < 99) { vec_push(long9, C0_5); j9 = j9 + 1; }
+assert(naad_is_err(additive_restore_amplitudes_dct(s9, long9)), "too-long coeffs rejected");
+
+# ================================================================
+test_group("dct restore respects nyquist");
+# Build a synth with partials above Nyquist (zeroed at construction), then
+# "restore" amplitudes that would re-enable them. The re-check keeps them silent.
+var s10 = additive_new(f64_from(1000), 8, f64_from(8000));
+var p10 = AdditiveSynth_partials(s10);
+# Run a DCT of the would-be full amplitudes (all 0.5) via hisab directly.
+var dbuf = alloc(8 * 8);
+var jd = 0;
+while (jd < 8) { store64(dbuf + jd * 8, C0_5); jd = jd + 1; }
+assert_eq(num_dct(dbuf, 8), ERR_NONE, "hisab dct ok");
+var coeffs10 = vec_new();
+jd = 0;
+while (jd < 8) { vec_push(coeffs10, load64(dbuf + jd * 8)); jd = jd + 1; }
+assert_eq(additive_restore_amplitudes_dct(s10, coeffs10), ERR_NONE, "restore respects-nyquist ok");
+var nyq2_ok = 1;
+var i10 = 0;
+while (i10 < 8) {
+    var pp = vec_get(p10, i10);
+    if (f64_ge(f64_mul(f64_from(1000), Partial_frequency_ratio(pp)), f64_from(4000)) == 1) {
+        if (Partial_amplitude(pp) != 0) { nyq2_ok = 0; }
+    }
+    i10 = i10 + 1;
+}
+assert(nyq2_ok, "above-Nyquist partials remain 0.0 after restore");
+
+var rc = assert_summary();
+syscall(60, rc);

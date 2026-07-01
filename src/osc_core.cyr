@@ -1,0 +1,316 @@
+# osc_core.cyr -- core oscillator: Waveform, polyblep kernel, Oscillator.
+#
+# Ports rust-old/src/oscillator/core.rs. f32 -> f64 throughout. The
+# `Waveform` enum becomes integer constants; serde/Display derives are
+# dropped; the constructor returns the struct pointer on success (or a
+# negative ERR_* on invalid sample_rate/frequency). Methods become free
+# `osc_*` functions taking the struct pointer.
+#
+# Noise waveforms: like the oracle's `Option<noise::NoiseGenerator>`, the
+# Oscillator owns a NoiseGenerator (noise.cyr) constructed with the matching
+# NOISE_WHITE/PINK/BROWN type + seed 42, so PinkNoise is Voss-McCartney and
+# BrownNoise is integrated brown (full parity, not a white-noise stand-in).
+# The field is 0 (null) for non-noise waveforms.
+#
+# Requires (from the build/test unit): stdlib alloc/vec + math/ganita
+# (F64_ONE/TWO/HALF/TAU, f64_clamp/fract/sin/cos), error.cyr
+# (validate_frequency/validate_sample_rate, naad_is_err, ERR_*), and
+# noise.cyr (noise_new, noise_next_sample, NOISE_*). No `include` lines.
+
+# ================================================================
+# Waveform (enum) -> integer constants. Exact oracle variant order.
+# ================================================================
+var WAVEFORM_SINE        = 0;
+var WAVEFORM_SAW         = 1;
+var WAVEFORM_SQUARE      = 2;
+var WAVEFORM_TRIANGLE    = 3;
+var WAVEFORM_PULSE       = 4;
+var WAVEFORM_WHITE_NOISE = 5;
+var WAVEFORM_PINK_NOISE  = 6;
+var WAVEFORM_BROWN_NOISE = 7;
+
+# Non-integer float literals (IEEE-754 bit patterns).
+var OSC_C0_999 = 0x3FEFF7CED916872B;   # 0.999 (triangle leaky integrator)
+var OSC_C0_01  = 0x3F847AE147AE147B;   # 0.01  (pulse-width lower clamp)
+var OSC_C0_99  = 0x3FEFAE147AE147AE;   # 0.99  (pulse-width upper clamp)
+var OSC_C0_25  = 0x3FD0000000000000;   # 0.25  (stateless triangle knee)
+var OSC_C0_75  = 0x3FE8000000000000;   # 0.75  (stateless triangle knee)
+
+# PRNG seed for noise waveforms (matches Rust NoiseGenerator::new(_, 42)).
+var OSC_NOISE_SEED = 42;
+
+# ================================================================
+# polyblep -- 4-point PolyBLEP correction for anti-aliased discontinuities.
+# `t` is the phase (0..1), `dt` the phase increment per sample. Branch-local
+# `var`s are uniquely named (Cyrius shares one scope across elif bodies).
+# ================================================================
+#inline
+#must_use
+fn osc_polyblep(t, dt) {
+    if (f64_le(dt, 0) == 1) { return 0; }
+    var dt2 = f64_mul(F64_TWO, dt);
+    if (f64_lt(t, dt) == 1) {
+        # First sample after discontinuity.
+        var na = f64_div(t, dt);
+        var na2 = f64_mul(na, na);
+        var blepa = f64_sub(f64_sub(f64_mul(F64_TWO, na), na2), F64_ONE);
+        var cubica = f64_mul(f64_mul(na2, f64_sub(na, F64_ONE)), F64_HALF);
+        return f64_add(blepa, cubica);
+    } elif (f64_lt(t, dt2) == 1) {
+        # Second sample after discontinuity (cubic tail).
+        var nb = f64_sub(f64_div(t, dt), F64_ONE);
+        var nb2 = f64_mul(nb, nb);
+        return f64_mul(f64_mul(f64_neg(nb2), f64_sub(F64_ONE, nb)), F64_HALF);
+    } elif (f64_gt(t, f64_sub(F64_ONE, dt)) == 1) {
+        # First sample before discontinuity.
+        var nc = f64_div(f64_sub(t, F64_ONE), dt);
+        var nc2 = f64_mul(nc, nc);
+        var blepc = f64_add(f64_add(nc2, f64_mul(F64_TWO, nc)), F64_ONE);
+        var cubicc = f64_mul(f64_mul(f64_neg(nc2), f64_add(nc, F64_ONE)), F64_HALF);
+        return f64_add(blepc, cubicc);
+    } elif (f64_gt(t, f64_sub(F64_ONE, dt2)) == 1) {
+        # Second sample before discontinuity (cubic tail).
+        var nd = f64_add(f64_div(f64_sub(t, F64_ONE), dt), F64_ONE);
+        var nd2 = f64_mul(nd, nd);
+        return f64_mul(f64_mul(nd2, f64_add(F64_ONE, nd)), F64_HALF);
+    }
+    return 0;
+}
+
+# ================================================================
+# Oscillator -- band-limited waveform generator.
+#   waveform     : WAVEFORM_* constant
+#   frequency    : Hz
+#   phase        : 0..1
+#   sample_rate  : Hz
+#   pulse_width  : 0..1 (pulse duty cycle)
+#   noise_gen    : NoiseGenerator pointer for noise waveforms (0 otherwise)
+#   triangle_sum : leaky-integrator state for the triangle waveform
+# ================================================================
+#derive(accessors)
+struct Oscillator { waveform; frequency; phase; sample_rate; pulse_width; noise_gen; triangle_sum; }
+
+# ================================================================
+# osc_new -- construct. Returns the struct pointer on success, or a negative
+# ERR_* on invalid sample_rate/frequency (frequency is not validated for the
+# noise waveforms, matching the oracle).
+# ================================================================
+#must_use
+fn osc_new(waveform, frequency, sample_rate) {
+    var e = validate_sample_rate(sample_rate);
+    if (naad_is_err(e) == 1) { return e; }
+
+    var is_noise = 0;
+    if (waveform == WAVEFORM_WHITE_NOISE) { is_noise = 1; }
+    if (waveform == WAVEFORM_PINK_NOISE) { is_noise = 1; }
+    if (waveform == WAVEFORM_BROWN_NOISE) { is_noise = 1; }
+
+    if (is_noise == 0) {
+        e = validate_frequency(frequency, sample_rate);
+        if (naad_is_err(e) == 1) { return e; }
+    }
+
+    # Noise waveforms own a NoiseGenerator (White/Pink/Brown), matching the
+    # oracle's Option<NoiseGenerator>; non-noise waveforms leave it null (0).
+    var noise_gen = 0;
+    if (waveform == WAVEFORM_WHITE_NOISE) { noise_gen = noise_new(NOISE_WHITE, OSC_NOISE_SEED); }
+    if (waveform == WAVEFORM_PINK_NOISE) { noise_gen = noise_new(NOISE_PINK, OSC_NOISE_SEED); }
+    if (waveform == WAVEFORM_BROWN_NOISE) { noise_gen = noise_new(NOISE_BROWN, OSC_NOISE_SEED); }
+
+    var self = alloc(sizeof(Oscillator));
+    Oscillator_set_waveform(self, waveform);
+    Oscillator_set_frequency(self, frequency);
+    Oscillator_set_phase(self, 0);
+    Oscillator_set_sample_rate(self, sample_rate);
+    Oscillator_set_pulse_width(self, F64_HALF);
+    Oscillator_set_noise_gen(self, noise_gen);
+    Oscillator_set_triangle_sum(self, 0);
+    return self;
+}
+
+# ================================================================
+# osc_phase_increment -- phase advance per sample (frequency / sample_rate).
+# ================================================================
+#inline
+#must_use
+fn osc_phase_increment(self) {
+    return f64_div(Oscillator_frequency(self), Oscillator_sample_rate(self));
+}
+
+# ================================================================
+# osc_next_sample -- generate the next sample and advance phase.
+# ================================================================
+#inline
+#must_use
+fn osc_next_sample(self) {
+    var dt = osc_phase_increment(self);
+    var t = Oscillator_phase(self);
+    var wf = Oscillator_waveform(self);
+
+    var sample = 0;
+    if (wf == WAVEFORM_SINE) {
+        sample = f64_sin(f64_mul(t, F64_TAU));
+    } elif (wf == WAVEFORM_SAW) {
+        var saw_naive = f64_sub(f64_mul(F64_TWO, t), F64_ONE);
+        sample = f64_sub(saw_naive, osc_polyblep(t, dt));
+    } elif (wf == WAVEFORM_SQUARE) {
+        var sq_naive = f64_neg(F64_ONE);
+        if (f64_lt(t, F64_HALF) == 1) { sq_naive = F64_ONE; }
+        var sq_t2 = f64_fract(f64_add(t, F64_HALF));
+        sample = f64_sub(f64_add(sq_naive, osc_polyblep(t, dt)), osc_polyblep(sq_t2, dt));
+    } elif (wf == WAVEFORM_TRIANGLE) {
+        var tr_square = f64_neg(F64_ONE);
+        if (f64_lt(t, F64_HALF) == 1) { tr_square = F64_ONE; }
+        var tr_t2 = f64_fract(f64_add(t, F64_HALF));
+        var tr_blep = f64_sub(f64_add(tr_square, osc_polyblep(t, dt)), osc_polyblep(tr_t2, dt));
+        # leaky integrator: triangle_sum = 0.999*triangle_sum + square_blep*dt*4
+        var tr_decay = f64_mul(OSC_C0_999, Oscillator_triangle_sum(self));
+        var ts = f64_add(tr_decay, f64_mul(f64_mul(tr_blep, dt), f64_from(4)));
+        Oscillator_set_triangle_sum(self, ts);
+        sample = f64_clamp(ts, f64_neg(F64_ONE), F64_ONE);
+    } elif (wf == WAVEFORM_PULSE) {
+        var pw = f64_clamp(Oscillator_pulse_width(self), OSC_C0_01, OSC_C0_99);
+        var pl_naive = f64_neg(F64_ONE);
+        if (f64_lt(t, pw) == 1) { pl_naive = F64_ONE; }
+        var pl_t2 = f64_fract(f64_add(t, f64_sub(F64_ONE, pw)));
+        sample = f64_sub(f64_add(pl_naive, osc_polyblep(t, dt)), osc_polyblep(pl_t2, dt));
+    } else {
+        # Noise waveforms -- delegate to the owned NoiseGenerator (White =
+        # xorshift, Pink = Voss-McCartney, Brown = integrated), matching oracle.
+        sample = noise_next_sample(Oscillator_noise_gen(self));
+    }
+
+    var ph = f64_add(t, dt);
+    if (f64_ge(ph, F64_ONE) == 1) { ph = f64_sub(ph, F64_ONE); }
+    Oscillator_set_phase(self, ph);
+    return sample;
+}
+
+# ================================================================
+# osc_fill_buffer -- fill a vec buffer in place.
+# ================================================================
+#inline
+fn osc_fill_buffer(self, buffer) {
+    var n = vec_len(buffer);
+    var i = 0;
+    while (i < n) {
+        vec_set(buffer, i, osc_next_sample(self));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# Accessors (read-only getters mirroring the Rust methods).
+# ================================================================
+#inline
+#must_use
+fn osc_waveform(self) {
+    return Oscillator_waveform(self);
+}
+
+#inline
+#must_use
+fn osc_frequency(self) {
+    return Oscillator_frequency(self);
+}
+
+#inline
+#must_use
+fn osc_phase(self) {
+    return Oscillator_phase(self);
+}
+
+#inline
+#must_use
+fn osc_sample_rate(self) {
+    return Oscillator_sample_rate(self);
+}
+
+#inline
+#must_use
+fn osc_pulse_width(self) {
+    return Oscillator_pulse_width(self);
+}
+
+# ================================================================
+# osc_set_frequency -- validate then set. Returns ERR_NONE or negative ERR_*.
+# ================================================================
+fn osc_set_frequency(self, freq) {
+    var e = validate_frequency(freq, Oscillator_sample_rate(self));
+    if (naad_is_err(e) == 1) { return e; }
+    Oscillator_set_frequency(self, freq);
+    return ERR_NONE;
+}
+
+# ================================================================
+# osc_set_pulse_width -- clamp to [0.01, 0.99].
+# ================================================================
+fn osc_set_pulse_width(self, pw) {
+    Oscillator_set_pulse_width(self, f64_clamp(pw, OSC_C0_01, OSC_C0_99));
+    return 0;
+}
+
+# ================================================================
+# osc_set_phase -- set phase, wrapped to [0, 1) (rem_euclid(1.0) == fract).
+# ================================================================
+fn osc_set_phase(self, phase) {
+    Oscillator_set_phase(self, f64_fract(phase));
+    return 0;
+}
+
+# ================================================================
+# osc_reset_phase -- clear phase and triangle integrator.
+# ================================================================
+fn osc_reset_phase(self) {
+    Oscillator_set_phase(self, 0);
+    Oscillator_set_triangle_sum(self, 0);
+    return 0;
+}
+
+# ================================================================
+# osc_advance_phase_sine -- FM helper: return sin(phase) then advance by dt.
+# ================================================================
+#inline
+fn osc_advance_phase_sine(self, dt) {
+    var sample = f64_sin(f64_mul(Oscillator_phase(self), F64_TAU));
+    var ph = f64_add(Oscillator_phase(self), dt);
+    if (f64_ge(ph, F64_ONE) == 1) { ph = f64_sub(ph, F64_ONE); }
+    Oscillator_set_phase(self, ph);
+    return sample;
+}
+
+# ================================================================
+# osc_stateless_waveform_sample -- stateless waveform value from (t, dt).
+# Ports core::stateless_waveform_sample (used by UnisonOscillator). No noise,
+# no triangle integration: triangle is the naive piecewise ramp; noise -> 0.
+# ================================================================
+#inline
+#must_use
+fn osc_stateless_waveform_sample(waveform, t, dt) {
+    if (waveform == WAVEFORM_SINE) {
+        return f64_sin(f64_mul(t, F64_TAU));
+    } elif (waveform == WAVEFORM_SAW) {
+        var sw_naive = f64_sub(f64_mul(F64_TWO, t), F64_ONE);
+        return f64_sub(sw_naive, osc_polyblep(t, dt));
+    } elif (waveform == WAVEFORM_SQUARE) {
+        var sq_naive = f64_neg(F64_ONE);
+        if (f64_lt(t, F64_HALF) == 1) { sq_naive = F64_ONE; }
+        var sq_t2 = f64_fract(f64_add(t, F64_HALF));
+        return f64_sub(f64_add(sq_naive, osc_polyblep(t, dt)), osc_polyblep(sq_t2, dt));
+    } elif (waveform == WAVEFORM_TRIANGLE) {
+        if (f64_lt(t, OSC_C0_25) == 1) {
+            return f64_mul(f64_from(4), t);
+        } elif (f64_lt(t, OSC_C0_75) == 1) {
+            return f64_sub(F64_TWO, f64_mul(f64_from(4), t));
+        }
+        return f64_sub(f64_mul(f64_from(4), t), f64_from(4));
+    } elif (waveform == WAVEFORM_PULSE) {
+        var pl_naive = f64_neg(F64_ONE);
+        if (f64_lt(t, F64_HALF) == 1) { pl_naive = F64_ONE; }
+        var pl_t2 = f64_fract(f64_add(t, F64_HALF));
+        return f64_sub(f64_add(pl_naive, osc_polyblep(t, dt)), osc_polyblep(pl_t2, dt));
+    }
+    # Noise waveforms make no sense for unison detuning -> silence.
+    return 0;
+}

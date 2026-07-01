@@ -1,0 +1,282 @@
+# additive.cyr -- additive synthesis with per-partial control.
+#
+# Ports rust-old/src/synth/additive.rs. f32 -> f64 throughout. Builds complex
+# timbres by summing individually controllable sine partials; the default
+# constructor creates a harmonic series with 1/n amplitude rolloff. The DCT
+# amplitude-compression pair (compress/restore) wraps hisab num_dct/num_idct
+# (in-place, raw f64 buffers). serde/Display derives are dropped; validators
+# and constructors return integer ERR_* codes (or the struct pointer / a vec
+# handle on success). Methods become free `additive_*` functions.
+#
+# Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE/TWO/
+# HALF/TAU, f64_clamp), hisab (num_dct/num_idct), and error.cyr (naad_is_finite,
+# ERR_*). No `include` lines here -- the test entry orders the deps.
+
+# Maximum number of partials supported.
+var ADDITIVE_MAX_PARTIALS = 64;
+
+# ================================================================
+# Partial -- one sine partial in an AdditiveSynth bank.
+#   frequency_ratio : frequency multiplier relative to the fundamental
+#   amplitude       : 0.0 .. 1.0
+#   phase           : initial phase offset in turns (0..1)
+# A partial is amplitude * sin(TAU * (fundamental * frequency_ratio) * t + phase).
+# ================================================================
+#derive(accessors)
+struct Partial { frequency_ratio; amplitude; phase; }
+
+# Build a partial from its three fields.
+#must_use
+fn additive_partial_new(frequency_ratio, amplitude, phase) {
+    var p = alloc(sizeof(Partial));
+    Partial_set_frequency_ratio(p, frequency_ratio);
+    Partial_set_amplitude(p, amplitude);
+    Partial_set_phase(p, phase);
+    return p;
+}
+
+# ================================================================
+# AdditiveSynth -- sums up to 64 sine partials at independent frequency
+# ratios relative to the fundamental.
+#   fundamental : fundamental frequency in Hz
+#   partials    : vec of Partial pointers
+#   phases      : vec of running phases (0..1), one per partial
+#   sample_rate : Hz
+# ================================================================
+#derive(accessors)
+struct AdditiveSynth { fundamental; partials; phases; sample_rate; }
+
+# ================================================================
+# additive_new -- harmonic-series constructor.
+#
+# Generates `num_partials` harmonics at 1x, 2x, 3x ... with amplitudes of
+# 1/1, 1/2, 1/3 ... Partials whose frequency would reach/exceed Nyquist are
+# zeroed. `num_partials` is clamped to [1, 64]. Returns the struct pointer on
+# success, or a negative ERR_* for an invalid sample rate / fundamental.
+# ================================================================
+#must_use
+fn additive_new(fundamental, num_partials, sample_rate) {
+    if (f64_le(sample_rate, 0) == 1) { return ERR_INVALID_SAMPLE_RATE; }
+    if (naad_is_finite(sample_rate) == 0) { return ERR_INVALID_SAMPLE_RATE; }
+    if (f64_le(fundamental, 0) == 1) { return ERR_INVALID_FREQUENCY; }
+    if (naad_is_finite(fundamental) == 0) { return ERR_INVALID_FREQUENCY; }
+
+    var count = num_partials;
+    if (count < 1) { count = 1; }
+    if (count > ADDITIVE_MAX_PARTIALS) { count = ADDITIVE_MAX_PARTIALS; }
+    var nyquist = f64_mul(sample_rate, F64_HALF);
+
+    var partials = vec_new();
+    var phases = vec_new();
+    var i = 0;
+    while (i < count) {
+        var ratio = f64_from(i + 1);
+        var amp = 0;
+        if (f64_lt(f64_mul(fundamental, ratio), nyquist) == 1) {
+            amp = f64_div(F64_ONE, ratio);
+        }
+        vec_push(partials, additive_partial_new(ratio, amp, 0));
+        vec_push(phases, 0);
+        i = i + 1;
+    }
+
+    var self = alloc(sizeof(AdditiveSynth));
+    AdditiveSynth_set_fundamental(self, fundamental);
+    AdditiveSynth_set_partials(self, partials);
+    AdditiveSynth_set_phases(self, phases);
+    AdditiveSynth_set_sample_rate(self, sample_rate);
+    return self;
+}
+
+# ================================================================
+# additive_set_fundamental -- set the fundamental frequency.
+#
+# Returns ERR_INVALID_FREQUENCY if `freq` is <= 0 or non-finite, else
+# ERR_NONE. Re-checks Nyquist: zeros any partial whose frequency now
+# reaches/exceeds Nyquist.
+# ================================================================
+fn additive_set_fundamental(self, freq) {
+    if (f64_le(freq, 0) == 1) { return ERR_INVALID_FREQUENCY; }
+    if (naad_is_finite(freq) == 0) { return ERR_INVALID_FREQUENCY; }
+    AdditiveSynth_set_fundamental(self, freq);
+    var nyquist = f64_mul(AdditiveSynth_sample_rate(self), F64_HALF);
+    var partials = AdditiveSynth_partials(self);
+    var n = vec_len(partials);
+    var i = 0;
+    while (i < n) {
+        var p = vec_get(partials, i);
+        if (f64_ge(f64_mul(freq, Partial_frequency_ratio(p)), nyquist) == 1) {
+            Partial_set_amplitude(p, 0);
+        }
+        i = i + 1;
+    }
+    return ERR_NONE;
+}
+
+# ================================================================
+# additive_set_partial -- configure an individual partial by index.
+#
+# Amplitude is clamped to 0.0 if the partial frequency reaches/exceeds
+# Nyquist, else clamped to [0.0, 1.0]. Does nothing if `index` is out of
+# range. Returns ERR_NONE.
+# ================================================================
+fn additive_set_partial(self, index, freq_ratio, amplitude) {
+    var partials = AdditiveSynth_partials(self);
+    if (index < 0 || index >= vec_len(partials)) { return ERR_NONE; }
+    var p = vec_get(partials, index);
+    Partial_set_frequency_ratio(p, freq_ratio);
+    var nyquist = f64_mul(AdditiveSynth_sample_rate(self), F64_HALF);
+    if (f64_ge(f64_mul(AdditiveSynth_fundamental(self), freq_ratio), nyquist) == 1) {
+        Partial_set_amplitude(p, 0);
+    } else {
+        Partial_set_amplitude(p, f64_clamp(amplitude, 0, F64_ONE));
+    }
+    return ERR_NONE;
+}
+
+# Number of partials.
+#must_use
+fn additive_num_partials(self) {
+    return vec_len(AdditiveSynth_partials(self));
+}
+
+# Fundamental frequency in Hz.
+#must_use
+fn additive_fundamental(self) {
+    return AdditiveSynth_fundamental(self);
+}
+
+# ================================================================
+# additive_next_sample -- generate the next output sample.
+# ================================================================
+#inline
+#must_use
+fn additive_next_sample(self) {
+    var partials = AdditiveSynth_partials(self);
+    var phases = AdditiveSynth_phases(self);
+    var fundamental = AdditiveSynth_fundamental(self);
+    var sample_rate = AdditiveSynth_sample_rate(self);
+    var n = vec_len(partials);
+    var sum = 0;
+    var i = 0;
+    while (i < n) {
+        var p = vec_get(partials, i);
+        var amp = Partial_amplitude(p);
+        if (f64_le(amp, 0) == 0) {
+            var phase = vec_get(phases, i);
+            sum = f64_add(sum, f64_mul(f64_sin(f64_mul(phase, F64_TAU)), amp));
+
+            var freq = f64_mul(fundamental, Partial_frequency_ratio(p));
+            var inc = f64_div(freq, sample_rate);
+            var new_phase = f64_add(phase, inc);
+            vec_set(phases, i, f64_sub(new_phase, f64_floor(new_phase)));
+        }
+        i = i + 1;
+    }
+    return sum;
+}
+
+# ================================================================
+# additive_fill_buffer -- fill `buffer` (a vec) with samples. Returns ERR_NONE.
+# ================================================================
+#inline
+fn additive_fill_buffer(self, buffer) {
+    var n = vec_len(buffer);
+    var i = 0;
+    while (i < n) {
+        vec_set(buffer, i, additive_next_sample(self));
+        i = i + 1;
+    }
+    return ERR_NONE;
+}
+
+# ================================================================
+# additive_is_active -- 1 if any partial has non-zero amplitude, else 0.
+# ================================================================
+#must_use
+fn additive_is_active(self) {
+    var partials = AdditiveSynth_partials(self);
+    var n = vec_len(partials);
+    var i = 0;
+    while (i < n) {
+        if (f64_gt(Partial_amplitude(vec_get(partials, i)), 0) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# additive_compress_amplitudes_dct -- DCT-II compress the amplitude bank,
+# keeping the first `num_coeffs` coefficients.
+#
+# Returns a vec of the kept coefficients on success, or ERR_COMPUTATION if
+# the underlying hisab DCT fails. `num_coeffs` is clamped to [1, num_partials].
+# ================================================================
+fn additive_compress_amplitudes_dct(self, num_coeffs) {
+    var partials = AdditiveSynth_partials(self);
+    var n = vec_len(partials);
+    var buf = alloc(n * 8);
+    var i = 0;
+    while (i < n) {
+        store64(buf + i * 8, Partial_amplitude(vec_get(partials, i)));
+        i = i + 1;
+    }
+
+    if (num_dct(buf, n) != ERR_NONE) { return ERR_COMPUTATION; }
+
+    var keep = num_coeffs;
+    if (keep < 1) { keep = 1; }
+    if (keep > n) { keep = n; }
+
+    var coeffs = vec_new();
+    var k = 0;
+    while (k < keep) {
+        vec_push(coeffs, load64(buf + k * 8));
+        k = k + 1;
+    }
+    return coeffs;
+}
+
+# ================================================================
+# additive_restore_amplitudes_dct -- inverse of compress; zero-pads `coeffs`
+# to the partial count, runs the inverse DCT, and writes the result back into
+# the partial bank (clamped to [0.0, 1.0] and re-Nyquist-filtered).
+#
+# Returns ERR_INVALID_PARAMETER if `coeffs` is empty or longer than the
+# partial count, ERR_COMPUTATION if the hisab IDCT fails, else ERR_NONE.
+# ================================================================
+fn additive_restore_amplitudes_dct(self, coeffs) {
+    var partials = AdditiveSynth_partials(self);
+    var n = vec_len(partials);
+    var clen = vec_len(coeffs);
+    if (clen == 0 || clen > n) { return ERR_INVALID_PARAMETER; }
+
+    var padded = alloc(n * 8);
+    var i = 0;
+    while (i < n) {
+        store64(padded + i * 8, 0);
+        i = i + 1;
+    }
+    var j = 0;
+    while (j < clen) {
+        store64(padded + j * 8, vec_get(coeffs, j));
+        j = j + 1;
+    }
+
+    if (num_idct(padded, n) != ERR_NONE) { return ERR_COMPUTATION; }
+
+    var nyquist = f64_mul(AdditiveSynth_sample_rate(self), F64_HALF);
+    var fundamental = AdditiveSynth_fundamental(self);
+    var k = 0;
+    while (k < n) {
+        var p = vec_get(partials, k);
+        var amp = load64(padded + k * 8);
+        if (f64_ge(f64_mul(fundamental, Partial_frequency_ratio(p)), nyquist) == 1) {
+            Partial_set_amplitude(p, 0);
+        } else {
+            Partial_set_amplitude(p, f64_clamp(amp, 0, F64_ONE));
+        }
+        k = k + 1;
+    }
+    return ERR_NONE;
+}

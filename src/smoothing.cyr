@@ -1,0 +1,106 @@
+# smoothing.cyr -- parameter smoothing for click-free transitions.
+#
+# Ports rust-old/src/smoothing.rs. f32 -> f64 throughout; the serde derive is
+# dropped (no serde in Cyrius). ParamSmoother is a one-pole exponential
+# smoother (EMA) whose coefficient is derived from a time constant and the
+# sample rate. Methods become free `smoothing_*` functions taking the struct
+# pointer. Non-integer float literals are named IEEE-754 hex constants.
+#
+# Requires (from the build/test unit): stdlib alloc + math/ganita
+# (F64_ONE, f64_max/add/sub/mul/div/neg/exp/abs/gt/lt) and error.cyr
+# (flush_denormal, naad_is_finite). The module file has no `include` lines.
+
+# is_settled tolerance: |current - target| < 1e-6.
+var SMOOTHING_SETTLE_EPS = 0x3EB0C6F7A0B5ED8D;   # 1e-6
+
+# ================================================================
+# ParamSmoother -- one-pole exponential parameter smoother.
+#   current      : current smoothed value
+#   target       : target value
+#   coeff        : smoothing coefficient in (0, 1], higher = faster
+#   sample_rate  : sample rate in Hz
+#   smooth_time  : smoothing time constant in seconds
+# ================================================================
+#derive(accessors)
+struct ParamSmoother { current; target; coeff; sample_rate; smooth_time; }
+
+# coeff = 1 - exp(-1 / (time * sample_rate)) when time > 0, else 1.0 (instant).
+#must_use
+fn _smoothing_coeff(time, sample_rate) {
+    if (f64_gt(time, 0) == 1) {
+        var expo = f64_exp(f64_div(f64_neg(F64_ONE), f64_mul(time, sample_rate)));
+        return f64_sub(F64_ONE, expo);
+    }
+    return F64_ONE;
+}
+
+# Create a smoother. `smooth_time` is the time constant in seconds (time to
+# reach ~63% of target); `initial_value` is the starting value.
+#must_use
+fn smoothing_new(smooth_time, sample_rate, initial_value) {
+    var time = f64_max(smooth_time, 0);
+    var self = alloc(sizeof(ParamSmoother));
+    ParamSmoother_set_current(self, initial_value);
+    ParamSmoother_set_target(self, initial_value);
+    ParamSmoother_set_coeff(self, _smoothing_coeff(time, sample_rate));
+    ParamSmoother_set_sample_rate(self, sample_rate);
+    ParamSmoother_set_smooth_time(self, time);
+    return self;
+}
+
+# Set a new target value. Non-finite values are ignored.
+fn smoothing_set_target(self, target) {
+    if (naad_is_finite(target) == 1) {
+        ParamSmoother_set_target(self, target);
+    }
+    return 0;
+}
+
+# Advance one sample and return the new smoothed value.
+#inline
+#must_use
+fn smoothing_next_value(self) {
+    var cur = ParamSmoother_current(self);
+    var delta = f64_sub(ParamSmoother_target(self), cur);
+    cur = f64_add(cur, f64_mul(ParamSmoother_coeff(self), delta));
+    cur = flush_denormal(cur);
+    ParamSmoother_set_current(self, cur);
+    return cur;
+}
+
+# 1 if the smoother has reached its target (within 1e-6), else 0.
+#inline
+#must_use
+fn smoothing_is_settled(self) {
+    var d = f64_abs(f64_sub(ParamSmoother_current(self), ParamSmoother_target(self)));
+    if (f64_lt(d, SMOOTHING_SETTLE_EPS) == 1) { return 1; }
+    return 0;
+}
+
+# Snap immediately to the target value (skip smoothing).
+fn smoothing_snap(self) {
+    ParamSmoother_set_current(self, ParamSmoother_target(self));
+    return 0;
+}
+
+# Set the smoothing time (seconds) and recalculate the coefficient.
+fn smoothing_set_smooth_time(self, time) {
+    var t = f64_max(time, 0);
+    ParamSmoother_set_smooth_time(self, t);
+    ParamSmoother_set_coeff(self, _smoothing_coeff(t, ParamSmoother_sample_rate(self)));
+    return 0;
+}
+
+# Current smoothed value without advancing.
+#inline
+#must_use
+fn smoothing_current(self) {
+    return ParamSmoother_current(self);
+}
+
+# Target value.
+#inline
+#must_use
+fn smoothing_target(self) {
+    return ParamSmoother_target(self);
+}

@@ -1,0 +1,161 @@
+# wavetable.tcyr -- parity tests for src/wavetable.cyr.
+# Ported from the non-serde #[test] blocks in rust-old/src/wavetable.rs
+# (test_serde_roundtrip dropped -- no serde). f32 tolerances widened to f64.
+# The three `synthesis`-gated next_sample_smooth tests ARE included (bottom):
+# that cubic B-spline morph wraps bspline_eval_1d, so this unit adds
+# lib/hisab.cyr + src/dsp_spectral.cyr ahead of wavetable.
+
+include "lib/hisab.cyr"
+include "src/error.cyr"
+include "src/dsp_util.cyr"
+include "src/dsp_spectral.cyr"
+include "src/wavetable.cyr"
+
+alloc_init();
+
+var C0_5   = 0x3FE0000000000000;   # 0.5
+var C0_4   = 0x3FD999999999999A;   # 0.4
+var C0_25  = 0x3FD0000000000000;   # 0.25
+var C0_125 = 0x3FC0000000000000;   # 0.125
+var C0_1   = 0x3FB999999999999A;   # 0.1
+var C0_01  = 0x3F847AE147AE147B;   # 0.01
+var C1E5   = 0x3EE4F8B588E368F1;   # 1e-5
+
+var SR   = 44100;
+var FREQ = 440;
+
+# ================================================================
+test_group("from_samples");
+var s0 = vec_new();
+vec_push(s0, 0); vec_push(s0, F64_ONE); vec_push(s0, 0); vec_push(s0, f64_neg(F64_ONE));
+var wt = wavetable_from_samples(s0);
+assert_eq(wavetable_len(wt), 4, "from_samples len == 4");
+
+# ================================================================
+test_group("from_samples empty");
+var empty = vec_new();
+assert(naad_is_err(wavetable_from_samples(empty)), "empty samples -> err");
+
+# ================================================================
+test_group("from_harmonics");
+var amps = vec_new();
+vec_push(amps, F64_ONE); vec_push(amps, C0_5); vec_push(amps, C0_25);
+var wh = wavetable_from_harmonics(3, amps, 1024);
+assert_eq(wavetable_len(wh), 1024, "from_harmonics len == 1024");
+# peak magnitude normalised to 1.0
+var hs = wavetable_samples(wh);
+var maxa = 0;
+var hi = 0;
+while (hi < 1024) {
+    var a = f64_abs(vec_get(hs, hi));
+    if (f64_gt(a, maxa) == 1) { maxa = a; }
+    hi = hi + 1;
+}
+assert(f64_lt(f64_abs(f64_sub(maxa, F64_ONE)), C0_01), "harmonics normalised to 1.0");
+
+# ================================================================
+test_group("interpolated read");
+var s1 = vec_new();
+vec_push(s1, 0); vec_push(s1, F64_ONE); vec_push(s1, 0); vec_push(s1, f64_neg(F64_ONE));
+var wt2 = wavetable_from_samples(s1);
+var rs = wavetable_read_interpolated(wt2, C0_125);   # between index 0 and 1
+assert(f64_gt(rs, 0), "interp read > 0");
+assert(f64_lt(rs, F64_ONE), "interp read < 1");
+
+# ================================================================
+test_group("wavetable oscillator");
+var oamps = vec_new();
+vec_push(oamps, F64_ONE);
+var owt = wavetable_from_harmonics(1, oamps, 256);
+var osc = wavetable_osc_new(owt, f64_from(FREQ), f64_from(SR));
+var buf = vec_new();
+var bi = 0;
+while (bi < 256) { vec_push(buf, 0); bi = bi + 1; }
+wavetable_osc_fill_buffer(osc, buf);
+var any = 0;
+bi = 0;
+while (bi < 256) {
+    if (vec_get(buf, bi) != 0) { any = 1; }
+    bi = bi + 1;
+}
+assert(any, "oscillator buffer has non-zero samples");
+
+# ================================================================
+test_group("morph wavetable");
+var m1amps = vec_new();
+vec_push(m1amps, F64_ONE);
+var mwt1 = wavetable_from_harmonics(1, m1amps, 256);
+var m2amps = vec_new();
+vec_push(m2amps, F64_ONE); vec_push(m2amps, C0_5);
+var mwt2 = wavetable_from_harmonics(2, m2amps, 256);
+var mtables = vec_new();
+vec_push(mtables, mwt1); vec_push(mtables, mwt2);
+var morph = wavetable_morph_new(mtables, f64_from(FREQ), f64_from(SR));
+wavetable_morph_set_morph(morph, C0_5);
+var ms = wavetable_morph_next_sample(morph);
+assert(naad_is_finite(ms), "morph next_sample finite");
+
+# ================================================================
+# MorphWavetable::next_sample_smooth (cubic B-spline morph) parity tests.
+# Helper mirrors the oracle's morph_with_n_tables: table h has h+1 harmonics
+# (each amp 1/(h+1)), size 256; morph at 440 Hz / 44100.
+fn _wt_morph_with_n(n) {
+    var tables = vec_new();
+    var h = 0;
+    while (h < n) {
+        var amps = vec_new();
+        var k = 0;
+        while (k < h + 1) {
+            vec_push(amps, f64_div(F64_ONE, f64_from(h + 1)));
+            k = k + 1;
+        }
+        vec_push(tables, wavetable_from_harmonics(h + 1, amps, 256));
+        h = h + 1;
+    }
+    return wavetable_morph_new(tables, f64_from(440), f64_from(44100));
+}
+
+test_group("morph smooth falls back with < 4 tables");
+var m1 = _wt_morph_with_n(2);
+var m2 = _wt_morph_with_n(2);
+wavetable_morph_set_morph(m1, C0_5);
+wavetable_morph_set_morph(m2, C0_5);
+var sm1 = wavetable_morph_next_sample(m1);
+var sm2 = wavetable_morph_next_sample_smooth(m2);
+assert(f64_lt(f64_abs(f64_sub(sm1, sm2)), C1E5), "2 tables: smooth == linear");
+
+test_group("morph smooth differs from linear with 4+ tables");
+var lin = _wt_morph_with_n(5);
+var smo = _wt_morph_with_n(5);
+wavetable_morph_set_morph(lin, C0_4);
+wavetable_morph_set_morph(smo, C0_4);
+var total = 0;
+var d = 0;
+while (d < 256) {
+    var lv = wavetable_morph_next_sample(lin);
+    var sv = wavetable_morph_next_sample_smooth(smo);
+    total = f64_add(total, f64_abs(f64_sub(lv, sv)));
+    d = d + 1;
+}
+assert(f64_gt(total, C0_1), "linear vs smooth diverge across a buffer");
+
+test_group("morph smooth finite at boundaries");
+var mb = _wt_morph_with_n(5);
+var allfin = 1;
+var pj = 0;
+while (pj < 3) {
+    var pos = 0;
+    if (pj == 1) { pos = C0_5; }
+    if (pj == 2) { pos = F64_ONE; }
+    wavetable_morph_set_morph(mb, pos);
+    var it = 0;
+    while (it < 32) {
+        if (naad_is_finite(wavetable_morph_next_sample_smooth(mb)) == 0) { allfin = 0; }
+        it = it + 1;
+    }
+    pj = pj + 1;
+}
+assert(allfin, "smooth samples finite at positions 0.0/0.5/1.0");
+
+var rc = assert_summary();
+syscall(60, rc);

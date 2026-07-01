@@ -1,0 +1,54 @@
+# panning.tcyr -- parity tests for src/panning.cyr.
+# Ported from the non-serde #[test] blocks in rust-old/src/panning.rs.
+# test_serde_roundtrip is dropped (no serde). f32::EPSILON -> NAAD_EPSILON.
+
+include "src/error.cyr"
+include "src/panning.cyr"
+
+alloc_init();
+
+var C0_01 = 0x3F847AE147AE147B;   # 0.01
+
+# ================================================================
+test_group("center equal power");
+var gc = panning_pan_gains(0, PAN_LAW_EQUAL_POWER);
+var gcl = PanGains_left(gc);
+var gcr = PanGains_right(gc);
+# At center, both channels should be equal (~0.707).
+assert(f64_lt(f64_abs(f64_sub(gcl, gcr)), C0_01), "center L ~ R");
+# Power should sum to ~1.0.
+var power = f64_add(f64_mul(gcl, gcl), f64_mul(gcr, gcr));
+assert(f64_lt(f64_abs(f64_sub(power, F64_ONE)), C0_01), "center power ~ 1");
+
+# ================================================================
+test_group("full left");
+var gl = panning_pan_gains(f64_neg(F64_ONE), PAN_LAW_EQUAL_POWER);
+assert(f64_lt(f64_abs(f64_sub(PanGains_left(gl), F64_ONE)), C0_01), "full-left L ~ 1");
+assert(f64_lt(f64_abs(PanGains_right(gl)), C0_01), "full-left R ~ 0");
+
+# ================================================================
+test_group("full right");
+var gr = panning_pan_gains(F64_ONE, PAN_LAW_EQUAL_POWER);
+assert(f64_lt(f64_abs(PanGains_left(gr)), C0_01), "full-right L ~ 0");
+assert(f64_lt(f64_abs(f64_sub(PanGains_right(gr), F64_ONE)), C0_01), "full-right R ~ 1");
+
+# ================================================================
+test_group("linear center");
+var glc = panning_pan_gains(0, PAN_LAW_LINEAR);
+assert(f64_lt(f64_abs(f64_sub(PanGains_left(glc), F64_HALF)), NAAD_EPSILON), "linear center L ~ 0.5");
+assert(f64_lt(f64_abs(f64_sub(PanGains_right(glc), F64_HALF)), NAAD_EPSILON), "linear center R ~ 0.5");
+
+# ================================================================
+test_group("pan mono");
+var pm = panning_pan_mono(F64_ONE, f64_neg(F64_ONE), PAN_LAW_EQUAL_POWER);
+assert(f64_lt(f64_abs(f64_sub(PanPair_left(pm), F64_ONE)), C0_01), "pan_mono L ~ 1");
+assert(f64_lt(f64_abs(PanPair_right(pm)), C0_01), "pan_mono R ~ 0");
+
+# ================================================================
+test_group("stereo balance");
+var sb = panning_stereo_balance(F64_ONE, F64_ONE, f64_neg(F64_ONE));
+assert(f64_lt(f64_abs(f64_sub(PanPair_left(sb), F64_ONE)), NAAD_EPSILON), "balance L ~ 1");
+assert(f64_lt(f64_abs(PanPair_right(sb)), NAAD_EPSILON), "balance R ~ 0");
+
+var rc = assert_summary();
+syscall(60, rc);

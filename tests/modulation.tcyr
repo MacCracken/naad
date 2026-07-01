@@ -1,0 +1,127 @@
+# modulation.tcyr -- parity tests for src/modulation.cyr (LFO, 2-op FM, ring
+# modulation). Ports every non-serde #[test] from rust-old/src/modulation.rs
+# one-for-one. The serde round-trip test is dropped (no serde). f32 bounds are
+# reused verbatim (bit-exactness isn't meaningful for these range checks).
+#
+# Deps included in dependency order (the modulation module only needs
+# Oscillator/Waveform from osc_core, but osc_core references UnisonOscillator,
+# so the whole oscillator cluster is included).
+
+include "src/error.cyr"
+include "src/dsp_util.cyr"
+include "src/noise.cyr"
+include "src/osc_core.cyr"
+include "src/osc_unison.cyr"
+include "src/osc_sub.cyr"
+include "src/osc_sync.cyr"
+include "src/modulation.cyr"
+
+alloc_init();
+
+var C0_01 = 0x3F847AE147AE147B;   # 0.01
+var C0_51 = 0x3FE051EB851EB852;   # 0.51
+var C1_01 = 0x3FF028F5C28F5C29;   # 1.01
+
+var i = 0;
+
+# ================================================================
+# lfo: basic -- first value is finite.
+# ================================================================
+test_group("lfo: basic");
+var lfo_b = modulation_lfo_new(MODULATION_LFO_SINE, f64_from(5), f64_from(44100));
+assert(naad_is_finite(modulation_lfo_next_value(lfo_b)), "lfo basic value finite");
+
+# ================================================================
+# lfo: depth -- with depth 0.5, |value| stays <= 0.51 over 10000 samples.
+# ================================================================
+test_group("lfo: depth");
+var lfo_d = modulation_lfo_new(MODULATION_LFO_SINE, f64_from(5), f64_from(44100));
+Lfo_set_depth(lfo_d, F64_HALF);
+var depth_ok = 1;
+i = 0;
+while (i < 10000) {
+    var dv = modulation_lfo_next_value(lfo_d);
+    if (f64_le(f64_abs(dv), C0_51) == 0) { depth_ok = 0; }
+    i = i + 1;
+}
+assert(depth_ok, "lfo depth 0.5 stays within bounds");
+
+# ================================================================
+# lfo: all shapes -- every shape stays within [-1.01, 1.01] over 1000 samples.
+# ================================================================
+test_group("lfo: all shapes");
+var shapes = vec_new();
+vec_push(shapes, MODULATION_LFO_SINE);
+vec_push(shapes, MODULATION_LFO_TRIANGLE);
+vec_push(shapes, MODULATION_LFO_SQUARE);
+vec_push(shapes, MODULATION_LFO_SAW_UP);
+vec_push(shapes, MODULATION_LFO_SAW_DOWN);
+vec_push(shapes, MODULATION_LFO_SAMPLE_AND_HOLD);
+var shapes_ok = 1;
+var si = 0;
+while (si < vec_len(shapes)) {
+    var lfo_s = modulation_lfo_new(vec_get(shapes, si), f64_from(5), f64_from(44100));
+    i = 0;
+    while (i < 1000) {
+        var sv = modulation_lfo_next_value(lfo_s);
+        if (f64_ge(sv, f64_neg(C1_01)) == 0) { shapes_ok = 0; }
+        if (f64_le(sv, C1_01) == 0) { shapes_ok = 0; }
+        i = i + 1;
+    }
+    si = si + 1;
+}
+assert(shapes_ok, "all lfo shapes stay in bipolar range");
+
+# ================================================================
+# lfo: unipolar -- values stay within [-0.01, 1.01] over 10000 samples.
+# ================================================================
+test_group("lfo: unipolar");
+var lfo_u = modulation_lfo_new(MODULATION_LFO_SINE, f64_from(5), f64_from(44100));
+modulation_lfo_set_mode(lfo_u, MODULATION_LFO_UNIPOLAR);
+var uni_ok = 1;
+i = 0;
+while (i < 10000) {
+    var uv = modulation_lfo_next_value(lfo_u);
+    if (f64_ge(uv, f64_neg(C0_01)) == 0) { uni_ok = 0; }
+    if (f64_le(uv, C1_01) == 0) { uni_ok = 0; }
+    i = i + 1;
+}
+assert(uni_ok, "unipolar lfo stays in 0..1");
+
+# ================================================================
+# fm: synthesis -- filled buffer is all finite with at least one nonzero.
+# ================================================================
+test_group("fm: synthesis");
+var fm = modulation_fm_new(f64_from(440), f64_from(220), F64_TWO, f64_from(44100));
+var fmbuf = vec_new();
+i = 0;
+while (i < 1024) { vec_push(fmbuf, 0); i = i + 1; }
+modulation_fm_fill_buffer(fm, fmbuf);
+var fm_finite = 1;
+var fm_any = 0;
+i = 0;
+while (i < 1024) {
+    var fv = vec_get(fmbuf, i);
+    if (naad_is_finite(fv) == 0) { fm_finite = 0; }
+    if (fv != 0) { fm_any = 1; }
+    i = i + 1;
+}
+assert(fm_finite, "fm buffer all finite");
+assert(fm_any, "fm buffer has a nonzero sample");
+
+# ================================================================
+# ring: modulator -- process_sample(1.0) is finite.
+# ================================================================
+test_group("ring: modulator");
+var ring = modulation_ring_new(WAVEFORM_SINE, f64_from(300), f64_from(44100));
+assert(naad_is_finite(modulation_ring_process_sample(ring, F64_ONE)), "ring output finite");
+
+# ================================================================
+# modulation source trait -- next_modulation_value is finite.
+# ================================================================
+test_group("modulation source trait");
+var lfo_t = modulation_lfo_new(MODULATION_LFO_SINE, f64_from(5), f64_from(44100));
+assert(naad_is_finite(modulation_lfo_next_modulation_value(lfo_t)), "trait value finite");
+
+var rc = assert_summary();
+syscall(60, rc);

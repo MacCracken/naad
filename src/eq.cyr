@@ -1,0 +1,278 @@
+# eq.cyr -- Parametric and graphic equalizers.
+#
+# Ports rust-old/src/eq.rs. f32 -> f64 throughout. Wraps BiquadFilter
+# (filter.cyr) into multi-band EQ configurations: an N-band ParametricEq,
+# a 10-band GraphicEq with ISO center frequencies, and a sidechain DeEsser.
+# The SmallVec<[EqBand; 16]> band storage becomes a stdlib vec of EqBand
+# pointers; `Vec<f32>` active frequencies become a vec of f64. serde derives
+# are dropped; constructors return the struct pointer on success or a negative
+# ERR_* on failure; band mutators return ERR_NONE / negative ERR_*. Methods
+# become free `eq_*` functions taking the struct pointer.
+#
+# Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE/TWO/
+# HALF), builtins (f64_abs/exp/from/sub/mul/div/neg/lt/gt), error.cyr
+# (naad_is_err/flush_denormal/ERR_*), dsp_util.cyr (amplitude_to_db/
+# db_to_amplitude) and filter.cyr (filter_biquad_* + FILTER_* constants).
+# No `include` lines.
+
+# ================================================================
+# Float literals not in the stdlib (IEEE-754 hex bit patterns).
+# ================================================================
+var EQ_C1_4    = 0x3ff6666666666666;   # 1.4    (~1 octave bandwidth Q)
+var EQ_C31_25  = 0x403f400000000000;   # 31.25  (graphic band 0)
+var EQ_C62_5   = 0x404f400000000000;   # 62.5   (graphic band 1)
+var EQ_C0_002  = 0x3f60624dd2f1a9fc;   # 0.002  (~2ms envelope smoothing)
+
+# ================================================================
+# EqBand -- one band of a ParametricEq.
+#   filter  : BiquadFilter pointer (type/freq/Q/gain set at add-band time)
+#   enabled : 1 if active, 0 if bypassed (state preserved, no filtering)
+# ================================================================
+#derive(accessors)
+struct EqBand { filter; enabled; }
+
+# ================================================================
+# ParametricEq -- N-band parametric equalizer.
+#   bands       : vec of EqBand pointers, processed in series
+#   sample_rate : Hz
+# ================================================================
+#derive(accessors)
+struct ParametricEq { bands; sample_rate; }
+
+# ================================================================
+# GraphicEq -- 10-band graphic equalizer (ISO center frequencies).
+#   eq                 : internal ParametricEq pointer
+#   active_frequencies : vec of f64 (fewer than 10 at low sample rates)
+# ================================================================
+#derive(accessors)
+struct GraphicEq { eq; active_frequencies; }
+
+# ================================================================
+# DeEsser -- reduces sibilance in the 4-8 kHz range via a bandpass sidechain.
+#   detector_filter : BiquadFilter pointer (sidechain bandpass)
+#   envelope        : envelope-follower state
+#   threshold_db    : dB threshold above which reduction applies
+#   max_reduction_db: maximum reduction in dB (negative)
+#   smooth_coeff    : envelope smoothing coefficient
+# ================================================================
+#derive(accessors)
+struct DeEsser { detector_filter; envelope; threshold_db; max_reduction_db; smooth_coeff; }
+
+# ================================================================
+# ParametricEq.
+# ================================================================
+
+# Create a new parametric EQ with no bands. Ports new(); infallible.
+#must_use
+fn eq_parametric_new(sample_rate) {
+    var self = alloc(sizeof(ParametricEq));
+    ParametricEq_set_bands(self, vec_new());
+    ParametricEq_set_sample_rate(self, sample_rate);
+    return self;
+}
+
+# Add a band to the EQ. Returns ERR_NONE on success, or a negative ERR_* if
+# the filter parameters are invalid. Ports add_band().
+fn eq_add_band(self, filter_type, frequency, q, gain_db) {
+    var sr = ParametricEq_sample_rate(self);
+    var filter = filter_biquad_with_gain(filter_type, sr, frequency, q, gain_db);
+    if (naad_is_err(filter) == 1) { return filter; }
+    var band = alloc(sizeof(EqBand));
+    EqBand_set_filter(band, filter);
+    EqBand_set_enabled(band, 1);
+    vec_push(ParametricEq_bands(self), band);
+    return ERR_NONE;
+}
+
+# Number of bands. Ports num_bands().
+#must_use
+fn eq_num_bands(self) {
+    return vec_len(ParametricEq_bands(self));
+}
+
+# Get the band pointer at `index` for parameter changes, or 0 (null) if out of
+# range. Ports band_mut() (Option<&mut EqBand> -> pointer / null sentinel).
+fn eq_band_mut(self, index) {
+    var bands = ParametricEq_bands(self);
+    if (index < 0) { return 0; }
+    if (index >= vec_len(bands)) { return 0; }
+    return vec_get(bands, index);
+}
+
+# Process a single sample through all enabled bands in series.
+# Ports process_sample().
+#inline
+#must_use
+fn eq_process_sample(self, input) {
+    var bands = ParametricEq_bands(self);
+    var n = vec_len(bands);
+    var out = input;
+    var i = 0;
+    while (i < n) {
+        var band = vec_get(bands, i);
+        if (EqBand_enabled(band) == 1) {
+            out = filter_biquad_process_sample(EqBand_filter(band), out);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+# Process a buffer (vec of f64) in place. Ports process_buffer().
+#inline
+fn eq_process_buffer(self, buffer) {
+    var n = vec_len(buffer);
+    var i = 0;
+    while (i < n) {
+        vec_set(buffer, i, eq_process_sample(self, vec_get(buffer, i)));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Reset all band filter states. Ports reset().
+fn eq_reset(self) {
+    var bands = ParametricEq_bands(self);
+    var n = vec_len(bands);
+    var i = 0;
+    while (i < n) {
+        filter_biquad_reset(EqBand_filter(vec_get(bands, i)));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# GraphicEq -- 10-band graphic equalizer with ISO center frequencies:
+# 31.25, 62.5, 125, 250, 500, 1k, 2k, 4k, 8k, 16k Hz. Bands above Nyquist
+# are excluded. Each band is a peak filter (Q = 1.4, ~1 octave).
+# ================================================================
+
+# Create a new 10-band graphic EQ with all bands at 0 dB. Returns the struct
+# pointer on success, or a negative ERR_* if a band's parameters are invalid.
+# Ports new().
+fn eq_graphic_new(sample_rate) {
+    var eq = eq_parametric_new(sample_rate);
+    var active = vec_new();
+
+    var freqs = vec_new();
+    vec_push(freqs, EQ_C31_25);
+    vec_push(freqs, EQ_C62_5);
+    vec_push(freqs, f64_from(125));
+    vec_push(freqs, f64_from(250));
+    vec_push(freqs, f64_from(500));
+    vec_push(freqs, f64_from(1000));
+    vec_push(freqs, f64_from(2000));
+    vec_push(freqs, f64_from(4000));
+    vec_push(freqs, f64_from(8000));
+    vec_push(freqs, f64_from(16000));
+
+    var nyquist = f64_mul(sample_rate, F64_HALF);
+    var i = 0;
+    while (i < 10) {
+        var freq = vec_get(freqs, i);
+        if (f64_lt(freq, nyquist) == 1) {
+            var e = eq_add_band(eq, FILTER_PEAK, freq, EQ_C1_4, 0);
+            if (naad_is_err(e) == 1) { return e; }
+            vec_push(active, freq);
+        }
+        i = i + 1;
+    }
+
+    var self = alloc(sizeof(GraphicEq));
+    GraphicEq_set_eq(self, eq);
+    GraphicEq_set_active_frequencies(self, active);
+    return self;
+}
+
+# Set the gain for a band (0..num_bands) in dB. Returns ERR_NONE on success,
+# or a negative ERR_* if `index` is out of range or the gain is invalid.
+# Ports set_band_gain().
+fn eq_graphic_set_band_gain(self, index, gain_db) {
+    var active = GraphicEq_active_frequencies(self);
+    if (index < 0) { return ERR_INVALID_PARAMETER; }
+    if (index >= vec_len(active)) { return ERR_INVALID_PARAMETER; }
+    var freq = vec_get(active, index);
+    var band = eq_band_mut(GraphicEq_eq(self), index);
+    if (band == 0) { return ERR_INVALID_PARAMETER; }
+    return filter_biquad_set_params(EqBand_filter(band), freq, EQ_C1_4, gain_db);
+}
+
+# Process a single sample. Ports process_sample().
+#inline
+#must_use
+fn eq_graphic_process_sample(self, input) {
+    return eq_process_sample(GraphicEq_eq(self), input);
+}
+
+# Process a buffer (vec of f64) in place. Ports process_buffer().
+#inline
+fn eq_graphic_process_buffer(self, buffer) {
+    return eq_process_buffer(GraphicEq_eq(self), buffer);
+}
+
+# Number of active bands. Ports num_bands().
+#must_use
+fn eq_graphic_num_bands(self) {
+    return eq_num_bands(GraphicEq_eq(self));
+}
+
+# ================================================================
+# DeEsser.
+# ================================================================
+
+# Create a new de-esser. `center_freq` is the sibilance detection center
+# (typically 6000-8000 Hz), `threshold_db` the reduction threshold. Returns the
+# struct pointer on success, or a negative ERR_* on invalid parameters.
+# Ports new().
+fn eq_deesser_new(center_freq, threshold_db, sample_rate) {
+    var detector_filter = filter_biquad_new(FILTER_BANDPASS, sample_rate, center_freq, F64_TWO);
+    if (naad_is_err(detector_filter) == 1) { return detector_filter; }
+    # smooth_coeff = 1.0 - (-1.0 / (0.002 * sample_rate)).exp()  -- ~2ms
+    var tau = f64_mul(EQ_C0_002, sample_rate);
+    var smooth_coeff = f64_sub(F64_ONE, f64_exp(f64_div(f64_neg(F64_ONE), tau)));
+
+    var self = alloc(sizeof(DeEsser));
+    DeEsser_set_detector_filter(self, detector_filter);
+    DeEsser_set_envelope(self, 0);
+    DeEsser_set_threshold_db(self, threshold_db);
+    DeEsser_set_max_reduction_db(self, f64_neg(f64_from(12)));
+    DeEsser_set_smooth_coeff(self, smooth_coeff);
+    return self;
+}
+
+# Process a single sample. Ports process_sample().
+#inline
+#must_use
+fn eq_deesser_process_sample(self, input) {
+    # Sidechain: bandpass the input to detect sibilance.
+    var detected = filter_biquad_process_sample(DeEsser_detector_filter(self), input);
+    var level = f64_abs(detected);
+
+    # Envelope follower.
+    var env = DeEsser_envelope(self);
+    env = f64_add(env, f64_mul(DeEsser_smooth_coeff(self), f64_sub(level, env)));
+    env = flush_denormal(env);
+    DeEsser_set_envelope(self, env);
+
+    var env_db = amplitude_to_db(env);
+    var threshold = DeEsser_threshold_db(self);
+    if (f64_gt(env_db, threshold) == 1) {
+        var overshoot = f64_sub(env_db, threshold);
+        var reduction_db = f64_max(f64_neg(overshoot), DeEsser_max_reduction_db(self));
+        return f64_mul(input, db_to_amplitude(reduction_db));
+    }
+    return input;
+}
+
+# Process a buffer (vec of f64) in place. Ports process_buffer().
+#inline
+fn eq_deesser_process_buffer(self, buffer) {
+    var n = vec_len(buffer);
+    var i = 0;
+    while (i < n) {
+        vec_set(buffer, i, eq_deesser_process_sample(self, vec_get(buffer, i)));
+        i = i + 1;
+    }
+    return 0;
+}

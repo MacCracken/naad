@@ -1,0 +1,443 @@
+# envelope.cyr -- ADSR, multi-stage, and Catmull-Rom envelope generators.
+#
+# Ports rust-old/src/envelope.rs. f32 -> f64 throughout. serde/Display derives
+# dropped. The `EnvelopeState` enum becomes integer `var` constants; validators
+# and `Result` constructors return the struct pointer on success or a negative
+# ERR_* code on failure (see error.cyr). Methods become free `envelope_*`
+# functions on the struct pointer. `Vec<EnvelopeSegment>` / `Vec<EnvelopePoint>`
+# -> stdlib `vec`s holding struct pointers.
+#
+# The Catmull-Rom envelope stays on the canonical hisab implementation: each
+# scalar control value is lifted into HVec3.x, run through calc_catmull_rom,
+# then HVec3_x taken back -- exactly as the Rust oracle lifts into Vec3::new.
+#
+# Requires (from the build/test unit): lib/hisab.cyr (hvec3_new / HVec3_x /
+# calc_catmull_rom), stdlib alloc/vec + math (F64_ONE, f64_min/clamp), and
+# error.cyr (validate_sample_rate, naad_is_err, ERR_*). No `include` lines.
+
+# ================================================================
+# EnvelopeState -> integer constants (was `enum EnvelopeState`).
+# ================================================================
+var ENV_STATE_IDLE    = 0;
+var ENV_STATE_ATTACK  = 1;
+var ENV_STATE_DECAY   = 2;
+var ENV_STATE_SUSTAIN = 3;
+var ENV_STATE_RELEASE = 4;
+
+# Default sample rate shared by the `new` constructors (44100 Hz).
+var ENV_DEFAULT_SAMPLE_RATE = 44100;
+
+# ================================================================
+# Adsr -- Attack/Decay/Sustain/Release generator with linear segments.
+#   attack_time,decay_time,release_time : seconds
+#   sustain_level                       : 0.0..1.0
+#   sample_rate                         : Hz
+#   state                               : ENV_STATE_* constant
+#   current_value                       : latest output (0.0..1.0)
+#   release_start_value                 : value captured at gate_off
+#   stage_samples                       : samples spent in the current stage
+# ================================================================
+#derive(accessors)
+struct Adsr {
+    attack_time;
+    decay_time;
+    sustain_level;
+    release_time;
+    sample_rate;
+    state;
+    current_value;
+    release_start_value;
+    stage_samples;
+}
+
+# Create an ADSR envelope at an explicit sample rate. Returns the struct
+# pointer on success, or a negative ERR_* on invalid parameters/sample rate.
+#must_use
+fn envelope_adsr_with_sample_rate(attack, decay, sustain, release, sample_rate) {
+    if (f64_lt(attack, 0) == 1) { return ERR_INVALID_PARAMETER; }
+    if (f64_lt(decay, 0) == 1) { return ERR_INVALID_PARAMETER; }
+    # Mirrors Rust `!(0.0..=1.0).contains(&sustain)`: error unless
+    # 0 <= sustain <= 1 (so NaN, which fails both bounds, is also rejected).
+    var sustain_in_range = 0;
+    if (f64_ge(sustain, 0) == 1) {
+        if (f64_le(sustain, F64_ONE) == 1) { sustain_in_range = 1; }
+    }
+    if (sustain_in_range == 0) { return ERR_INVALID_PARAMETER; }
+    if (f64_lt(release, 0) == 1) { return ERR_INVALID_PARAMETER; }
+    var e = validate_sample_rate(sample_rate);
+    if (naad_is_err(e) == 1) { return e; }
+
+    var self = alloc(sizeof(Adsr));
+    Adsr_set_attack_time(self, attack);
+    Adsr_set_decay_time(self, decay);
+    Adsr_set_sustain_level(self, sustain);
+    Adsr_set_release_time(self, release);
+    Adsr_set_sample_rate(self, sample_rate);
+    Adsr_set_state(self, ENV_STATE_IDLE);
+    Adsr_set_current_value(self, 0);
+    Adsr_set_release_start_value(self, 0);
+    Adsr_set_stage_samples(self, 0);
+    return self;
+}
+
+# Create an ADSR envelope at the default 44100 Hz sample rate.
+#must_use
+fn envelope_adsr_new(attack, decay, sustain, release) {
+    return envelope_adsr_with_sample_rate(attack, decay, sustain, release,
+    f64_from(ENV_DEFAULT_SAMPLE_RATE));
+}
+
+# Current envelope state (ENV_STATE_* constant).
+#inline
+#must_use
+fn envelope_adsr_state(self) {
+    return Adsr_state(self);
+}
+
+# Trigger the envelope (note on).
+fn envelope_adsr_gate_on(self) {
+    Adsr_set_state(self, ENV_STATE_ATTACK);
+    Adsr_set_stage_samples(self, 0);
+    return 0;
+}
+
+# Release the envelope (note off). No-op when idle.
+fn envelope_adsr_gate_off(self) {
+    if (Adsr_state(self) != ENV_STATE_IDLE) {
+        Adsr_set_release_start_value(self, Adsr_current_value(self));
+        Adsr_set_state(self, ENV_STATE_RELEASE);
+        Adsr_set_stage_samples(self, 0);
+    }
+    return 0;
+}
+
+# Generate the next envelope value (0.0..1.0).
+#inline
+#must_use
+fn envelope_adsr_next_value(self) {
+    var sr = Adsr_sample_rate(self);
+    var state = Adsr_state(self);
+    if (state == ENV_STATE_IDLE) {
+        Adsr_set_current_value(self, 0);
+    } elif (state == ENV_STATE_ATTACK) {
+        var attack_samples = f64_mul(Adsr_attack_time(self), sr);
+        if (f64_le(attack_samples, 0) == 1) {
+            Adsr_set_current_value(self, F64_ONE);
+            Adsr_set_state(self, ENV_STATE_DECAY);
+            Adsr_set_stage_samples(self, 0);
+        } else {
+            var cv = f64_div(Adsr_stage_samples(self), attack_samples);
+            Adsr_set_current_value(self, cv);
+            Adsr_set_stage_samples(self, f64_add(Adsr_stage_samples(self), F64_ONE));
+            if (f64_ge(cv, F64_ONE) == 1) {
+                Adsr_set_current_value(self, F64_ONE);
+                Adsr_set_state(self, ENV_STATE_DECAY);
+                Adsr_set_stage_samples(self, 0);
+            }
+        }
+    } elif (state == ENV_STATE_DECAY) {
+        var decay_samples = f64_mul(Adsr_decay_time(self), sr);
+        if (f64_le(decay_samples, 0) == 1) {
+            Adsr_set_current_value(self, Adsr_sustain_level(self));
+            Adsr_set_state(self, ENV_STATE_SUSTAIN);
+        } else {
+            var progress = f64_div(Adsr_stage_samples(self), decay_samples);
+            var cv = f64_add(F64_ONE, f64_mul(f64_sub(Adsr_sustain_level(self), F64_ONE), progress));
+            Adsr_set_current_value(self, cv);
+            Adsr_set_stage_samples(self, f64_add(Adsr_stage_samples(self), F64_ONE));
+            if (f64_le(cv, Adsr_sustain_level(self)) == 1) {
+                Adsr_set_current_value(self, Adsr_sustain_level(self));
+                Adsr_set_state(self, ENV_STATE_SUSTAIN);
+            }
+        }
+    } elif (state == ENV_STATE_SUSTAIN) {
+        Adsr_set_current_value(self, Adsr_sustain_level(self));
+    } elif (state == ENV_STATE_RELEASE) {
+        var release_samples = f64_mul(Adsr_release_time(self), sr);
+        if (f64_le(release_samples, 0) == 1) {
+            Adsr_set_current_value(self, 0);
+            Adsr_set_state(self, ENV_STATE_IDLE);
+        } else {
+            var progress = f64_div(Adsr_stage_samples(self), release_samples);
+            var cv = f64_mul(Adsr_release_start_value(self), f64_sub(F64_ONE, progress));
+            Adsr_set_current_value(self, cv);
+            Adsr_set_stage_samples(self, f64_add(Adsr_stage_samples(self), F64_ONE));
+            if (f64_le(cv, 0) == 1) {
+                Adsr_set_current_value(self, 0);
+                Adsr_set_state(self, ENV_STATE_IDLE);
+            }
+        }
+    }
+    return Adsr_current_value(self);
+}
+
+# Whether the envelope is active (not idle). Returns 1/0.
+#must_use
+fn envelope_adsr_is_active(self) {
+    if (Adsr_state(self) != ENV_STATE_IDLE) { return 1; }
+    return 0;
+}
+
+# ================================================================
+# EnvelopeSegment -- one target/duration segment of a multi-stage envelope.
+#   target   : target level (0.0..1.0)
+#   duration : seconds
+# ================================================================
+#derive(accessors)
+struct EnvelopeSegment {
+    target;
+    duration;
+}
+
+# Create an envelope segment.
+#must_use
+fn envelope_segment_new(target, duration) {
+    var s = alloc(sizeof(EnvelopeSegment));
+    EnvelopeSegment_set_target(s, target);
+    EnvelopeSegment_set_duration(s, duration);
+    return s;
+}
+
+# ================================================================
+# MultiStageEnvelope -- arbitrary linear segments.
+#   segments            : vec of EnvelopeSegment pointers
+#   sample_rate         : Hz
+#   current_segment     : index of the active segment
+#   current_value       : latest output
+#   segment_start_value : value at the start of the current segment
+#   stage_samples       : samples spent in the current segment
+#   active              : 1 = running, 0 = stopped
+# ================================================================
+#derive(accessors)
+struct MultiStageEnvelope {
+    segments;
+    sample_rate;
+    current_segment;
+    current_value;
+    segment_start_value;
+    stage_samples;
+    active;
+}
+
+# Create a multi-stage envelope at an explicit sample rate. Returns the struct
+# pointer on success, or a negative ERR_* on empty segments / invalid rate.
+#must_use
+fn envelope_multistage_with_sample_rate(segments, sample_rate) {
+    if (vec_len(segments) == 0) { return ERR_INVALID_PARAMETER; }
+    var e = validate_sample_rate(sample_rate);
+    if (naad_is_err(e) == 1) { return e; }
+
+    var self = alloc(sizeof(MultiStageEnvelope));
+    MultiStageEnvelope_set_segments(self, segments);
+    MultiStageEnvelope_set_sample_rate(self, sample_rate);
+    MultiStageEnvelope_set_current_segment(self, 0);
+    MultiStageEnvelope_set_current_value(self, 0);
+    MultiStageEnvelope_set_segment_start_value(self, 0);
+    MultiStageEnvelope_set_stage_samples(self, 0);
+    MultiStageEnvelope_set_active(self, 0);
+    return self;
+}
+
+# Create a multi-stage envelope at the default 44100 Hz sample rate.
+#must_use
+fn envelope_multistage_new(segments) {
+    return envelope_multistage_with_sample_rate(segments, f64_from(ENV_DEFAULT_SAMPLE_RATE));
+}
+
+# Start the envelope from the first segment.
+fn envelope_multistage_trigger(self) {
+    MultiStageEnvelope_set_current_segment(self, 0);
+    MultiStageEnvelope_set_current_value(self, 0);
+    MultiStageEnvelope_set_segment_start_value(self, 0);
+    MultiStageEnvelope_set_stage_samples(self, 0);
+    MultiStageEnvelope_set_active(self, 1);
+    return 0;
+}
+
+# Generate the next envelope value.
+#inline
+#must_use
+fn envelope_multistage_next_value(self) {
+    if (MultiStageEnvelope_active(self) == 0) { return 0; }
+    var segments = MultiStageEnvelope_segments(self);
+    var cur = MultiStageEnvelope_current_segment(self);
+    if (cur >= vec_len(segments)) {
+        MultiStageEnvelope_set_active(self, 0);
+        return 0;
+    }
+    var seg = vec_get(segments, cur);
+    var seg_samples = f64_mul(EnvelopeSegment_duration(seg), MultiStageEnvelope_sample_rate(self));
+    if (f64_le(seg_samples, 0) == 1) {
+        MultiStageEnvelope_set_current_value(self, EnvelopeSegment_target(seg));
+        MultiStageEnvelope_set_segment_start_value(self, MultiStageEnvelope_current_value(self));
+        MultiStageEnvelope_set_current_segment(self, cur + 1);
+        MultiStageEnvelope_set_stage_samples(self, 0);
+    } else {
+        var stage = MultiStageEnvelope_stage_samples(self);
+        var progress = f64_min(f64_div(stage, seg_samples), F64_ONE);
+        var ssv = MultiStageEnvelope_segment_start_value(self);
+        var cv = f64_add(ssv, f64_mul(f64_sub(EnvelopeSegment_target(seg), ssv), progress));
+        MultiStageEnvelope_set_current_value(self, cv);
+        var newstage = f64_add(stage, F64_ONE);
+        MultiStageEnvelope_set_stage_samples(self, newstage);
+        if (f64_ge(newstage, seg_samples) == 1) {
+            MultiStageEnvelope_set_current_value(self, EnvelopeSegment_target(seg));
+            MultiStageEnvelope_set_segment_start_value(self, MultiStageEnvelope_current_value(self));
+            MultiStageEnvelope_set_current_segment(self, cur + 1);
+            MultiStageEnvelope_set_stage_samples(self, 0);
+        }
+    }
+    return MultiStageEnvelope_current_value(self);
+}
+
+# Whether the multi-stage envelope is active. Returns 1/0.
+#must_use
+fn envelope_multistage_is_active(self) {
+    return MultiStageEnvelope_active(self);
+}
+
+# ================================================================
+# EnvelopePoint -- one time/value control point of a Catmull-Rom envelope.
+#   time  : seconds from trigger
+#   value : target value at this time
+# ================================================================
+#derive(accessors)
+struct EnvelopePoint {
+    time;
+    value;
+}
+
+# Create an envelope control point.
+#must_use
+fn envelope_point_new(time, value) {
+    var p = alloc(sizeof(EnvelopePoint));
+    EnvelopePoint_set_time(p, time);
+    EnvelopePoint_set_value(p, value);
+    return p;
+}
+
+# ================================================================
+# CatmullRomEnvelope -- smooth C1-continuous curve through control points.
+#   points          : vec of EnvelopePoint pointers, ordered by time
+#   sample_rate     : Hz
+#   elapsed_samples : samples since trigger
+#   active          : 1 = producing values, 0 = stopped
+# ================================================================
+#derive(accessors)
+struct CatmullRomEnvelope {
+    points;
+    sample_rate;
+    elapsed_samples;
+    active;
+}
+
+# Build a Catmull-Rom envelope from control points (>= 2, strictly increasing
+# times). Returns the struct pointer on success, or a negative ERR_* on
+# invalid points / non-monotone times / invalid sample rate.
+#must_use
+fn envelope_catmull_rom_new(points, sample_rate) {
+    if (vec_len(points) < 2) { return ERR_INVALID_PARAMETER; }
+    var w = 0;
+    while (w < vec_len(points) - 1) {
+        var a = vec_get(points, w);
+        var b = vec_get(points, w + 1);
+        if (f64_le(EnvelopePoint_time(b), EnvelopePoint_time(a)) == 1) {
+            return ERR_INVALID_PARAMETER;
+        }
+        w = w + 1;
+    }
+    var e = validate_sample_rate(sample_rate);
+    if (naad_is_err(e) == 1) { return e; }
+
+    var self = alloc(sizeof(CatmullRomEnvelope));
+    CatmullRomEnvelope_set_points(self, points);
+    CatmullRomEnvelope_set_sample_rate(self, sample_rate);
+    CatmullRomEnvelope_set_elapsed_samples(self, 0);
+    CatmullRomEnvelope_set_active(self, 0);
+    return self;
+}
+
+# Start the envelope from t = 0.
+fn envelope_catmull_rom_trigger(self) {
+    CatmullRomEnvelope_set_elapsed_samples(self, 0);
+    CatmullRomEnvelope_set_active(self, 1);
+    return 0;
+}
+
+# Stop and reset the envelope (next value returns 0).
+fn envelope_catmull_rom_release(self) {
+    CatmullRomEnvelope_set_active(self, 0);
+    return 0;
+}
+
+# Generate the next envelope sample (spline value at the current elapsed time).
+#inline
+#must_use
+fn envelope_catmull_rom_next_value(self) {
+    if (CatmullRomEnvelope_active(self) == 0) { return 0; }
+
+    var t = f64_div(CatmullRomEnvelope_elapsed_samples(self), CatmullRomEnvelope_sample_rate(self));
+    CatmullRomEnvelope_set_elapsed_samples(self,
+    f64_add(CatmullRomEnvelope_elapsed_samples(self), F64_ONE));
+
+    var points = CatmullRomEnvelope_points(self);
+    var n = vec_len(points);
+    var last = vec_get(points, n - 1);
+    var last_time = EnvelopePoint_time(last);
+
+    if (f64_ge(t, last_time) == 1) {
+        CatmullRomEnvelope_set_active(self, 0);
+        return EnvelopePoint_value(last);
+    }
+    var first = vec_get(points, 0);
+    if (f64_le(t, EnvelopePoint_time(first)) == 1) {
+        return EnvelopePoint_value(first);
+    }
+
+    # Locate the segment [i, i+1] containing t (first k with t < points[k+1].time).
+    var i = 0;
+    var found = 0;
+    var k = 0;
+    while (k < n - 1) {
+        if (found == 0) {
+            var nxt = vec_get(points, k + 1);
+            if (f64_lt(t, EnvelopePoint_time(nxt)) == 1) {
+                i = k;
+                found = 1;
+            }
+        }
+        k = k + 1;
+    }
+
+    var p1 = vec_get(points, i);
+    var p2 = vec_get(points, i + 1);
+    # Phantom endpoints clamp the curve at the boundaries.
+    var p0 = p1;
+    if (i != 0) { p0 = vec_get(points, i - 1); }
+    var p3 = p2;
+    if (i + 2 < n) { p3 = vec_get(points, i + 2); }
+
+    var t1 = EnvelopePoint_time(p1);
+    var t2 = EnvelopePoint_time(p2);
+    var u = f64_clamp(f64_div(f64_sub(t, t1), f64_sub(t2, t1)), 0, F64_ONE);
+
+    # Lift each scalar value into HVec3.x, run hisab's catmull_rom, take .x back.
+    var v0 = hvec3_new(EnvelopePoint_value(p0), 0, 0);
+    var v1 = hvec3_new(EnvelopePoint_value(p1), 0, 0);
+    var v2 = hvec3_new(EnvelopePoint_value(p2), 0, 0);
+    var v3 = hvec3_new(EnvelopePoint_value(p3), 0, 0);
+    var lifted = calc_catmull_rom(v0, v1, v2, v3, u);
+    return HVec3_x(lifted);
+}
+
+# Whether the envelope is currently producing values. Returns 1/0.
+#must_use
+fn envelope_catmull_rom_is_active(self) {
+    return CatmullRomEnvelope_active(self);
+}
+
+# Number of control points.
+#must_use
+fn envelope_catmull_rom_num_points(self) {
+    return vec_len(CatmullRomEnvelope_points(self));
+}

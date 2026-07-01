@@ -1,0 +1,149 @@
+# acoustics_fdn.tcyr -- parity tests for src/acoustics_fdn.cyr.
+# Ports the non-serde #[test] blocks from rust-old/src/acoustics/fdn_reverb.rs
+# (test_serde_roundtrip and test_matrix_fdn_serde_roundtrip dropped -- no
+# serde). f32 tolerances widened to f64.
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "src/error.cyr"
+include "src/dsp_util.cyr"
+include "src/acoustics_fdn.cyr"
+
+alloc_init();
+
+var C0_001 = 0x3f50624dd2f1a9fc;   # 0.001
+var C0_7   = 0x3fe6666666666666;   # 0.7
+var C1E_5  = 0x3ee4f8b588e368f1;   # 1e-5
+
+# ================================================================
+test_group("fdn produces reverb tail");
+var fdn = naad_fdn_reverb_new(f64_from(10), f64_from(8), f64_from(3), F64_ONE, 48000, F64_ONE);
+var out = naad_fdn_reverb_process_sample(fdn, F64_ONE);
+var has_tail = 0;
+var i = 0;
+while (i < 10000) {
+    out = naad_fdn_reverb_process_sample(fdn, 0);
+    if (f64_gt(f64_abs(out), C0_001) == 1) { has_tail = 1; }
+    i = i + 1;
+}
+assert(has_tail, "FDN should produce a reverb tail");
+
+# ================================================================
+test_group("fdn output finite");
+var fdn2 = naad_fdn_reverb_new(f64_from(10), f64_from(8), f64_from(3), F64_HALF, 48000, F64_ONE);
+out = naad_fdn_reverb_process_sample(fdn2, F64_ONE);
+var finite_ok = 1;
+i = 0;
+while (i < 5000) {
+    out = naad_fdn_reverb_process_sample(fdn2, 0);
+    if (naad_is_finite(out) == 0) { finite_ok = 0; }
+    if (f64_ge(f64_abs(out), f64_from(100)) == 1) { finite_ok = 0; }
+    i = i + 1;
+}
+assert(finite_ok, "output should be finite and bounded");
+
+# ================================================================
+test_group("fdn invalid params");
+assert(naad_is_err(naad_fdn_reverb_new(0, f64_from(8), f64_from(3), F64_ONE, 48000, F64_ONE)),
+"zero length -> err");
+assert(naad_is_err(naad_fdn_reverb_new(f64_from(10), f64_from(8), f64_from(3), f64_neg(F64_ONE), 48000, F64_ONE)),
+"negative rt60 -> err");
+assert(naad_is_err(naad_fdn_reverb_new(f64_from(10), f64_from(8), f64_from(3), F64_ONE, 0, F64_ONE)),
+"zero sample rate -> err");
+
+# ================================================================
+test_group("hadamard8 orthogonality");
+# hadamard8(hadamard8(x)) should equal 8 * x.
+var xv = vec_new();
+vec_push(xv, F64_ONE);
+vec_push(xv, F64_TWO);
+vec_push(xv, f64_from(3));
+vec_push(xv, f64_from(4));
+vec_push(xv, f64_neg(f64_from(5)));
+vec_push(xv, f64_neg(f64_from(6)));
+vec_push(xv, f64_from(7));
+vec_push(xv, f64_from(8));
+var hv = naad_fdn_hadamard8(xv);
+var hhv = naad_fdn_hadamard8(hv);
+var ortho_ok = 1;
+i = 0;
+while (i < 8) {
+    var expected = f64_mul(f64_from(8), vec_get(xv, i));
+    if (f64_ge(f64_abs(f64_sub(vec_get(hhv, i), expected)), C0_001) == 1) { ortho_ok = 0; }
+    i = i + 1;
+}
+assert(ortho_ok, "hadamard8 round-trip should equal 8*x");
+
+# ================================================================
+test_group("matrix fdn produces reverb tail");
+var mf = naad_fdn_matrix_new(F64_ONE, 48000, F64_ONE);
+out = naad_fdn_matrix_process_sample(mf, F64_ONE);
+var mtail = 0;
+i = 0;
+while (i < 10000) {
+    out = naad_fdn_matrix_process_sample(mf, 0);
+    if (f64_gt(f64_abs(out), C0_001) == 1) { mtail = 1; }
+    i = i + 1;
+}
+assert(mtail, "MatrixFdn should produce a reverb tail");
+
+# ================================================================
+test_group("matrix fdn decays");
+# Early energy window should exceed a much later window (60 dB per RT60).
+var md = naad_fdn_matrix_new(F64_HALF, 48000, F64_ONE);
+out = naad_fdn_matrix_process_sample(md, F64_ONE);
+# Run the impulse out for ~80 ms (0.08 * 48000 = 3840 samples).
+var k = 0;
+while (k < 3840) { out = naad_fdn_matrix_process_sample(md, 0); k = k + 1; }
+# Measure energy in a 50 ms window (2400 samples) at t~80 ms.
+var early = 0;
+k = 0;
+while (k < 2400) {
+    out = naad_fdn_matrix_process_sample(md, 0);
+    early = f64_add(early, f64_mul(out, out));
+    k = k + 1;
+}
+# Skip ~400 ms (19200 samples) into the tail.
+k = 0;
+while (k < 19200) { out = naad_fdn_matrix_process_sample(md, 0); k = k + 1; }
+# Measure a 50 ms window (2400 samples) deep in the tail.
+var late = 0;
+k = 0;
+while (k < 2400) {
+    out = naad_fdn_matrix_process_sample(md, 0);
+    late = f64_add(late, f64_mul(out, out));
+    k = k + 1;
+}
+assert(f64_gt(early, f64_mul(late, f64_from(5))), "energy should decay across ~RT60");
+
+# ================================================================
+test_group("matrix fdn finite under white noise");
+var mn = naad_fdn_matrix_new(F64_TWO, 48000, F64_HALF);
+var st = alloc(8);
+store64(st, 12345);
+var noise_ok = 1;
+i = 0;
+while (i < 20000) {
+    var n = xorshift32_signed_f32(st);
+    out = naad_fdn_matrix_process_sample(mn, n);
+    if (naad_is_finite(out) == 0) { noise_ok = 0; }
+    if (f64_ge(f64_abs(out), f64_from(100)) == 1) { noise_ok = 0; }
+    i = i + 1;
+}
+assert(noise_ok, "MatrixFdn should stay finite and bounded under noise");
+
+# ================================================================
+test_group("matrix fdn invalid params");
+assert(naad_is_err(naad_fdn_matrix_new(0, 48000, F64_ONE)), "zero rt60 -> err");
+assert(naad_is_err(naad_fdn_matrix_new(f64_neg(F64_ONE), 48000, F64_ONE)), "negative rt60 -> err");
+assert(naad_is_err(naad_fdn_matrix_new(F64_ONE, 0, F64_ONE)), "zero sample rate -> err");
+
+# ================================================================
+test_group("matrix fdn dry passthrough");
+# mix=0 -> output == input.
+var mp = naad_fdn_matrix_new(F64_ONE, 48000, 0);
+out = naad_fdn_matrix_process_sample(mp, C0_7);
+assert(f64_lt(f64_abs(f64_sub(out, C0_7)), C1E_5), "mix=0 passes input through");
+
+var rc = assert_summary();
+syscall(60, rc);

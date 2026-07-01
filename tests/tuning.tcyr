@@ -1,0 +1,85 @@
+# tuning.tcyr -- parity tests for src/tuning.cyr.
+# Ported one-for-one from the #[test] blocks in rust-old/src/tuning.rs
+# (the serde round-trip test is dropped: no serde in Cyrius). f32 -> f64;
+# tolerances match the Rust oracle's own absolute thresholds.
+
+include "src/error.cyr"
+include "src/tuning.cyr"
+
+alloc_init();
+
+var TOL_0_01 = 0x3f847ae147ae147b;   # 0.01
+var TOL_0_1  = 0x3fb999999999999a;   # 0.1
+var C261_63  = 0x40705a147ae147ae;   # 261.63
+
+# ================================================================
+test_group("midi <-> freq");
+# A4 = midi note 69 = 440 Hz.
+var a4 = tuning_midi_to_freq(69);
+assert(f64_lt(f64_abs(f64_sub(a4, f64_from(440))), TOL_0_01), "A4 = 440 Hz");
+# C4 = midi note 60 ~ 261.63 Hz.
+var c4 = tuning_midi_to_freq(60);
+assert(f64_lt(f64_abs(f64_sub(c4, C261_63)), TOL_0_1), "C4 ~ 261.63 Hz");
+# Octave: midi(81) / midi(69) == 2.0.
+var a4o = tuning_midi_to_freq(69);
+var a5 = tuning_midi_to_freq(81);
+assert(f64_lt(f64_abs(f64_sub(f64_div(a5, a4o), F64_TWO)), TOL_0_01), "octave = 2:1 ratio");
+
+# ================================================================
+test_group("freq_to_midi roundtrip");
+# For every MIDI note 21..=108, freq_to_midi(midi_to_freq(note)) == note.
+var rt_ok = 1;
+var note = 21;
+while (note <= 108) {
+    var freq = tuning_midi_to_freq(note);
+    var back = tuning_freq_to_midi(freq);
+    if (back != note) { rt_ok = 0; }
+    note = note + 1;
+}
+assert(rt_ok, "freq_to_midi roundtrip 21..=108");
+
+# ================================================================
+test_group("cents");
+# Octave (440 -> 880) is 1200 cents.
+var oc = tuning_cents(f64_from(440), f64_from(880));
+assert(f64_lt(f64_abs(f64_sub(oc, f64_from(1200))), TOL_0_1), "octave = 1200 cents");
+# One semitone (A4 -> Bb4) is 100 cents.
+var sa4 = tuning_midi_to_freq(69);
+var bb4 = tuning_midi_to_freq(70);
+var sc = tuning_cents(sa4, bb4);
+assert(f64_lt(f64_abs(f64_sub(sc, f64_from(100))), TOL_0_1), "semitone = 100 cents");
+
+# ================================================================
+test_group("note_name");
+assert_streq(tuning_note_name(69), "A4", "note_name(69) = A4");
+assert_streq(tuning_note_name(60), "C4", "note_name(60) = C4");
+assert_streq(tuning_note_name(72), "C5", "note_name(72) = C5");
+
+# ================================================================
+test_group("tuning tables");
+# Just intonation: A4 (note 69) resolves to 440 Hz.
+var jt = tuning_table_from_system(TUNING_JUST_INTONATION, f64_from(440));
+var jt_a4 = tuning_note_to_freq(jt, 69);
+assert(f64_lt(f64_abs(f64_sub(jt_a4, f64_from(440))), TOL_0_1), "just intonation A4 = 440");
+# Pythagorean: A4 resolves to 440 Hz.
+var pt = tuning_table_from_system(TUNING_PYTHAGOREAN, f64_from(440));
+var pt_a4 = tuning_note_to_freq(pt, 69);
+assert(f64_lt(f64_abs(f64_sub(pt_a4, f64_from(440))), TOL_0_1), "pythagorean A4 = 440");
+# Equal-temperament table C4 matches midi_to_freq C4 within 1 Hz.
+var et = tuning_table_from_system(TUNING_EQUAL_TEMPERAMENT, f64_from(440));
+var et_c4 = tuning_note_to_freq(et, 60);
+var midi_c4 = tuning_midi_to_freq(60);
+assert(f64_lt(f64_abs(f64_sub(et_c4, midi_c4)), F64_ONE), "ET table C4 matches midi_to_freq C4");
+
+# ================================================================
+test_group("custom tuning validation");
+# A ratio <= 0 must be rejected.
+var bad = vec_new();
+var bi = 0;
+while (bi < 12) { vec_push(bad, F64_ONE); bi = bi + 1; }
+vec_set(bad, 3, f64_neg(F64_ONE));
+var res = tuning_table_custom("bad", bad, f64_from(440));
+assert(naad_is_err(res) == 1, "custom rejects negative ratio");
+
+var rc = assert_summary();
+syscall(60, rc);

@@ -1,0 +1,72 @@
+# formant.tcyr -- parity tests for src/formant.cyr.
+# Ported from the non-serde #[test] blocks in rust-old/src/synth/formant.rs
+# (test_serde_roundtrip dropped -- no serde). f32 tolerances widened to f64.
+
+include "src/error.cyr"
+include "src/dsp_util.cyr"
+include "src/filter.cyr"
+include "src/formant.cyr"
+
+alloc_init();
+
+var C0_01 = 0x3f847ae147ae147b;   # 0.01
+var C0_5  = 0x3fe0000000000000;   # 0.5
+
+var SR = 44100;
+
+# ================================================================
+test_group("different vowels produce different output");
+var synth_a = formant_synth_new(VOWEL_A, f64_from(SR));
+var synth_i = formant_synth_new(VOWEL_I, f64_from(SR));
+var diff = 0;
+var n = 0;
+while (n < 512) {
+    var input = 0;
+    if ((n % 100) == 0) { input = F64_ONE; }
+    var oa = formant_synth_process_sample(synth_a, input);
+    var oi = formant_synth_process_sample(synth_i, input);
+    diff = f64_add(diff, f64_abs(f64_sub(oa, oi)));
+    n = n + 1;
+}
+assert(f64_gt(diff, C0_01), "different vowels should produce different spectra");
+
+# ================================================================
+test_group("morph");
+var synth_m = formant_synth_new(VOWEL_A, f64_from(SR));
+assert_eq(formant_synth_morph(synth_m, VOWEL_A, VOWEL_O, C0_5), ERR_NONE, "morph A->O ok");
+var out_m = formant_synth_process_sample(synth_m, F64_ONE);
+assert(naad_is_finite(out_m), "morph output finite");
+
+# ================================================================
+test_group("formant filter standalone");
+var params_e = formant_vowel_formants(VOWEL_E);
+var ff = formant_filter_new(params_e, f64_from(SR));
+var out_ff = formant_filter_process_sample(ff, F64_ONE);
+assert(naad_is_finite(out_ff), "formant filter output finite");
+
+# ================================================================
+test_group("vowel formants are valid");
+var vowels = vec_new();
+vec_push(vowels, VOWEL_A);
+vec_push(vowels, VOWEL_E);
+vec_push(vowels, VOWEL_I);
+vec_push(vowels, VOWEL_O);
+vec_push(vowels, VOWEL_U);
+var all_valid = 1;
+var vi = 0;
+while (vi < vec_len(vowels)) {
+    var params = formant_vowel_formants(vec_get(vowels, vi));
+    var bi = 0;
+    while (bi < FORMANT_NUM) {
+        var band = vec_get(params, bi);
+        if (f64_gt(FormantBand_freq(band), 0) == 0) { all_valid = 0; }
+        if (f64_gt(FormantBand_bw(band), 0) == 0) { all_valid = 0; }
+        if (f64_gt(FormantBand_amp(band), 0) == 0) { all_valid = 0; }
+        bi = bi + 1;
+    }
+    vi = vi + 1;
+}
+assert(all_valid, "all vowel formants have positive freq/bw/amp");
+
+var rc = assert_summary();
+syscall(60, rc);

@@ -1,0 +1,460 @@
+# wavetable.cyr -- Wavetable synthesis with morphing support.
+#
+# Ports rust-old/src/wavetable.rs. f32 -> f64 throughout. A `Wavetable`
+# holds one cycle of a waveform in a stdlib `vec` of f64 samples. The
+# `WavetableOscillator` phase-accumulates and reads with linear
+# interpolation; `MorphWavetable` linearly blends between a `vec` of
+# equal-length wavetables. serde derives/tests are dropped; constructors
+# return the struct pointer on success or a negative ERR_* on failure;
+# methods become free `wavetable_*` functions taking the struct pointer.
+#
+# MorphWavetable::next_sample_smooth is the cubic B-spline morph; it wraps
+# bspline_eval_1d (in dsp_spectral.cyr, hisab-backed), so ITS test unit adds
+# lib/hisab.cyr + src/dsp_spectral.cyr ahead of this module. Every other
+# wavetable method is hisab-free (only this one references dsp_spectral).
+#
+# Requires (from the build/test unit): stdlib alloc/vec + math/ganita
+# (F64_ONE/TWO/HALF/TAU, f64_clamp, f64_sin/floor) and error.cyr
+# (validate_frequency/validate_sample_rate, naad_is_err/naad_is_finite,
+# ERR_*). The module file itself has no `include` lines.
+
+# ================================================================
+# Wavetable -- one cycle of a waveform.
+#   samples : vec<f64> waveform samples (one cycle)
+# ================================================================
+#derive(accessors)
+struct Wavetable {
+    samples;
+}
+
+# ================================================================
+# wavetable_from_samples -- build a wavetable from a vec of raw samples.
+# Returns the struct pointer, or ERR_INVALID_PARAMETER if `samples` is
+# empty. Ports Wavetable::from_samples.
+# ================================================================
+#must_use
+fn wavetable_from_samples(samples) {
+    if (vec_len(samples) == 0) {
+        return ERR_INVALID_PARAMETER;
+    }
+    var self = alloc(sizeof(Wavetable));
+    Wavetable_set_samples(self, samples);
+    return self;
+}
+
+# ================================================================
+# wavetable_from_harmonics -- build a `size`-sample wavetable by summing
+# sine waves at integer multiples of the fundamental, weighted by
+# `amplitudes` (a vec of f64). Only the first min(num_harmonics,
+# amplitudes.len) harmonics are generated. The result is normalised so its
+# peak magnitude is 1.0. Returns the pointer, or ERR_INVALID_PARAMETER if
+# num_harmonics == 0, amplitudes is empty, or size == 0.
+# Ports Wavetable::from_harmonics.
+# ================================================================
+#must_use
+fn wavetable_from_harmonics(num_harmonics, amplitudes, size) {
+    if (num_harmonics == 0) {
+        return ERR_INVALID_PARAMETER;
+    }
+    if (vec_len(amplitudes) == 0) {
+        return ERR_INVALID_PARAMETER;
+    }
+    if (size == 0) {
+        return ERR_INVALID_PARAMETER;
+    }
+
+    var samples = vec_new();
+    var z = 0;
+    while (z < size) {
+        vec_push(samples, 0);
+        z = z + 1;
+    }
+
+    var harmonics_to_generate = num_harmonics;
+    var alen = vec_len(amplitudes);
+    if (alen < harmonics_to_generate) {
+        harmonics_to_generate = alen;
+    }
+
+    var size_f = f64_from(size);
+    var h = 0;
+    while (h < harmonics_to_generate) {
+        var amp = vec_get(amplitudes, h);
+        var harmonic_num = f64_from(h + 1);
+        var i = 0;
+        while (i < size) {
+            var phase = f64_mul(f64_mul(f64_div(f64_from(i), size_f), F64_TAU), harmonic_num);
+            var cur = vec_get(samples, i);
+            vec_set(samples, i, f64_add(cur, f64_mul(amp, f64_sin(phase))));
+            i = i + 1;
+        }
+        h = h + 1;
+    }
+
+    # Normalize to -1..1 (peak magnitude -> 1.0).
+    var max_abs = 0;
+    var j = 0;
+    while (j < size) {
+        var a = f64_abs(vec_get(samples, j));
+        if (f64_gt(a, max_abs) == 1) {
+            max_abs = a;
+        }
+        j = j + 1;
+    }
+    if (f64_gt(max_abs, 0) == 1) {
+        var k = 0;
+        while (k < size) {
+            vec_set(samples, k, f64_div(vec_get(samples, k), max_abs));
+            k = k + 1;
+        }
+    }
+
+    var self = alloc(sizeof(Wavetable));
+    Wavetable_set_samples(self, samples);
+    return self;
+}
+
+# ================================================================
+# wavetable_samples -- shared reference to the waveform samples (the vec).
+# Ports Wavetable::samples.
+# ================================================================
+#inline
+#must_use
+fn wavetable_samples(self) {
+    return Wavetable_samples(self);
+}
+
+# ================================================================
+# wavetable_len -- number of samples in the wavetable. Ports Wavetable::len.
+# ================================================================
+#inline
+#must_use
+fn wavetable_len(self) {
+    return vec_len(Wavetable_samples(self));
+}
+
+# ================================================================
+# wavetable_is_empty -- 1 if the wavetable has no samples, else 0.
+# Ports Wavetable::is_empty.
+# ================================================================
+#inline
+#must_use
+fn wavetable_is_empty(self) {
+    if (vec_len(Wavetable_samples(self)) == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# wavetable_read_interpolated -- read a sample at fractional `phase`
+# (0.0..1.0) with linear interpolation and wraparound.
+# Ports Wavetable::read_interpolated.
+# ================================================================
+#inline
+#must_use
+fn wavetable_read_interpolated(self, phase) {
+    var samples = Wavetable_samples(self);
+    var n = vec_len(samples);
+    var len = f64_from(n);
+    var index = f64_mul(phase, len);
+    var index_floor = f64_floor(index);
+    var frac = f64_sub(index, index_floor);
+
+    var floor_i = f64_to(index_floor);
+    var i0 = floor_i % n;
+    var i1 = (i0 + 1) % n;
+
+    var s0 = vec_get(samples, i0);
+    var s1 = vec_get(samples, i1);
+    return f64_add(f64_mul(s0, f64_sub(F64_ONE, frac)), f64_mul(s1, frac));
+}
+
+# ================================================================
+# WavetableOscillator -- reads from a single wavetable via phase accum.
+#   table       : Wavetable pointer
+#   phase       : f64 current phase (0.0..1.0)
+#   sample_rate : f64 Hz
+#   frequency   : f64 playback frequency (Hz)
+# ================================================================
+#derive(accessors)
+struct WavetableOscillator {
+    table;
+    phase;
+    sample_rate;
+    frequency;
+}
+
+# ================================================================
+# wavetable_osc_new -- new oscillator over `table`. Returns the pointer,
+# or a negative ERR_* on invalid sample_rate/frequency.
+# Ports WavetableOscillator::new.
+# ================================================================
+#must_use
+fn wavetable_osc_new(table, frequency, sample_rate) {
+    var e = validate_sample_rate(sample_rate);
+    if (naad_is_err(e) == 1) {
+        return e;
+    }
+    e = validate_frequency(frequency, sample_rate);
+    if (naad_is_err(e) == 1) {
+        return e;
+    }
+    var self = alloc(sizeof(WavetableOscillator));
+    WavetableOscillator_set_table(self, table);
+    WavetableOscillator_set_phase(self, 0);
+    WavetableOscillator_set_sample_rate(self, sample_rate);
+    WavetableOscillator_set_frequency(self, frequency);
+    return self;
+}
+
+# Shared reference to the wavetable. Ports WavetableOscillator::table.
+#inline
+#must_use
+fn wavetable_osc_table(self) {
+    return WavetableOscillator_table(self);
+}
+
+# Current phase (0.0..1.0). Ports WavetableOscillator::phase.
+#inline
+#must_use
+fn wavetable_osc_phase(self) {
+    return WavetableOscillator_phase(self);
+}
+
+# Sample rate (Hz). Ports WavetableOscillator::sample_rate.
+#inline
+#must_use
+fn wavetable_osc_sample_rate(self) {
+    return WavetableOscillator_sample_rate(self);
+}
+
+# Playback frequency (Hz). Ports WavetableOscillator::frequency.
+#inline
+#must_use
+fn wavetable_osc_frequency(self) {
+    return WavetableOscillator_frequency(self);
+}
+
+# ================================================================
+# wavetable_osc_set_frequency -- update playback frequency. Returns
+# ERR_NONE on success or a negative ERR_* if invalid for the sample rate.
+# Ports WavetableOscillator::set_frequency.
+# ================================================================
+fn wavetable_osc_set_frequency(self, freq) {
+    var e = validate_frequency(freq, WavetableOscillator_sample_rate(self));
+    if (naad_is_err(e) == 1) {
+        return e;
+    }
+    WavetableOscillator_set_frequency(self, freq);
+    return ERR_NONE;
+}
+
+# ================================================================
+# wavetable_osc_next_sample -- next sample with linear interpolation,
+# advancing the phase accumulator. Ports WavetableOscillator::next_sample.
+# ================================================================
+#inline
+#must_use
+fn wavetable_osc_next_sample(self) {
+    var sample = wavetable_read_interpolated(WavetableOscillator_table(self), WavetableOscillator_phase(self));
+
+    var phase = f64_add(WavetableOscillator_phase(self),
+    f64_div(WavetableOscillator_frequency(self), WavetableOscillator_sample_rate(self)));
+    if (f64_ge(phase, F64_ONE) == 1) {
+        phase = f64_sub(phase, F64_ONE);
+    }
+    WavetableOscillator_set_phase(self, phase);
+    return sample;
+}
+
+# ================================================================
+# wavetable_osc_fill_buffer -- fill a vec<f64> with successive samples.
+# Ports WavetableOscillator::fill_buffer.
+# ================================================================
+#inline
+fn wavetable_osc_fill_buffer(self, buffer) {
+    var n = vec_len(buffer);
+    var i = 0;
+    while (i < n) {
+        vec_set(buffer, i, wavetable_osc_next_sample(self));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# MorphWavetable -- a vec of equal-length wavetables blended by position.
+#   tables      : vec of Wavetable pointers
+#   position    : f64 morph position (0.0..1.0)
+#   phase       : f64 current phase (0.0..1.0)
+#   sample_rate : f64 Hz
+#   frequency   : f64 playback frequency (Hz)
+# ================================================================
+#derive(accessors)
+struct MorphWavetable {
+    tables;
+    position;
+    phase;
+    sample_rate;
+    frequency;
+}
+
+# ================================================================
+# wavetable_morph_new -- new morph wavetable over `tables`. Returns the
+# pointer, or a negative ERR_* if tables is empty, the wavetables differ
+# in length, or sample_rate/frequency is invalid. Ports MorphWavetable::new.
+# ================================================================
+#must_use
+fn wavetable_morph_new(tables, frequency, sample_rate) {
+    var nt = vec_len(tables);
+    if (nt == 0) {
+        return ERR_INVALID_PARAMETER;
+    }
+    # All tables must share a length for correct morphing.
+    var first_len = wavetable_len(vec_get(tables, 0));
+    var i = 0;
+    while (i < nt) {
+        if (wavetable_len(vec_get(tables, i)) != first_len) {
+            return ERR_INVALID_PARAMETER;
+        }
+        i = i + 1;
+    }
+    var e = validate_sample_rate(sample_rate);
+    if (naad_is_err(e) == 1) {
+        return e;
+    }
+    e = validate_frequency(frequency, sample_rate);
+    if (naad_is_err(e) == 1) {
+        return e;
+    }
+    var self = alloc(sizeof(MorphWavetable));
+    MorphWavetable_set_tables(self, tables);
+    MorphWavetable_set_position(self, 0);
+    MorphWavetable_set_phase(self, 0);
+    MorphWavetable_set_sample_rate(self, sample_rate);
+    MorphWavetable_set_frequency(self, frequency);
+    return self;
+}
+
+# Shared reference to the wavetables (the vec). Ports MorphWavetable::tables.
+#inline
+#must_use
+fn wavetable_morph_tables(self) {
+    return MorphWavetable_tables(self);
+}
+
+# Current morph position (0.0..1.0). Ports MorphWavetable::position.
+#inline
+#must_use
+fn wavetable_morph_position(self) {
+    return MorphWavetable_position(self);
+}
+
+# Current phase (0.0..1.0). Ports MorphWavetable::phase.
+#inline
+#must_use
+fn wavetable_morph_phase(self) {
+    return MorphWavetable_phase(self);
+}
+
+# Sample rate (Hz). Ports MorphWavetable::sample_rate.
+#inline
+#must_use
+fn wavetable_morph_sample_rate(self) {
+    return MorphWavetable_sample_rate(self);
+}
+
+# Playback frequency (Hz). Ports MorphWavetable::frequency.
+#inline
+#must_use
+fn wavetable_morph_frequency(self) {
+    return MorphWavetable_frequency(self);
+}
+
+# ================================================================
+# wavetable_morph_set_morph -- set the morph position (clamped to 0..1).
+# Ports MorphWavetable::set_morph.
+# ================================================================
+fn wavetable_morph_set_morph(self, position) {
+    MorphWavetable_set_position(self, f64_clamp(position, 0, F64_ONE));
+    return 0;
+}
+
+# ================================================================
+# wavetable_morph_next_sample -- next sample, linearly blending the two
+# adjacent tables at the current morph position, then advancing the phase.
+# Ports MorphWavetable::next_sample.
+# ================================================================
+#inline
+#must_use
+fn wavetable_morph_next_sample(self) {
+    var tables = MorphWavetable_tables(self);
+    var num_tables = vec_len(tables);
+    var phase = MorphWavetable_phase(self);
+
+    var sample = 0;
+    if (num_tables == 1) {
+        sample = wavetable_read_interpolated(vec_get(tables, 0), phase);
+    } else {
+        var scaled = f64_mul(MorphWavetable_position(self), f64_from(num_tables - 1));
+        var idx_low = f64_to(f64_floor(scaled));
+        if (idx_low > num_tables - 2) {
+            idx_low = num_tables - 2;
+        }
+        var idx_high = idx_low + 1;
+        var frac = f64_sub(scaled, f64_from(idx_low));
+
+        var s_low = wavetable_read_interpolated(vec_get(tables, idx_low), phase);
+        var s_high = wavetable_read_interpolated(vec_get(tables, idx_high), phase);
+        sample = f64_add(f64_mul(s_low, f64_sub(F64_ONE, frac)), f64_mul(s_high, frac));
+    }
+
+    var new_phase = f64_add(phase, f64_div(MorphWavetable_frequency(self), MorphWavetable_sample_rate(self)));
+    if (f64_ge(new_phase, F64_ONE) == 1) {
+        new_phase = f64_sub(new_phase, F64_ONE);
+    }
+    MorphWavetable_set_phase(self, new_phase);
+    return sample;
+}
+
+# wavetable_morph_next_sample_smooth -- cubic B-spline morph across tables.
+# Ports MorphWavetable::next_sample_smooth. With < 4 tables, falls back to the
+# linear wavetable_morph_next_sample. Otherwise samples every table at the
+# current phase and evaluates a degree-3 B-spline across those control points
+# at `position`, with a linear blend fallback if bspline_eval_1d returns None
+# (NaN sentinel). Requires bspline_eval_1d (dsp_spectral.cyr) + hisab.
+#must_use
+fn wavetable_morph_next_sample_smooth(self) {
+    var tables = MorphWavetable_tables(self);
+    var num_tables = vec_len(tables);
+    if (num_tables < 4) { return wavetable_morph_next_sample(self); }
+
+    var phase = MorphWavetable_phase(self);
+    var position = MorphWavetable_position(self);
+
+    # Control points: each table read at the current phase.
+    var cps = vec_new();
+    var i = 0;
+    while (i < num_tables) {
+        vec_push(cps, wavetable_read_interpolated(vec_get(tables, i), phase));
+        i = i + 1;
+    }
+
+    var sample = bspline_eval_1d(3, cps, position);
+    if (naad_is_finite(sample) == 0) {
+        # Defensive linear fallback (mirrors next_sample's two-table blend).
+        var scaled = f64_mul(position, f64_from(num_tables - 1));
+        var idx_low = f64_to(f64_floor(scaled));
+        if (idx_low > num_tables - 2) { idx_low = num_tables - 2; }
+        var frac = f64_sub(scaled, f64_from(idx_low));
+        var s_low = vec_get(cps, idx_low);
+        var s_high = vec_get(cps, idx_low + 1);
+        sample = f64_add(f64_mul(s_low, f64_sub(F64_ONE, frac)), f64_mul(s_high, frac));
+    }
+
+    var new_phase = f64_add(phase, f64_div(MorphWavetable_frequency(self), MorphWavetable_sample_rate(self)));
+    if (f64_ge(new_phase, F64_ONE) == 1) { new_phase = f64_sub(new_phase, F64_ONE); }
+    MorphWavetable_set_phase(self, new_phase);
+    return sample;
+}

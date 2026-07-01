@@ -1,0 +1,85 @@
+# vocoder.tcyr -- parity tests for src/vocoder.cyr.
+# Ported from the non-serde #[test] blocks in rust-old/src/synth/vocoder.rs
+# (test_serde_roundtrip dropped -- no serde). f32 tolerances widened to f64.
+
+include "src/error.cyr"
+include "src/dsp_util.cyr"
+include "src/filter.cyr"
+include "src/vocoder.cyr"
+
+alloc_init();
+
+var C0_001 = 0x3F50624DD2F1A9FC;   # 0.001
+var C0_01  = 0x3F847AE147AE147B;   # 0.01
+var C0_5   = 0x3FE0000000000000;   # 0.5
+var C0_3   = 0x3FD3333333333333;   # 0.3
+
+# ================================================================
+test_group("produces output");
+var voc = vocoder_new(8, f64_from(200), f64_from(8000), f64_from(44100));
+# Feed a sine as modulator and a sine as carrier.
+var has_output = 0;
+var all_finite = 1;
+var i = 0;
+while (i < 2048) {
+    var t = f64_div(f64_from(i), f64_from(44100));
+    var modulator = f64_sin(f64_mul(f64_mul(t, f64_from(440)), F64_TAU));
+    var carrier = f64_sin(f64_mul(f64_mul(t, f64_from(110)), F64_TAU));
+    var out = vocoder_process_sample(voc, modulator, carrier);
+    if (naad_is_finite(out) == 0) { all_finite = 0; }
+    if (f64_gt(f64_abs(out), C0_001) == 1) { has_output = 1; }
+    i = i + 1;
+}
+assert(all_finite, "all vocoder outputs finite");
+assert(has_output, "vocoder should produce output");
+
+# ================================================================
+test_group("different modulators differ");
+var voc1 = vocoder_new(8, f64_from(200), f64_from(8000), f64_from(44100));
+var voc2 = vocoder_new(8, f64_from(200), f64_from(8000), f64_from(44100));
+var diff = 0;
+i = 0;
+while (i < 1024) {
+    var t2 = f64_div(f64_from(i), f64_from(44100));
+    var carrier2 = f64_sin(f64_mul(f64_mul(t2, f64_from(110)), F64_TAU));
+    var mod1 = f64_sin(f64_mul(f64_mul(t2, f64_from(440)), F64_TAU));
+    var mod2 = f64_sin(f64_mul(f64_mul(t2, f64_from(1200)), F64_TAU));
+    var o1 = vocoder_process_sample(voc1, mod1, carrier2);
+    var o2 = vocoder_process_sample(voc2, mod2, carrier2);
+    diff = f64_add(diff, f64_abs(f64_sub(o1, o2)));
+    i = i + 1;
+}
+assert(f64_gt(diff, C0_01), "different modulators produce different timbres");
+
+# ================================================================
+test_group("process buffer");
+var voc3 = vocoder_new(8, f64_from(200), f64_from(8000), f64_from(44100));
+var modulator3 = vec_new();
+var carrier3 = vec_new();
+var output3 = vec_new();
+var j = 0;
+while (j < 64) {
+    vec_push(modulator3, C0_5);
+    vec_push(carrier3, C0_3);
+    vec_push(output3, 0);
+    j = j + 1;
+}
+vocoder_process_buffer(voc3, modulator3, carrier3, output3);
+var buf_finite = 1;
+j = 0;
+while (j < 64) {
+    if (naad_is_finite(vec_get(output3, j)) == 0) { buf_finite = 0; }
+    j = j + 1;
+}
+assert(buf_finite, "process_buffer outputs finite");
+
+# ================================================================
+test_group("num_bands + validation");
+assert_eq(vocoder_num_bands(voc), 8, "num_bands = 8");
+assert(naad_is_err(vocoder_new(0, f64_from(200), f64_from(8000), f64_from(44100))), "zero bands err");
+assert(naad_is_err(vocoder_new(8, 0, f64_from(8000), f64_from(44100))), "zero low_freq err");
+assert(naad_is_err(vocoder_new(8, f64_from(8000), f64_from(200), f64_from(44100))), "high<=low err");
+assert(naad_is_err(vocoder_new(8, f64_from(200), f64_from(8000), 0)), "zero sample_rate err");
+
+var rc = assert_summary();
+syscall(60, rc);

@@ -1,0 +1,119 @@
+# fm.tcyr -- parity tests for src/fm.cyr.
+# Ported from the non-serde #[test] blocks in rust-old/src/synth/fm.rs
+# (test_serde_roundtrip dropped -- no serde). f32 tolerances widened to f64.
+# lib/hisab.cyr is included first because envelope.cyr (a transitive dep)
+# leans on calc_catmull_rom/hvec3_new/HVec3_x.
+
+include "lib/hisab.cyr"
+include "src/error.cyr"
+include "src/dsp_util.cyr"
+include "src/envelope.cyr"
+include "src/fm.cyr"
+
+alloc_init();
+
+var C0_01  = 0x3f847ae147ae147b;   # 0.01
+var C0_1   = 0x3fb999999999999a;   # 0.1
+var C0_001 = 0x3f50624dd2f1a9fc;   # 0.001
+
+var SR = 44100;
+
+# ================================================================
+test_group("basic output");
+var engine = fm_engine_new(2, f64_from(SR));
+assert(naad_is_err(engine) == 0, "engine constructed");
+fm_engine_set_operator_freq(engine, 0, f64_from(440));
+fm_engine_set_operator_freq(engine, 1, f64_from(440));
+fm_engine_set_algorithm(engine, FM_ALGO_SERIAL2);
+fm_engine_note_on(engine);
+
+var buf = vec_new();
+var bi = 0;
+while (bi < 1024) { vec_push(buf, 0); bi = bi + 1; }
+fm_engine_fill_buffer(engine, buf);
+
+var has_out = 0;
+var all_fin = 1;
+bi = 0;
+while (bi < 1024) {
+    var s = vec_get(buf, bi);
+    if (f64_gt(f64_abs(s), C0_01) == 1) { has_out = 1; }
+    if (naad_is_finite(s) == 0) { all_fin = 0; }
+    bi = bi + 1;
+}
+assert(has_out, "should produce output");
+assert(all_fin, "all samples finite");
+
+# ================================================================
+test_group("serial vs parallel differ");
+var serial = fm_engine_new(2, f64_from(SR));
+fm_engine_set_operator_freq(serial, 0, f64_from(200));
+fm_engine_set_operator_freq(serial, 1, f64_from(440));
+fm_engine_set_operator_level(serial, 0, F64_ONE);
+fm_engine_set_algorithm(serial, FM_ALGO_SERIAL2);
+fm_engine_note_on(serial);
+
+var parallel = fm_engine_new(2, f64_from(SR));
+fm_engine_set_operator_freq(parallel, 0, f64_from(200));
+fm_engine_set_operator_freq(parallel, 1, f64_from(440));
+fm_engine_set_operator_level(parallel, 0, F64_ONE);
+fm_engine_set_algorithm(parallel, FM_ALGO_PARALLEL2);
+fm_engine_note_on(parallel);
+
+var buf_s = vec_new();
+var buf_p = vec_new();
+bi = 0;
+while (bi < 512) { vec_push(buf_s, 0); vec_push(buf_p, 0); bi = bi + 1; }
+fm_engine_fill_buffer(serial, buf_s);
+fm_engine_fill_buffer(parallel, buf_p);
+
+var diff = 0;
+bi = 0;
+while (bi < 512) {
+    var a = vec_get(buf_s, bi);
+    var b = vec_get(buf_p, bi);
+    diff = f64_add(diff, f64_abs(f64_sub(a, b)));
+    bi = bi + 1;
+}
+assert(f64_gt(diff, C0_1) == 1, "serial and parallel produce different spectra");
+
+# ================================================================
+test_group("four-op algorithms");
+var e4 = fm_engine_new(4, f64_from(SR));
+fm_engine_set_algorithm(e4, FM_ALGO_SERIAL4);
+fm_engine_note_on(e4);
+var buf4 = vec_new();
+bi = 0;
+while (bi < 256) { vec_push(buf4, 0); bi = bi + 1; }
+fm_engine_fill_buffer(e4, buf4);
+var has4 = 0;
+bi = 0;
+while (bi < 256) {
+    if (f64_gt(f64_abs(vec_get(buf4, bi)), C0_001) == 1) { has4 = 1; }
+    bi = bi + 1;
+}
+assert(has4, "serial4 produces output");
+
+var e5 = fm_engine_new(4, f64_from(SR));
+fm_engine_set_algorithm(e5, FM_ALGO_STACK4);
+fm_engine_note_on(e5);
+var buf5 = vec_new();
+bi = 0;
+while (bi < 256) { vec_push(buf5, 0); bi = bi + 1; }
+fm_engine_fill_buffer(e5, buf5);
+var has5 = 0;
+bi = 0;
+while (bi < 256) {
+    if (f64_gt(f64_abs(vec_get(buf5, bi)), C0_001) == 1) { has5 = 1; }
+    bi = bi + 1;
+}
+assert(has5, "stack4 produces output");
+
+# ================================================================
+test_group("invalid construction");
+assert(naad_is_err(fm_engine_new(0, f64_from(SR))), "zero operators err");
+assert(naad_is_err(fm_engine_new(7, f64_from(SR))), "too many operators err");
+assert(naad_is_err(fm_engine_new(2, 0)), "zero sample rate err");
+
+var rc = assert_summary();
+syscall(60, rc);

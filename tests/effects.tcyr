@@ -1,0 +1,86 @@
+# effects.tcyr -- parity tests for src/effects.cyr.
+# Ports every non-serde #[test] from rust-old/src/effects.rs one-for-one.
+# The serde round-trip test (test_serde_roundtrip) is dropped (no serde in
+# Cyrius). f32 tolerances widen to f64 (NAAD_EPSILON). Deps are included in
+# dependency order; effects.cyr comes last.
+
+include "src/error.cyr"
+include "src/dsp_util.cyr"
+include "src/delay.cyr"
+include "src/noise.cyr"
+include "src/osc_core.cyr"
+include "src/osc_unison.cyr"
+include "src/osc_sub.cyr"
+include "src/osc_sync.cyr"
+include "src/effects.cyr"
+
+alloc_init();
+
+var C0_5 = 0x3FE0000000000000;   # 0.5
+
+var i = 0;
+
+# ================================================================
+# chorus -- process_sample of a 3-voice chorus is finite.
+# ================================================================
+test_group("chorus");
+var chorus = effects_chorus_new(3, f64_from(10), f64_from(3), C0_5, C0_5, f64_from(44100));
+var cout = effects_chorus_process_sample(chorus, F64_ONE);
+assert(naad_is_finite(cout), "chorus output is finite");
+
+# ================================================================
+# flanger -- process_sample is finite.
+# ================================================================
+test_group("flanger");
+var flanger = effects_flanger_new(f64_from(2), F64_ONE, C0_5, C0_5, C0_5, f64_from(44100));
+var fout = effects_flanger_process_sample(flanger, F64_ONE);
+assert(naad_is_finite(fout), "flanger output is finite");
+
+# ================================================================
+# phaser -- 100 samples all finite (feedback stability check).
+# ================================================================
+test_group("phaser");
+var phaser = effects_phaser_new(4, C0_5, f64_from(200), f64_from(2000), C0_5, C0_5, f64_from(44100));
+var ph_ok = 1;
+i = 0;
+while (i < 100) {
+    var po = effects_phaser_process_sample(phaser, F64_ONE);
+    if (naad_is_finite(po) == 0) { ph_ok = 0; }
+    i = i + 1;
+}
+assert(ph_ok, "phaser produced non-finite output");
+
+# ================================================================
+# soft clip -- saturates to within [-1, 1].
+# ================================================================
+test_group("soft clip");
+var dsoft = effects_distortion_new(DISTORTION_SOFT_CLIP, f64_from(10), F64_ONE);
+var so = effects_distortion_process_sample(dsoft, C0_5);
+assert(f64_le(f64_abs(so), F64_ONE), "soft clip should saturate");
+
+# ================================================================
+# hard clip -- 0.5 * 10 = 5.0 clamps to 1.0.
+# ================================================================
+test_group("hard clip");
+var dhard = effects_distortion_new(DISTORTION_HARD_CLIP, f64_from(10), F64_ONE);
+var ho = effects_distortion_process_sample(dhard, C0_5);
+assert(f64_lt(f64_abs(f64_sub(ho, F64_ONE)), NAAD_EPSILON), "hard clip of 5.0 should be 1.0");
+
+# ================================================================
+# wave fold -- stays within [-1, 1].
+# ================================================================
+test_group("wave fold");
+var dfold = effects_distortion_new(DISTORTION_WAVE_FOLD, f64_from(3), F64_ONE);
+var wo = effects_distortion_process_sample(dfold, C0_5);
+assert(f64_le(f64_abs(wo), F64_ONE), "wave fold should stay in range");
+
+# ================================================================
+# mix dry -- mix 0.0 passes the input through unchanged.
+# ================================================================
+test_group("mix dry");
+var ddry = effects_distortion_new(DISTORTION_HARD_CLIP, f64_from(10), 0);
+var dryo = effects_distortion_process_sample(ddry, C0_5);
+assert(f64_lt(f64_abs(f64_sub(dryo, C0_5)), NAAD_EPSILON), "mix 0.0 should be fully dry");
+
+var rc = assert_summary();
+syscall(60, rc);

@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - Cyrius port
+
+Complete rewrite from Rust to **Cyrius**. naad's Rust line shipped through 1.2.5;
+the language port is a major break, so it lands as 2.0.0. The 13,465-line Rust
+source is frozen at `rust-old/` as the parity oracle — every Cyrius module is
+cross-checked against it function-for-function. Per-module ledger in
+[`docs/development/port-audit.md`](docs/development/port-audit.md).
+
+### Changed
+
+- **Language**: Rust → Cyrius (`.cyr`). Toolchain pinned via
+  `cyrius.cyml [package].cyrius` (6.3.19). Build with `cyrius build src/main.cyr
+  build/naad`; test a suite with `cyrius test tests/<mod>.tcyr`.
+- **All 41 modules ported** (L0 → acoustics): error, dsp_util + the
+  `dsp_spectral` block (FFT/STFT/chromagram/onset/pitch/B-spline/poly-fit),
+  oscillators (core/unison/sub/sync), filters, envelopes, wavetables (+ cubic
+  B-spline morph), modulation, effects, dynamics, EQ, reverb, noise, panning,
+  smoothing, tuning, voice, mod-matrix, delay, and the synthesis engines
+  (subtractive, FM, additive, formant, granular, physical, vocoder, drum), plus
+  9 acoustics wrappers over goonj (room, convolution, binaural, FDN, analysis,
+  ambisonics, directivity, coupled + `material_by_name`).
+- **f32 → f64** throughout (hisab's `HVec3`/`HComplex` are f64-only; widening
+  is forced and improves precision).
+- **Error handling**: the `NaadError` enum → integer codes (`ERR_*`); validators
+  return `ERR_NONE`/negative; `Result`/`Option` → code or sentinel returns
+  (null `0`, `NaN`, `-1.0`). No unwinding — Cyrius has none by design.
+- **Dependencies**: `hisab` (math/geometry, `num_fft`, `calc_bspline`,
+  least-squares) and `goonj` (acoustics engine) consumed as Cyrius distlib
+  bundles. `smallvec`/`serde`/`thiserror`/`tracing`/`criterion` dropped
+  (`SmallVec`/`Vec` → stdlib `vec`; no serde in Cyrius).
+
+### Added
+
+- **Parity test suites**: one `tests/<mod>.tcyr` per module, each Rust `#[test]`
+  ported one-for-one (serde round-trips + Display-string tests dropped) —
+  **463 assertions across 36 suites, all green**.
+- **`dist/naad.cyr`** distlib bundle (39 modules, dependency-ordered, one flat
+  namespace; cross-module symbol collisions audited to zero — 443 top-level
+  fns). Validated by `tests/bundle.tcyr`; consumers supply stdlib + hisab +
+  goonj.
+- **Hot-path benchmarks** (`cyrius bench tests/hotpath.bcyr`): oscillator,
+  state-variable filter, ADSR envelope, pink noise (~1.4 µs/sample, scalar
+  reference; hosts own SIMD dispatch).
+
+### Removed
+
+- serde derives + all serde round-trip tests (no serde in Cyrius).
+- `smallvec`, `thiserror`, `tracing`, `criterion` dependencies.
+
 ## [1.2.5] - P3 — `SmallVec` for fixed-size collections
 
 ### Added

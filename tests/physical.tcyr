@@ -1,0 +1,245 @@
+# physical.tcyr -- parity tests for src/physical.cyr.
+# Ported from the non-serde #[test] blocks in rust-old/src/synth/physical.rs
+# (the two serde round-trip tests dropped -- no serde). f32 thresholds reused
+# directly (produce-output / decay / RMS ratios are magnitude checks). The
+# `#[cfg(feature = "synthesis")]` MoogLadder tests are always exercised here.
+# hisab is included per the module's declared dep order even though the RK4 is
+# hand-rolled (see the DIVERGENCE note in src/physical.cyr).
+
+include "lib/hisab.cyr"
+include "src/error.cyr"
+include "src/dsp_util.cyr"
+include "src/delay.cyr"
+include "src/physical.cyr"
+
+alloc_init();
+
+var C0_9   = 0x3feccccccccccccd;   # 0.9
+var C0_1   = 0x3fb999999999999a;   # 0.1
+var C0_95  = 0x3fee666666666666;   # 0.95
+var C0_3   = 0x3fd3333333333333;   # 0.3
+var C0_8   = 0x3fe999999999999a;   # 0.8
+var C1_2   = 0x3ff3333333333333;   # 1.2
+var C0_05  = 0x3fa999999999999a;   # 0.05
+var C0_01  = 0x3f847ae147ae147b;   # 0.01
+var C0_001 = 0x3f50624dd2f1a9fc;   # 0.001
+var C0_4   = 0x3fd999999999999a;   # 0.4
+var C3_9   = 0x400f333333333333;   # 3.9
+var C1e_4  = 0x3f1a36e2eb1c432d;   # 1e-4
+
+var SR = 44100;
+
+# ================================================================
+# Test helpers.
+# ================================================================
+
+# Fresh vec of n zeroed slots.
+fn _phys_make_buf(n) {
+    var b = vec_new();
+    var i = 0;
+    while (i < n) {
+        vec_push(b, 0);
+        i = i + 1;
+    }
+    return b;
+}
+
+# 1 if any |slot| > thresh.
+fn _phys_any_above(buf, thresh) {
+    var n = vec_len(buf);
+    var i = 0;
+    while (i < n) {
+        if (f64_gt(f64_abs(vec_get(buf, i)), thresh) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 1 if every slot is finite.
+fn _phys_all_finite(buf) {
+    var n = vec_len(buf);
+    var i = 0;
+    while (i < n) {
+        if (naad_is_finite(vec_get(buf, i)) == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Peak absolute value across the buffer.
+fn _phys_peak(buf) {
+    var n = vec_len(buf);
+    var p = 0;
+    var i = 0;
+    while (i < n) {
+        var a = f64_abs(vec_get(buf, i));
+        if (f64_gt(a, p) == 1) { p = a; }
+        i = i + 1;
+    }
+    return p;
+}
+
+# RMS of a Moog filter driven with a `freq` Hz sine (post-warmup).
+fn _phys_measure_rms(filter, freq, sr) {
+    physical_moog_reset(filter);
+    var n = 8192;
+    var i = 0;
+    while (i < 1024) {
+        var tw = f64_div(f64_from(i), sr);
+        var _w = physical_moog_process_sample(filter, f64_sin(f64_mul(f64_mul(tw, freq), F64_TAU)));
+        i = i + 1;
+    }
+    var sum_sq = 0;
+    i = 1024;
+    while (i < 1024 + n) {
+        var tm = f64_div(f64_from(i), sr);
+        var s = physical_moog_process_sample(filter, f64_sin(f64_mul(f64_mul(tm, freq), F64_TAU)));
+        sum_sq = f64_add(sum_sq, f64_mul(s, s));
+        i = i + 1;
+    }
+    return f64_sqrt(f64_div(sum_sq, f64_from(n)));
+}
+
+# Tail RMS (samples 200..1200) of an impulse through a fresh 800 Hz Moog.
+fn _phys_measure_tail_rms(res) {
+    var filter = physical_moog_new(f64_from(800), res, f64_from(SR));
+    var buf = _phys_make_buf(4096);
+    vec_set(buf, 0, F64_ONE);
+    physical_moog_process_buffer(filter, buf);
+    var sum = 0;
+    var i = 200;
+    while (i < 1200) {
+        var s = vec_get(buf, i);
+        sum = f64_add(sum, f64_mul(s, s));
+        i = i + 1;
+    }
+    return f64_sqrt(f64_div(sum, f64_from(1000)));
+}
+
+# ================================================================
+test_group("ks produces pitched output");
+var ks = physical_ks_new(f64_from(440), C0_9, F64_HALF, f64_from(SR));
+physical_ks_pluck(ks);
+var buf_a = _phys_make_buf(2048);
+physical_ks_fill_buffer(ks, buf_a);
+assert(_phys_any_above(buf_a, C0_1), "KS should produce output after pluck");
+assert(_phys_all_finite(buf_a), "KS output all finite");
+
+# ================================================================
+test_group("ks decays with low decay");
+var ks2 = physical_ks_new(f64_from(440), 0, F64_HALF, f64_from(SR));
+physical_ks_pluck(ks2);
+var buf_b = _phys_make_buf(512);
+var d = 0;
+while (d < 100) {
+    physical_ks_fill_buffer(ks2, buf_b);
+    d = d + 1;
+}
+assert(f64_lt(_phys_peak(buf_b), C0_1), "KS with low decay should attenuate");
+
+# ================================================================
+test_group("ks frequency matches (autocorrelation)");
+var freq = f64_from(200);
+var srf = f64_from(SR);
+var ks3 = physical_ks_new(freq, C0_95, C0_3, srf);
+physical_ks_pluck(ks3);
+var expected_period = f64_div(srf, freq);
+var skip_buf = _phys_make_buf(4096);
+physical_ks_fill_buffer(ks3, skip_buf);
+var samples = _phys_make_buf(16384);
+physical_ks_fill_buffer(ks3, samples);
+
+var window = 4096;
+var search_min = f64_to(f64_mul(expected_period, C0_8));
+var search_max = f64_to(f64_mul(expected_period, C1_2));
+var upper = search_max;
+if (upper > window) { upper = window; }
+
+var best_lag = search_min;
+var best_corr = NAAD_NEG_INF;
+var lag = search_min;
+while (lag <= upper) {
+    var corr = 0;
+    var ci = 0;
+    var lim = window - lag;
+    while (ci < lim) {
+        corr = f64_add(corr, f64_mul(vec_get(samples, ci), vec_get(samples, ci + lag)));
+        ci = ci + 1;
+    }
+    if (f64_gt(corr, best_corr) == 1) {
+        best_corr = corr;
+        best_lag = lag;
+    }
+    lag = lag + 1;
+}
+var ferr = f64_div(f64_abs(f64_sub(f64_from(best_lag), expected_period)), expected_period);
+assert(f64_lt(ferr, C0_05), "frequency should be close to expected");
+
+# ================================================================
+test_group("waveguide produces output");
+var wg = physical_wg_new(f64_from(220), C0_01, f64_from(SR));
+var w = 0;
+while (w < 10) {
+    physical_wg_excite(wg, F64_ONE);
+    var _ns = physical_wg_next_sample(wg);
+    w = w + 1;
+}
+var buf_c = _phys_make_buf(1024);
+physical_wg_fill_buffer(wg, buf_c);
+assert(_phys_any_above(buf_c, C0_001), "waveguide should produce output after excitation");
+assert(_phys_all_finite(buf_c), "waveguide output all finite");
+
+# ================================================================
+test_group("moog ladder attenuates high freq");
+var mfilter = physical_moog_new(f64_from(1000), 0, f64_from(SR));
+var rms_low = _phys_measure_rms(mfilter, f64_from(200), f64_from(SR));
+var rms_high = _phys_measure_rms(mfilter, f64_from(5000), f64_from(SR));
+assert(f64_gt(rms_low, C0_4), "200 Hz should pass near-unity");
+assert(f64_lt(rms_high, f64_mul(rms_low, F64_HALF)), "5 kHz attenuated below half of 200 Hz");
+
+# ================================================================
+test_group("moog ladder resonance rings");
+var tail_dry = _phys_measure_tail_rms(0);
+var tail_resonant = _phys_measure_tail_rms(C3_9);
+var rings = 0;
+if (f64_gt(tail_resonant, f64_mul(tail_dry, f64_from(4))) == 1) {
+    if (f64_gt(tail_resonant, C1e_4) == 1) { rings = 1; }
+}
+assert(rings, "resonant tail should dominate the dry tail");
+
+# ================================================================
+test_group("moog ladder stable under dc");
+var fdc = physical_moog_new(f64_from(2000), f64_from(4), f64_from(SR));
+var dcbuf = _phys_make_buf(8192);
+var di = 0;
+while (di < 8192) {
+    vec_set(dcbuf, di, F64_HALF);
+    di = di + 1;
+}
+physical_moog_process_buffer(fdc, dcbuf);
+var dc_ok = 1;
+di = 0;
+while (di < 8192) {
+    var sv = vec_get(dcbuf, di);
+    if (naad_is_finite(sv) == 0) { dc_ok = 0; }
+    if (f64_ge(f64_abs(sv), F64_TWO) == 1) { dc_ok = 0; }
+    di = di + 1;
+}
+assert(dc_ok, "DC + extreme params: all outputs finite and < 2.0");
+
+# ================================================================
+test_group("moog ladder invalid inputs");
+assert(naad_is_err(physical_moog_new(f64_from(1000), F64_ONE, 0)), "zero sample rate err");
+assert(naad_is_err(physical_moog_new(f64_from(0 - 100), F64_ONE, f64_from(SR))), "negative cutoff err");
+assert(naad_is_err(physical_moog_new(f64_from(50000), F64_ONE, f64_from(SR))), "above nyquist err");
+
+# ================================================================
+test_group("moog ladder resonance clamps");
+var fclamp = physical_moog_new(f64_from(1000), f64_from(100), f64_from(SR));
+assert(f64_lt(f64_abs(f64_sub(physical_moog_resonance(fclamp), f64_from(4))), NAAD_EPSILON),
+"resonance clamps to 4");
+physical_moog_set_resonance(fclamp, f64_neg(F64_ONE));
+assert(f64_lt(f64_abs(physical_moog_resonance(fclamp)), NAAD_EPSILON), "resonance clamps to 0");
+
+var rc = assert_summary();
+syscall(60, rc);

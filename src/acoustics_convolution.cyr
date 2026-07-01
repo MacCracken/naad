@@ -1,0 +1,321 @@
+# acoustics_convolution.cyr -- naad convolution reverb (thin goonj wrapper).
+#
+# Ports rust-old/src/acoustics/convolution.rs. Applies a pre-computed impulse
+# response to an audio stream via direct time-domain convolution (per sample)
+# or FFT convolution (per block, through hisab num_fft/num_ifft). An IR can be
+# supplied raw or generated from a goonj shoebox-room simulation. f32 -> f64
+# throughout. Rust's serde derives and the reusable Complex scratch vectors are
+# dropped -- process_block allocates its interleaved complex buffers per call,
+# which is behaviourally identical.
+#
+# Cross-crate mapping (discovered from lib/goonj.cyr + goonj src/tests, and
+# reused from the already-green src/acoustics_room.cyr wrapper):
+#   goonj::room::AcousticRoom::shoebox   -> acoustic_room_shoebox(l, w, h, mat)
+#   goonj::impulse::IrConfig{..}         -> ir_config_new(rate, order, rays,
+#                                                          bounces, secs, seed)
+#   goonj::impulse::generate_ir          -> generate_ir(src, lis, room, cfg)
+#   MultibandIr::to_broadband            -> multiband_ir_to_broadband(mi)
+#   ImpulseResponse.samples              -> ImpulseResponse_samples(ir)
+#   hisab::Vec3::new                     -> hvec3_new (config already stores it)
+#   hisab::Complex + hisab::num::fft/ifft-> num_fft/num_ifft over an interleaved
+#                                           complex buffer alloc(n*16): re at
+#                                           +i*16, im at +i*16+8.
+# The wall material name resolves through naad_acoustics_material_by_name
+# (src/acoustics.cyr). Result<Self> -> struct pointer on success, or a negative
+# ERR_COMPUTATION on unknown material / non-positive dimensions. Reuses
+# RoomReverbConfig + its accessors from src/acoustics_room.cyr. No `include`.
+
+# ================================================================
+# ConvolutionReverb -- convolution reverb processor.
+#   ir            : impulse-response samples (vec of f64, may be empty)
+#   input_buffer  : ring-buffer of recent inputs (len == max(ir_len, 1))
+#   position      : current write position in the ring buffer
+#   mix           : wet/dry mix in [0, 1] (0 = fully dry, 1 = fully wet)
+# The Rust scratch_ir / scratch_in / scratch_product Complex vectors are a
+# performance cache only; the Cyrius port allocates them per process_block.
+# ================================================================
+#derive(accessors)
+struct ConvolutionReverb {
+    ir;
+    input_buffer;
+    position;
+    mix;
+}
+
+# ================================================================
+# naad_convolution_from_ir -- create a convolution reverb from a raw impulse
+# response `ir` (vec of f64) and a `mix` clamped to [0, 1]. The input ring
+# buffer is sized to max(ir_len, 1) and zero-filled. Ports ConvolutionReverb::
+# from_ir.
+# ================================================================
+#must_use
+fn naad_convolution_from_ir(ir, mix) {
+    var ir_len = vec_len(ir);
+    var buf_len = ir_len;
+    if (buf_len < 1) { buf_len = 1; }
+
+    var input_buffer = vec_new();
+    var i = 0;
+    while (i < buf_len) {
+        vec_push(input_buffer, 0);
+        i = i + 1;
+    }
+
+    var self = alloc(sizeof(ConvolutionReverb));
+    ConvolutionReverb_set_ir(self, ir);
+    ConvolutionReverb_set_input_buffer(self, input_buffer);
+    ConvolutionReverb_set_position(self, 0);
+    ConvolutionReverb_set_mix(self, f64_clamp(mix, 0, F64_ONE));
+    return self;
+}
+
+# ================================================================
+# naad_convolution_from_room -- create a convolution reverb from a goonj room
+# simulation. Builds a shoebox room, generates a broadband impulse response via
+# image-source + diffuse rain (order 3, 2000 diffuse rays, 30 bounces, 1.0 s,
+# seed 42 -- the Rust IrConfig literal), and loads it fully wet (mix 1.0).
+# Returns the struct pointer on success, or a negative ERR_COMPUTATION if the
+# wall material name is unknown or the room dimensions are not positive.
+# Ports ConvolutionReverb::from_room. Reuses RoomReverbConfig from
+# src/acoustics_room.cyr.
+# ================================================================
+#must_use
+fn naad_convolution_from_room(config) {
+    var material = naad_acoustics_material_by_name(RoomReverbConfig_wall_material_name(config));
+    if (material == 0) { return ERR_COMPUTATION; }
+
+    if (f64_le(RoomReverbConfig_length(config), 0) == 1) { return ERR_COMPUTATION; }
+    if (f64_le(RoomReverbConfig_width(config), 0) == 1) { return ERR_COMPUTATION; }
+    if (f64_le(RoomReverbConfig_height(config), 0) == 1) { return ERR_COMPUTATION; }
+
+    var room = acoustic_room_shoebox(RoomReverbConfig_length(config),
+    RoomReverbConfig_width(config), RoomReverbConfig_height(config), material);
+
+    var source = RoomReverbConfig_source_position(config);
+    var listener = RoomReverbConfig_listener_position(config);
+
+    var ir_config = ir_config_new(RoomReverbConfig_sample_rate(config), 3, 2000, 30, F64_ONE, 42);
+
+    var multiband = generate_ir(source, listener, room, ir_config);
+    var broadband = multiband_ir_to_broadband(multiband);
+    var ir = ImpulseResponse_samples(broadband);
+
+    return naad_convolution_from_ir(ir, F64_ONE);
+}
+
+# ================================================================
+# naad_convolution_process_sample -- process a single audio sample via direct
+# time-domain convolution with the stored impulse response, returning a mix of
+# dry input and wet convolved output. An empty IR passes the input through
+# unchanged. Ports ConvolutionReverb::process_sample.
+# ================================================================
+#inline
+#must_use
+fn naad_convolution_process_sample(self, input) {
+    var ir = ConvolutionReverb_ir(self);
+    var ir_len = vec_len(ir);
+    if (ir_len == 0) { return input; }
+
+    var buf = ConvolutionReverb_input_buffer(self);
+    var pos = ConvolutionReverb_position(self);
+    vec_set(buf, pos, input);
+
+    # wet = sum(input_buffer[(pos + ir_len - k) % ir_len] * ir[k]).
+    var wet = 0;
+    var k = 0;
+    while (k < ir_len) {
+        var idx_raw = pos + ir_len - k;
+        var idx = idx_raw % ir_len;
+        wet = f64_add(wet, f64_mul(vec_get(buf, idx), vec_get(ir, k)));
+        k = k + 1;
+    }
+
+    var nextp = pos + 1;
+    var np = nextp % ir_len;
+    ConvolutionReverb_set_position(self, np);
+
+    # input * (1 - mix) + wet * mix.
+    var mix = ConvolutionReverb_mix(self);
+    var dry = f64_sub(F64_ONE, mix);
+    return f64_add(f64_mul(input, dry), f64_mul(wet, mix));
+}
+
+# ================================================================
+# naad_convolution_passthrough -- copy min(len(input), len(output)) samples
+# from input to output. Mirrors the zipped dry-copy fallback the Rust
+# process_block takes when the IR is empty or the input block is empty.
+# ================================================================
+fn naad_convolution_passthrough(input, output) {
+    var n_in = vec_len(input);
+    var n_out = vec_len(output);
+    var limit = n_in;
+    if (n_out < limit) { limit = n_out; }
+    var i = 0;
+    while (i < limit) {
+        vec_set(output, i, vec_get(input, i));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# naad_convolution_process_block_direct -- direct per-sample fallback used when
+# an FFT reports failure: writes process_sample(input[i]) into output[i] for
+# min(len(input), len(output)) samples. Mirrors Rust's zipped process_sample
+# fallback.
+# ================================================================
+fn naad_convolution_process_block_direct(self, input, output) {
+    var n_in = vec_len(input);
+    var n_out = vec_len(output);
+    var limit = n_in;
+    if (n_out < limit) { limit = n_out; }
+    var i = 0;
+    while (i < limit) {
+        vec_set(output, i, naad_convolution_process_sample(self, vec_get(input, i)));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# naad_convolution_next_pow2 -- smallest power of two >= v (>= 1 for v <= 1).
+# Ports usize::next_power_of_two for the FFT sizing.
+# ================================================================
+#must_use
+fn naad_convolution_next_pow2(v) {
+    var p = 1;
+    while (p < v) { p = p << 1; }
+    return p;
+}
+
+# ================================================================
+# naad_convolution_process_block -- process a block of samples through FFT-based
+# linear convolution (hisab num_fft / num_ifft), writing the wet/dry mix into
+# `output`. Both `input` and `output` are vec handles; up to min(len) samples
+# are written. An empty IR or empty input block copies the dry signal through.
+# On (never-reached, size is always a power of two) FFT failure it falls back to
+# direct per-sample convolution. Ports ConvolutionReverb::process_block.
+#
+# The IR (zero-padded) and the input block (zero-padded) are transformed to the
+# frequency domain, multiplied pointwise, and inverse-transformed; the first
+# block_len real parts form the wet signal. FFT length is the next power of two
+# >= ir_len + block_len - 1 so the circular convolution equals the linear one.
+# ================================================================
+fn naad_convolution_process_block(self, input, output) {
+    var ir = ConvolutionReverb_ir(self);
+    var ir_len = vec_len(ir);
+    var block_len = vec_len(input);
+    if (ir_len == 0) { return naad_convolution_passthrough(input, output); }
+    if (block_len == 0) { return naad_convolution_passthrough(input, output); }
+
+    var span = ir_len + block_len - 1;
+    var fft_len = naad_convolution_next_pow2(span);
+
+    # Interleaved complex scratch: re at +i*16, im at +i*16+8.
+    var ir_buf = alloc(fft_len * 16);
+    var in_buf = alloc(fft_len * 16);
+
+    # IR -> ir_buf (real = sample for i < ir_len, else 0; im = 0).
+    var i = 0;
+    while (i < fft_len) {
+        var re = 0;
+        if (i < ir_len) { re = vec_get(ir, i); }
+        store64(ir_buf + i * 16, re);
+        store64(ir_buf + i * 16 + 8, 0);
+        i = i + 1;
+    }
+
+    # input block -> in_buf (real = sample for i < block_len, else 0; im = 0).
+    var j = 0;
+    while (j < fft_len) {
+        var re2 = 0;
+        if (j < block_len) { re2 = vec_get(input, j); }
+        store64(in_buf + j * 16, re2);
+        store64(in_buf + j * 16 + 8, 0);
+        j = j + 1;
+    }
+
+    # Forward FFT both. Fall back to direct convolution on failure.
+    var e1 = num_fft(ir_buf, fft_len);
+    if (e1 != 0) { return naad_convolution_process_block_direct(self, input, output); }
+    var e2 = num_fft(in_buf, fft_len);
+    if (e2 != 0) { return naad_convolution_process_block_direct(self, input, output); }
+
+    # Pointwise multiply in the frequency domain into prod.
+    var prod = alloc(fft_len * 16);
+    var m = 0;
+    while (m < fft_len) {
+        var ar = load64(ir_buf + m * 16);
+        var ai = load64(ir_buf + m * 16 + 8);
+        var br = load64(in_buf + m * 16);
+        var bi = load64(in_buf + m * 16 + 8);
+        # (ar+ai i)(br+bi i) = (ar*br - ai*bi) + (ar*bi + ai*br) i.
+        var pr = f64_sub(f64_mul(ar, br), f64_mul(ai, bi));
+        var pi = f64_add(f64_mul(ar, bi), f64_mul(ai, br));
+        store64(prod + m * 16, pr);
+        store64(prod + m * 16 + 8, pi);
+        m = m + 1;
+    }
+
+    # Inverse FFT. Fall back to direct convolution on failure.
+    var e3 = num_ifft(prod, fft_len);
+    if (e3 != 0) { return naad_convolution_process_block_direct(self, input, output); }
+
+    # Extract the real part and apply the mix over the block.
+    var mix = ConvolutionReverb_mix(self);
+    var dry = f64_sub(F64_ONE, mix);
+    var n_out = vec_len(output);
+    var limit = block_len;
+    if (n_out < limit) { limit = n_out; }
+    var o = 0;
+    while (o < limit) {
+        var wet = load64(prod + o * 16);
+        var inp = vec_get(input, o);
+        vec_set(output, o, f64_add(f64_mul(inp, dry), f64_mul(wet, mix)));
+        o = o + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# naad_convolution_rebuild_from_ir -- replace the IR (e.g. after a serde-free
+# restore), resizing and zeroing the input ring buffer and resetting position.
+# The Rust FFT scratch is dropped in this port, so there is nothing to clear.
+# Ports ConvolutionReverb::rebuild_from_ir.
+# ================================================================
+fn naad_convolution_rebuild_from_ir(self, ir) {
+    var ir_len = vec_len(ir);
+    var buf_len = ir_len;
+    if (buf_len < 1) { buf_len = 1; }
+
+    var input_buffer = vec_new();
+    var i = 0;
+    while (i < buf_len) {
+        vec_push(input_buffer, 0);
+        i = i + 1;
+    }
+
+    ConvolutionReverb_set_input_buffer(self, input_buffer);
+    ConvolutionReverb_set_position(self, 0);
+    ConvolutionReverb_set_ir(self, ir);
+    return 0;
+}
+
+# ================================================================
+# naad_convolution_ir_len -- length of the impulse response in samples.
+# Ports ConvolutionReverb::ir_len.
+# ================================================================
+#must_use
+fn naad_convolution_ir_len(self) {
+    return vec_len(ConvolutionReverb_ir(self));
+}
+
+# ================================================================
+# naad_convolution_is_loaded -- 1 if an IR is loaded, 0 otherwise (false after
+# a serde-free restore). Ports ConvolutionReverb::is_loaded.
+# ================================================================
+#must_use
+fn naad_convolution_is_loaded(self) {
+    if (vec_len(ConvolutionReverb_ir(self)) == 0) { return 0; }
+    return 1;
+}

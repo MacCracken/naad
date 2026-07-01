@@ -1,0 +1,356 @@
+# acoustics_fdn.cyr -- Feedback Delay Network reverbs (naad acoustics wrapper).
+#
+# Ports rust-old/src/acoustics/fdn_reverb.rs. f32 -> f64 throughout. Two
+# reverberators:
+#   * FdnReverb -- thin wet/dry wrapper over goonj's room-derived FDN
+#     (goonj fdn_config_for_room / fdn_new / fdn_process_sample / fdn_reset).
+#   * MatrixFdn -- naad-owned color-free 8x8 Sylvester-Hadamard FDN, built
+#     from scratch (per-line ring buffers + one-pole damping + Hadamard mix).
+#
+# Rust's serde derives (and the lazy Fdn/buffer reconstruction they require)
+# are dropped -- with no serde the inner FDN / delay buffers are always live,
+# so the `Option<Fdn>` and `ensure_buffers` deser paths collapse away.
+# Constructors return the struct pointer on success or a negative ERR_* on
+# invalid parameters (Rust's ComputationError -> ERR_COMPUTATION). Fixed
+# `[T; 8]` inline arrays become stdlib vecs; `Vec<f32>` ring buffers become
+# vecs of vecs.
+#
+# Requires (from the build/test unit): stdlib alloc/vec + math/ganita
+# (F64_ONE/HALF, f64_add/sub/mul/div/neg/abs/max/clamp/pow/sqrt/from/to/gt/le)
+# and the L0 modules error.cyr (flush_denormal, naad_is_finite, ERR_*) and the
+# goonj fdn engine (fdn_config_for_room / fdn_new / fdn_process_sample /
+# fdn_reset). The module file has no `include` lines.
+
+# ================================================================
+# Float literals (IEEE-754 bit patterns).
+# ================================================================
+var FDN_MS_SCALE = 0x3f50624dd2f1a9fc;   # 0.001  (milliseconds -> seconds)
+
+# MatrixFdn delay lengths in milliseconds -- mutually-coprime primes spanning
+# ~30-80 ms, chosen to maximise modal density and avoid metallic resonances.
+var FDN_MS_0 = 0x403db33333333333;   # 29.7
+var FDN_MS_1 = 0x40428ccccccccccd;   # 37.1
+var FDN_MS_2 = 0x4044a66666666666;   # 41.3
+var FDN_MS_3 = 0x4045d9999999999a;   # 43.7
+var FDN_MS_4 = 0x404af33333333333;   # 53.9
+var FDN_MS_5 = 0x404d8ccccccccccd;   # 59.1
+var FDN_MS_6 = 0x4050d33333333333;   # 67.3
+var FDN_MS_7 = 0x40526ccccccccccd;   # 73.7
+
+# Number of delay lines in MatrixFdn (Hadamard requires a power of 2; 8 is a
+# sweet spot).
+var MATRIX_FDN_N = 8;
+
+# ================================================================
+# FdnReverb -- goonj-backed FDN reverb with a wet/dry mix.
+#   fdn          : inner goonj Fdn pointer
+#   room_length  : room length in meters (drives delay-line lengths)
+#   room_width   : room width in meters
+#   room_height  : room height in meters
+#   target_rt60  : target RT60 in seconds
+#   sample_rate  : Hz
+#   mix          : wet/dry mix (0 = dry, 1 = wet)
+# ================================================================
+#derive(accessors)
+struct FdnReverb {
+    fdn;
+    room_length;
+    room_width;
+    room_height;
+    target_rt60;
+    sample_rate;
+    mix;
+}
+
+# ================================================================
+# naad_fdn_reverb_new -- create a goonj-backed FDN reverb. Room dimensions
+# drive the delay-line lengths (larger room = longer delays = spacier tail);
+# `target_rt60` sets decay time. Returns the struct pointer on success, or
+# ERR_COMPUTATION if any parameter is out of range. Ports FdnReverb::new.
+# ================================================================
+#must_use
+fn naad_fdn_reverb_new(room_length, room_width, room_height, target_rt60, sample_rate, mix) {
+    if (f64_le(room_length, 0) == 1) { return ERR_COMPUTATION; }
+    if (f64_le(room_width, 0) == 1) { return ERR_COMPUTATION; }
+    if (f64_le(room_height, 0) == 1) { return ERR_COMPUTATION; }
+    if (f64_le(target_rt60, 0) == 1) { return ERR_COMPUTATION; }
+    if (naad_is_finite(target_rt60) == 0) { return ERR_COMPUTATION; }
+    if (sample_rate == 0) { return ERR_COMPUTATION; }
+
+    var config = fdn_config_for_room(room_length, room_width, room_height, target_rt60, sample_rate);
+    var fdn = fdn_new(config);
+
+    var self = alloc(sizeof(FdnReverb));
+    FdnReverb_set_fdn(self, fdn);
+    FdnReverb_set_room_length(self, room_length);
+    FdnReverb_set_room_width(self, room_width);
+    FdnReverb_set_room_height(self, room_height);
+    FdnReverb_set_target_rt60(self, target_rt60);
+    FdnReverb_set_sample_rate(self, sample_rate);
+    FdnReverb_set_mix(self, f64_clamp(mix, 0, F64_ONE));
+    return self;
+}
+
+# ================================================================
+# naad_fdn_reverb_process_sample -- process one sample, applying the wet/dry
+# mix to the goonj FDN output. Ports FdnReverb::process_sample.
+# ================================================================
+#inline
+#must_use
+fn naad_fdn_reverb_process_sample(self, input) {
+    var wet = fdn_process_sample(FdnReverb_fdn(self), input);
+    var mix = FdnReverb_mix(self);
+    var dry = f64_sub(F64_ONE, mix);
+    return f64_add(f64_mul(input, dry), f64_mul(wet, mix));
+}
+
+# ================================================================
+# naad_fdn_reverb_reset -- reset the inner FDN to silence. Ports
+# FdnReverb::reset.
+# ================================================================
+fn naad_fdn_reverb_reset(self) {
+    fdn_reset(FdnReverb_fdn(self));
+    return 0;
+}
+
+# ================================================================
+# naad_fdn_hadamard8 -- apply the 8x8 Sylvester-Hadamard matrix to a vec of 8
+# (without the 1/sqrt(8) scaling; the caller applies that separately to keep
+# the transform orthogonal / energy-preserving). Entries are +/-1, so the
+# matmul is fully unrolled. Ports the private `hadamard8`.
+#   Row 0: + + + + + + + +      Row 4: + + + + - - - -
+#   Row 1: + - + - + - + -      Row 5: + - + - - + - +
+#   Row 2: + + - - + + - -      Row 6: + + - - - - + +
+#   Row 3: + - - + + - - +      Row 7: + - - + - + + -
+# ================================================================
+#inline
+#must_use
+fn naad_fdn_hadamard8(x) {
+    var x0 = vec_get(x, 0);
+    var x1 = vec_get(x, 1);
+    var x2 = vec_get(x, 2);
+    var x3 = vec_get(x, 3);
+    var x4 = vec_get(x, 4);
+    var x5 = vec_get(x, 5);
+    var x6 = vec_get(x, 6);
+    var x7 = vec_get(x, 7);
+
+    # Four sign patterns over the low half, mirrored onto the high half; each
+    # row is the sum (rows 0-3) or difference (rows 4-7) of the two halves.
+    var a = f64_add(f64_add(f64_add(x0, x1), x2), x3);
+    var b = f64_sub(f64_add(f64_sub(x0, x1), x2), x3);
+    var c = f64_sub(f64_sub(f64_add(x0, x1), x2), x3);
+    var d = f64_add(f64_sub(f64_sub(x0, x1), x2), x3);
+    var a2 = f64_add(f64_add(f64_add(x4, x5), x6), x7);
+    var b2 = f64_sub(f64_add(f64_sub(x4, x5), x6), x7);
+    var c2 = f64_sub(f64_sub(f64_add(x4, x5), x6), x7);
+    var d2 = f64_add(f64_sub(f64_sub(x4, x5), x6), x7);
+
+    var out = vec_new();
+    vec_push(out, f64_add(a, a2));
+    vec_push(out, f64_add(b, b2));
+    vec_push(out, f64_add(c, c2));
+    vec_push(out, f64_add(d, d2));
+    vec_push(out, f64_sub(a, a2));
+    vec_push(out, f64_sub(b, b2));
+    vec_push(out, f64_sub(c, c2));
+    vec_push(out, f64_sub(d, d2));
+    return out;
+}
+
+# ================================================================
+# MatrixFdn -- color-free Hadamard FDN reverb owning its matrix end-to-end.
+#   buffers        : vec of 8 ring-buffer vecs (per-line delay lines)
+#   positions      : vec<usize> per-line write cursor
+#   delay_lengths  : vec<usize> per-line length in samples
+#   damping_state  : vec<f32> per-line one-pole lowpass state (mirror)
+#   damping_gain   : vec<f32> per-line damping coefficient
+#   target_rt60    : target RT60 in seconds
+#   sample_rate    : Hz
+#   mix            : wet/dry mix (0 = dry, 1 = wet)
+# ================================================================
+#derive(accessors)
+struct MatrixFdn {
+    buffers;
+    positions;
+    delay_lengths;
+    damping_state;
+    damping_gain;
+    target_rt60;
+    sample_rate;
+    mix;
+}
+
+# The eight delay lengths in milliseconds, in order.
+#must_use
+fn _matrix_fdn_ms(i) {
+    if (i == 0) { return FDN_MS_0; }
+    if (i == 1) { return FDN_MS_1; }
+    if (i == 2) { return FDN_MS_2; }
+    if (i == 3) { return FDN_MS_3; }
+    if (i == 4) { return FDN_MS_4; }
+    if (i == 5) { return FDN_MS_5; }
+    if (i == 6) { return FDN_MS_6; }
+    return FDN_MS_7;
+}
+
+# ================================================================
+# naad_fdn_matrix_new -- create a color-free Hadamard-FDN reverb. `target_rt60`
+# sets decay time; delay lengths are primes around 30-80 ms scaled to the
+# sample rate; per-line damping gains give a 60 dB drop per RT60. Returns the
+# struct pointer, or ERR_COMPUTATION on bad parameters. Ports MatrixFdn::new.
+# ================================================================
+#must_use
+fn naad_fdn_matrix_new(target_rt60, sample_rate, mix) {
+    if (f64_le(target_rt60, 0) == 1) { return ERR_COMPUTATION; }
+    if (naad_is_finite(target_rt60) == 0) { return ERR_COMPUTATION; }
+    if (sample_rate == 0) { return ERR_COMPUTATION; }
+
+    var sr = f64_from(sample_rate);
+
+    # Delay lengths (samples) = (ms * 0.001 * sample_rate).max(1) as usize.
+    var delay_lengths = vec_new();
+    var i = 0;
+    while (i < MATRIX_FDN_N) {
+        var secs = f64_mul(_matrix_fdn_ms(i), FDN_MS_SCALE);
+        var samples = f64_max(f64_mul(secs, sr), F64_ONE);
+        vec_push(delay_lengths, f64_to(samples));
+        i = i + 1;
+    }
+
+    # Damping gains: g_i = 10^(-3 * D_i / (RT60 * SR)) -> 60 dB per RT60.
+    var damping_gain = vec_new();
+    var rt_sr = f64_mul(target_rt60, sr);
+    i = 0;
+    while (i < MATRIX_FDN_N) {
+        var d = f64_from(vec_get(delay_lengths, i));
+        var expo = f64_div(f64_mul(f64_neg(f64_from(3)), d), rt_sr);
+        vec_push(damping_gain, f64_pow(f64_from(10), expo));
+        i = i + 1;
+    }
+
+    # Allocate ring buffers, cursors, and damping state.
+    var buffers = vec_new();
+    var positions = vec_new();
+    var damping_state = vec_new();
+    i = 0;
+    while (i < MATRIX_FDN_N) {
+        var len = vec_get(delay_lengths, i);
+        var line = vec_new();
+        var j = 0;
+        while (j < len) {
+            vec_push(line, 0);
+            j = j + 1;
+        }
+        vec_push(buffers, line);
+        vec_push(positions, 0);
+        vec_push(damping_state, 0);
+        i = i + 1;
+    }
+
+    var self = alloc(sizeof(MatrixFdn));
+    MatrixFdn_set_buffers(self, buffers);
+    MatrixFdn_set_positions(self, positions);
+    MatrixFdn_set_delay_lengths(self, delay_lengths);
+    MatrixFdn_set_damping_state(self, damping_state);
+    MatrixFdn_set_damping_gain(self, damping_gain);
+    MatrixFdn_set_target_rt60(self, target_rt60);
+    MatrixFdn_set_sample_rate(self, sample_rate);
+    MatrixFdn_set_mix(self, f64_clamp(mix, 0, F64_ONE));
+    return self;
+}
+
+# ================================================================
+# naad_fdn_matrix_process_sample -- process one sample through the Hadamard
+# FDN: read + damp every delay line, mix the damped vector by the normalised
+# 8x8 Hadamard matrix, then write `input + feedback` back into each line.
+# Output is the dry/wet mix of the input and the sum of damped outputs. Ports
+# MatrixFdn::process_sample.
+# ================================================================
+#inline
+#must_use
+fn naad_fdn_matrix_process_sample(self, input) {
+    var buffers = MatrixFdn_buffers(self);
+    var positions = MatrixFdn_positions(self);
+    var damping_gain = MatrixFdn_damping_gain(self);
+    var damping_state = MatrixFdn_damping_state(self);
+
+    var norm = f64_sqrt(f64_from(MATRIX_FDN_N));
+
+    # Read delay-line outputs, apply per-line damping, accumulate the sum.
+    var delayed = vec_new();
+    var wet_sum = 0;
+    var i = 0;
+    while (i < MATRIX_FDN_N) {
+        var line = vec_get(buffers, i);
+        var len = vec_len(line);
+        var read_pos = (vec_get(positions, i) + 1) % len;
+        var damped = f64_mul(vec_get(line, read_pos), vec_get(damping_gain, i));
+        var slot = flush_denormal(damped);
+        vec_push(delayed, slot);
+        vec_set(damping_state, i, slot);
+        wet_sum = f64_add(wet_sum, slot);
+        i = i + 1;
+    }
+
+    # Output sum before writing feedback: sum / sqrt(N).
+    var wet = f64_div(wet_sum, norm);
+
+    # Apply the normalised Hadamard mix: y = (1/sqrt(N)) * H * x.
+    var h = naad_fdn_hadamard8(delayed);
+    var scale = f64_div(F64_ONE, norm);
+
+    # Write input + scaled feedback into each line.
+    i = 0;
+    while (i < MATRIX_FDN_N) {
+        var line = vec_get(buffers, i);
+        var len = vec_len(line);
+        var v = f64_add(input, f64_mul(vec_get(h, i), scale));
+        var wp = (vec_get(positions, i) + 1) % len;
+        vec_set(positions, i, wp);
+        vec_set(line, wp, flush_denormal(v));
+        i = i + 1;
+    }
+
+    var mix = MatrixFdn_mix(self);
+    var dry = f64_sub(F64_ONE, mix);
+    return f64_add(f64_mul(input, dry), f64_mul(wet, mix));
+}
+
+# ================================================================
+# naad_fdn_matrix_process_buffer -- process a vec of samples in place. Ports
+# MatrixFdn::process_buffer.
+# ================================================================
+fn naad_fdn_matrix_process_buffer(self, buffer) {
+    var n = vec_len(buffer);
+    var i = 0;
+    while (i < n) {
+        vec_set(buffer, i, naad_fdn_matrix_process_sample(self, vec_get(buffer, i)));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# naad_fdn_matrix_reset -- clear all delay lines, cursors and damping state to
+# silence. Ports MatrixFdn::reset.
+# ================================================================
+fn naad_fdn_matrix_reset(self) {
+    var buffers = MatrixFdn_buffers(self);
+    var positions = MatrixFdn_positions(self);
+    var damping_state = MatrixFdn_damping_state(self);
+    var i = 0;
+    while (i < MATRIX_FDN_N) {
+        var line = vec_get(buffers, i);
+        var len = vec_len(line);
+        var j = 0;
+        while (j < len) {
+            vec_set(line, j, 0);
+            j = j + 1;
+        }
+        vec_set(positions, i, 0);
+        vec_set(damping_state, i, 0);
+        i = i + 1;
+    }
+    return 0;
+}

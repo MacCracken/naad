@@ -1,0 +1,47 @@
+# smoothing.tcyr -- parity tests for src/smoothing.cyr.
+# Ported from the #[test] blocks in rust-old/src/smoothing.rs. The serde
+# round-trip test is dropped (no serde in Cyrius); every other test is ported
+# one-for-one, with the f32::EPSILON instant/snap tolerances mapped to
+# NAAD_EPSILON.
+
+include "src/error.cyr"
+include "src/smoothing.cyr"
+
+alloc_init();
+
+var C0_01  = 0x3F847AE147AE147B;   # 0.01
+var C44100 = 0x40E5888000000000;   # 44100.0
+var C0_001 = 0x3F50624DD2F1A9FC;   # 0.001
+
+# ================================================================
+test_group("smoother_converges");
+# 0.01 s smoothing at 44.1 kHz reaches the target after 10k samples.
+var s = smoothing_new(C0_01, C44100, 0);
+smoothing_set_target(s, F64_ONE);
+var i = 0;
+var stepped = 0;
+while (i < 10000) {
+    stepped = smoothing_next_value(s);
+    i = i + 1;
+}
+assert(f64_lt(f64_abs(f64_sub(stepped, F64_ONE)), C0_001), "final step equals current");
+assert(f64_lt(f64_abs(f64_sub(smoothing_current(s), F64_ONE)), C0_001), "should converge to target");
+
+# ================================================================
+test_group("smoother_instant");
+# Zero smooth_time -> coeff 1.0 -> first sample jumps to the target.
+var si = smoothing_new(0, C44100, 0);
+smoothing_set_target(si, F64_ONE);
+var val = smoothing_next_value(si);
+assert(f64_lt(f64_abs(f64_sub(val, F64_ONE)), NAAD_EPSILON), "zero smooth_time should be instant");
+
+# ================================================================
+test_group("smoother_snap");
+# snap() jumps current straight to the target, skipping the ramp.
+var ss = smoothing_new(F64_ONE, C44100, 0);
+smoothing_set_target(ss, F64_HALF);
+smoothing_snap(ss);
+assert(f64_lt(f64_abs(f64_sub(smoothing_current(ss), F64_HALF)), NAAD_EPSILON), "snap jumps to target");
+
+var rc = assert_summary();
+syscall(60, rc);

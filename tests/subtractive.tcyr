@@ -1,0 +1,90 @@
+# subtractive.tcyr -- parity tests for src/subtractive.cyr.
+# Ported from the non-serde #[test] blocks in
+# rust-old/src/synth/subtractive.rs (test_serde_roundtrip dropped -- no
+# serde). f32 tolerances widened to f64. Deps included in dependency order;
+# envelope needs hisab, so lib/hisab.cyr comes first.
+
+include "lib/hisab.cyr"
+include "src/error.cyr"
+include "src/dsp_util.cyr"
+include "src/noise.cyr"
+include "src/filter.cyr"
+include "src/envelope.cyr"
+include "src/osc_core.cyr"
+include "src/osc_unison.cyr"
+include "src/osc_sub.cyr"
+include "src/osc_sync.cyr"
+include "src/subtractive.cyr"
+
+alloc_init();
+
+var C0_707 = 0x3FE69FBE76C8B439;   # 0.707
+var C0_01  = 0x3F847AE147AE147B;   # 0.01
+
+var i = 0;
+
+# ================================================================
+# test_basic_output -- Saw @ 440 Hz, cutoff 2000, res 0.707. After note_on a
+# 1024-sample buffer must contain a sample above 0.01 and be all finite.
+# ================================================================
+test_group("basic output");
+var synth = subtractive_new(WAVEFORM_SAW, f64_from(440), f64_from(2000), C0_707, f64_from(44100));
+subtractive_note_on(synth);
+var buf = vec_new();
+i = 0;
+while (i < 1024) { vec_push(buf, 0); i = i + 1; }
+subtractive_fill_buffer(synth, buf);
+var any_out = 0;
+var all_finite = 1;
+i = 0;
+while (i < 1024) {
+    var s = vec_get(buf, i);
+    if (f64_gt(f64_abs(s), C0_01) == 1) { any_out = 1; }
+    if (naad_is_finite(s) == 0) { all_finite = 0; }
+    i = i + 1;
+}
+assert(any_out, "should produce output");
+assert(all_finite, "all samples finite");
+
+# ================================================================
+# test_note_off_decays -- Sine @ 440 Hz, cutoff 5000, res 0.707. After
+# note_on, 5000 samples, note_off, 50000 samples, the voice must be idle.
+# ================================================================
+test_group("note off decays");
+var synth2 = subtractive_new(WAVEFORM_SINE, f64_from(440), f64_from(5000), C0_707, f64_from(44100));
+subtractive_note_on(synth2);
+i = 0;
+while (i < 5000) {
+    var d1 = subtractive_next_sample(synth2);
+    i = i + 1;
+}
+subtractive_note_off(synth2);
+i = 0;
+while (i < 50000) {
+    var d2 = subtractive_next_sample(synth2);
+    i = i + 1;
+}
+assert(subtractive_is_active(synth2) == 0, "should be idle after release");
+
+# ================================================================
+# test_two_oscillators -- Saw @ 440 Hz, cutoff 3000, res 0.707, plus a Square
+# @ 441 Hz mixed at 0.5. A 512-sample buffer must contain a sample above 0.01.
+# ================================================================
+test_group("two oscillators");
+var synth3 = subtractive_new(WAVEFORM_SAW, f64_from(440), f64_from(3000), C0_707, f64_from(44100));
+assert_eq(subtractive_set_osc2(synth3, WAVEFORM_SQUARE, f64_from(441), F64_HALF), ERR_NONE, "set_osc2 ok");
+subtractive_note_on(synth3);
+var buf3 = vec_new();
+i = 0;
+while (i < 512) { vec_push(buf3, 0); i = i + 1; }
+subtractive_fill_buffer(synth3, buf3);
+var any3 = 0;
+i = 0;
+while (i < 512) {
+    if (f64_gt(f64_abs(vec_get(buf3, i)), C0_01) == 1) { any3 = 1; }
+    i = i + 1;
+}
+assert(any3, "two-oscillator voice produces output");
+
+var rc = assert_summary();
+syscall(60, rc);

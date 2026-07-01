@@ -1,0 +1,74 @@
+# acoustics_ambisonics.tcyr -- parity tests for src/acoustics_ambisonics.cyr.
+# Ports the #[test] blocks in rust-old/src/acoustics/ambisonics.rs.
+# (test_serde_roundtrip + test_serde_roundtrip_bformat_sample omitted --
+# no serde in Cyrius.)
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "src/error.cyr"
+include "src/acoustics_ambisonics.cyr"
+
+var TOL_1E2 = 0x3F847AE147AE147B;   # 0.01
+
+# |a - b| < tol  ->  1
+fn approx(a, b, tol) {
+    if (f64_lt(f64_abs(f64_sub(a, b)), tol) == 1) { return 1; }
+    return 0;
+}
+
+alloc_init();
+
+# ================================================================
+test_group("center_position_w_equals_input");
+var enc_c = naad_ambisonics_encoder_new(0, 0);
+var s_c = naad_ambisonics_encode_sample(enc_c, F64_ONE);
+# W = input exactly.
+assert(BFormatSample_w(s_c) == F64_ONE, "W should equal input at center");
+# At (0, 0): X = cos(0)*cos(0) = 1.0
+assert(approx(BFormatSample_x(s_c), F64_ONE, TOL_1E2), "X ~ 1.0 at front center");
+# Y = sin(0)*cos(0) = 0.0
+assert(approx(BFormatSample_y(s_c), 0, TOL_1E2), "Y ~ 0 at center");
+# Z = sin(0) = 0.0
+assert(approx(BFormatSample_z(s_c), 0, TOL_1E2), "Z ~ 0 at center");
+
+# ================================================================
+test_group("ninety_degrees_produces_expected_xy");
+var enc_90 = naad_ambisonics_encoder_new(F64_PI_2, 0);
+var s_90 = naad_ambisonics_encode_sample(enc_90, F64_ONE);
+# At 90 deg: X = cos(pi/2)*cos(0) ~ 0, Y = sin(pi/2)*cos(0) ~ 1
+assert(approx(BFormatSample_x(s_90), 0, TOL_1E2), "X ~ 0 at 90deg");
+assert(approx(BFormatSample_y(s_90), F64_ONE, TOL_1E2), "Y ~ 1 at 90deg");
+
+# ================================================================
+test_group("elevation_produces_z");
+var enc_el = naad_ambisonics_encoder_new(0, F64_PI_2);
+var s_el = naad_ambisonics_encode_sample(enc_el, F64_ONE);
+# At elevation 90deg: Z = sin(pi/2) = 1.0
+assert(approx(BFormatSample_z(s_el), F64_ONE, TOL_1E2), "Z ~ 1 at 90deg elevation");
+
+# ================================================================
+test_group("set_position");
+var enc_sp = naad_ambisonics_encoder_new(0, 0);
+naad_ambisonics_set_position(enc_sp, F64_PI_2, 0);
+var s_sp = naad_ambisonics_encode_sample(enc_sp, F64_ONE);
+assert(approx(BFormatSample_y(s_sp), F64_ONE, TOL_1E2), "Y ~ 1 after set_position 90deg");
+
+# ================================================================
+test_group("zero_input");
+var d03 = f64_div(f64_from(3), f64_from(10));   # 0.3
+var enc_z = naad_ambisonics_encoder_new(F64_HALF, d03);
+var s_z = naad_ambisonics_encode_sample(enc_z, 0);
+assert_eq(BFormatSample_w(s_z), 0, "w == 0 for zero input");
+assert_eq(BFormatSample_x(s_z), 0, "x == 0 for zero input");
+assert_eq(BFormatSample_y(s_z), 0, "y == 0 for zero input");
+assert_eq(BFormatSample_z(s_z), 0, "z == 0 for zero input");
+
+# ================================================================
+# Bonus: azimuth/elevation getters echo constructor args.
+test_group("getters_echo_construction");
+var enc_g = naad_ambisonics_encoder_new(F64_HALF, d03);
+assert(naad_ambisonics_azimuth(enc_g) == F64_HALF, "azimuth getter echoes");
+assert(naad_ambisonics_elevation(enc_g) == d03, "elevation getter echoes");
+
+var rc = assert_summary();
+syscall(60, rc);

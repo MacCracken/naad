@@ -1,0 +1,172 @@
+# delay.cyr -- Delay lines, comb filters, and allpass delay networks.
+#
+# Ports rust-old/src/delay.rs. f32 -> f64 throughout. Rust's serde derive on
+# DelayLine/CombFilter/AllpassDelay is dropped (no serde in Cyrius). The
+# `Vec<f32>` ring buffer becomes a stdlib `vec` holding an f64 bit pattern per
+# slot; usize cursors are plain ints. Methods become free `delay_*`,
+# `comb_*`, `allpass_*` functions taking the struct pointer.
+#
+# Requires (from the build/test unit): stdlib alloc/vec (alloc_init, vec_*),
+# math/ganita (F64_ONE, f64_*), and error.cyr (flush_denormal). The module
+# file itself has no `include` lines.
+
+# ================================================================
+# Float literals (IEEE-754 bit patterns) used by the constructors.
+# ================================================================
+var DELAY_STABLE_HI = 0x3FEFF7CED916872B;   #  0.999 (feedback/coeff clamp hi)
+var DELAY_STABLE_LO = 0xBFEFF7CED916872B;   # -0.999 (feedback/coeff clamp lo)
+
+# ================================================================
+# DelayLine -- circular buffer delay line with fractional read.
+#   buffer            : vec<f32> ring buffer
+#   write_pos         : current write cursor (usize)
+#   max_delay_samples : buffer length in samples (usize, >= 1)
+# ================================================================
+#derive(accessors)
+struct DelayLine { buffer; write_pos; max_delay_samples; }
+
+# Create a delay line with the given maximum delay in samples (min 1).
+#must_use
+fn delay_line_new(max_delay_samples) {
+    var size = max_delay_samples;
+    if (size < 1) { size = 1; }
+    var buffer = vec_new();
+    var i = 0;
+    while (i < size) {
+        vec_push(buffer, 0);
+        i = i + 1;
+    }
+    var dl = alloc(sizeof(DelayLine));
+    DelayLine_set_buffer(dl, buffer);
+    DelayLine_set_write_pos(dl, 0);
+    DelayLine_set_max_delay_samples(dl, size);
+    return dl;
+}
+
+# Write a sample into the delay line, advancing (and wrapping) the cursor.
+#inline
+fn delay_line_write(dl, sample) {
+    var buffer = DelayLine_buffer(dl);
+    var wp = DelayLine_write_pos(dl);
+    var max = DelayLine_max_delay_samples(dl);
+    vec_set(buffer, wp, sample);
+    wp = wp + 1;
+    if (wp >= max) { wp = 0; }
+    DelayLine_set_write_pos(dl, wp);
+    return 0;
+}
+
+# Read from the delay line with fractional delay (linear interpolation).
+# `delay` is in samples (may be fractional); clamped to the valid range.
+#inline
+#must_use
+fn delay_line_read(dl, delay) {
+    var buffer = DelayLine_buffer(dl);
+    var wp = DelayLine_write_pos(dl);
+    var max = DelayLine_max_delay_samples(dl);
+
+    var delay_clamped = f64_clamp(delay, 0, f64_from(max - 1));
+    var delay_floor = f64_floor(delay_clamped);
+    var frac = f64_sub(delay_clamped, delay_floor);
+
+    # (write_pos - delay_floor - 1).rem_euclid(max); max >= 1 so emulate with %.
+    var idx = wp - f64_to(delay_floor) - 1;
+    var read_pos_0 = idx % max;
+    if (read_pos_0 < 0) { read_pos_0 = read_pos_0 + max; }
+    var read_pos_1 = read_pos_0 - 1;
+    if (read_pos_0 == 0) { read_pos_1 = max - 1; }
+
+    var a = f64_mul(vec_get(buffer, read_pos_0), f64_sub(F64_ONE, frac));
+    var b = f64_mul(vec_get(buffer, read_pos_1), frac);
+    return f64_add(a, b);
+}
+
+# Clear the delay line to silence.
+fn delay_line_clear(dl) {
+    var buffer = DelayLine_buffer(dl);
+    var n = vec_len(buffer);
+    var i = 0;
+    while (i < n) {
+        vec_set(buffer, i, 0);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# CombFilter -- feedback comb: y[n] = x[n] + feedback * y[n - delay].
+#   delay_line    : DelayLine pointer
+#   feedback      : feedback coefficient, clamped to [-0.999, 0.999]
+#   delay_samples : delay time in samples (f32)
+# ================================================================
+#derive(accessors)
+struct CombFilter { delay_line; feedback; delay_samples; }
+
+# Create a comb filter; `feedback` clamped to (-1, 1) for stability.
+#must_use
+fn comb_filter_new(delay_samples, feedback) {
+    var cf = alloc(sizeof(CombFilter));
+    CombFilter_set_delay_line(cf, delay_line_new(delay_samples));
+    CombFilter_set_feedback(cf, f64_clamp(feedback, DELAY_STABLE_LO, DELAY_STABLE_HI));
+    CombFilter_set_delay_samples(cf, f64_from(delay_samples));
+    return cf;
+}
+
+# Process a single sample through the comb filter.
+#inline
+#must_use
+fn comb_filter_process_sample(cf, input) {
+    var dl = CombFilter_delay_line(cf);
+    var delayed = delay_line_read(dl, CombFilter_delay_samples(cf));
+    var output = f64_add(input, f64_mul(CombFilter_feedback(cf), flush_denormal(delayed)));
+    delay_line_write(dl, output);
+    return output;
+}
+
+# ================================================================
+# AllpassDelay -- Schroeder allpass (single-buffer):
+#   y[n] = -g * x[n] + x[n - D] + g * y[n - D]
+# The buffer stores x[n] + g * y[n], halving memory vs a dual-buffer design.
+#   delay_line    : DelayLine pointer
+#   coefficient   : allpass coefficient, clamped to [-0.999, 0.999]
+#   delay_samples : delay time in samples (f32)
+# ================================================================
+#derive(accessors)
+struct AllpassDelay { delay_line; coefficient; delay_samples; }
+
+# Create an allpass delay; `coefficient` clamped to (-1, 1) for stability.
+#must_use
+fn allpass_delay_new(delay_samples, coefficient) {
+    var ap = alloc(sizeof(AllpassDelay));
+    AllpassDelay_set_delay_line(ap, delay_line_new(delay_samples));
+    AllpassDelay_set_coefficient(ap, f64_clamp(coefficient, DELAY_STABLE_LO, DELAY_STABLE_HI));
+    AllpassDelay_set_delay_samples(ap, f64_from(delay_samples));
+    return ap;
+}
+
+# Returns the allpass coefficient.
+#inline
+#must_use
+fn allpass_delay_coefficient(ap) {
+    return AllpassDelay_coefficient(ap);
+}
+
+# Returns the delay time in samples.
+#inline
+#must_use
+fn allpass_delay_delay_samples(ap) {
+    return AllpassDelay_delay_samples(ap);
+}
+
+# Process a single sample through the Schroeder allpass.
+#inline
+#must_use
+fn allpass_delay_process_sample(ap, input) {
+    var dl = AllpassDelay_delay_line(ap);
+    var g = AllpassDelay_coefficient(ap);
+    var delayed = delay_line_read(dl, AllpassDelay_delay_samples(ap));
+    var output = f64_add(f64_mul(f64_neg(g), input), delayed);
+    # Store x[n] + g * y[n] in the buffer.
+    delay_line_write(dl, f64_add(input, f64_mul(g, output)));
+    return output;
+}

@@ -1,0 +1,169 @@
+# dynamics.tcyr -- parity tests for src/dynamics.cyr.
+# Ported one-for-one from the non-serde #[test] blocks in
+# rust-old/src/dynamics.rs (test_serde_roundtrip_{compressor,limiter,gate}
+# dropped -- no serde). f32 tolerances widened to f64.
+#
+# DIVERGENCE (noted, not silent): port-audit.md lists `envelope` as a dep of
+# dynamics, but the frozen oracle's dynamics.rs references `envelope` only in
+# a doc comment (the 1.1.0 EnvelopeDetector->LevelDetector rename note) -- no
+# code path uses it. LevelDetector is self-contained. The genuine code deps
+# are dsp_util (amplitude_to_db / db_to_amplitude_lut) + the crate-root
+# flush_denormal (folded into error.cyr). So envelope.cyr (and its hisab
+# prerequisite) are intentionally NOT included here.
+
+include "src/error.cyr"
+include "src/dsp_util.cyr"
+include "src/dynamics.cyr"
+
+alloc_init();
+
+var C0_9    = 0x3feccccccccccccd;   # 0.9
+var C0_01   = 0x3f847ae147ae147b;   # 0.01
+var C0_001  = 0x3f50624dd2f1a9fc;   # 0.001
+var C0_002  = 0x3f60624dd2f1a9fc;   # 0.002
+var C0_3    = 0x3fd3333333333333;   # 0.3
+var C0_04   = 0x3fa47ae147ae147b;   # 0.04
+var C0_005  = 0x3f747ae147ae147b;   # 0.005
+var C0_05   = 0x3fa999999999999a;   # 0.05
+var C0_5    = 0x3fe0000000000000;   # 0.5
+var C0_1    = 0x3fb999999999999a;   # 0.1
+var C6_0    = 0x4018000000000000;   # 6.0
+var C1E_3   = 0x3f50624dd2f1a9fc;   # 1e-3 (== 0.001)
+
+var SR = 44100;
+var drop = 0;
+
+# ================================================================
+test_group("level detector tracks and releases");
+var det = dynamics_level_detector_new(C0_001, C0_01, f64_from(SR));
+var i = 0;
+while (i < 1000) {
+    drop = dynamics_level_detector_process(det, F64_ONE);
+    i = i + 1;
+}
+assert(f64_gt(LevelDetector_current(det), C0_9), "detector should track input");
+i = 0;
+while (i < 10000) {
+    drop = dynamics_level_detector_process(det, 0);
+    i = i + 1;
+}
+assert(f64_lt(LevelDetector_current(det), C0_01), "detector should release");
+
+# ================================================================
+test_group("compressor below threshold");
+var cb = dynamics_compressor_new(f64_neg(f64_from(10)), f64_from(4), C0_001, C0_01, f64_from(SR));
+var cb_out = dynamics_compressor_process_sample(cb, C0_01);
+assert(naad_is_finite(cb_out), "quiet signal output finite");
+
+# ================================================================
+test_group("compressor reduces loud");
+var cr = dynamics_compressor_new(f64_neg(f64_from(20)), f64_from(4), 0, C0_01, f64_from(SR));
+i = 0;
+while (i < 1000) {
+    drop = dynamics_compressor_process_sample(cr, F64_ONE);
+    i = i + 1;
+}
+var cr_out = dynamics_compressor_process_sample(cr, F64_ONE);
+assert(f64_lt(cr_out, F64_ONE), "compressor should reduce loud signals");
+
+# ================================================================
+test_group("compressor soft knee");
+var ck = dynamics_compressor_new(f64_neg(f64_from(20)), f64_from(4), C0_001, C0_01, f64_from(SR));
+Compressor_set_knee_db(ck, C6_0);
+var knee_gain = dynamics_compressor_compute_gain_db(ck, f64_neg(f64_from(17)));
+assert(f64_lt(knee_gain, 0), "soft knee should apply some reduction");
+assert(f64_gt(knee_gain, f64_neg(f64_from(3))), "soft knee reduction should be gentle");
+
+# ================================================================
+test_group("limiter reduces signal");
+var lim = dynamics_limiter_new(f64_neg(C0_1), C0_01, f64_from(SR));
+i = 0;
+while (i < 1000) {
+    drop = dynamics_limiter_process_sample(lim, F64_TWO);
+    i = i + 1;
+}
+var lim_out = dynamics_limiter_process_sample(lim, F64_TWO);
+assert(f64_lt(lim_out, F64_TWO), "limiter should reduce signal");
+
+# ================================================================
+test_group("noise gate silences quiet");
+var gs = dynamics_noise_gate_new(f64_neg(f64_from(40)), C0_001, C0_01, C0_01, f64_from(SR));
+i = 0;
+while (i < 10000) {
+    drop = dynamics_noise_gate_process_sample(gs, C0_001);
+    i = i + 1;
+}
+var gs_out = dynamics_noise_gate_process_sample(gs, C0_001);
+assert(f64_lt(f64_abs(gs_out), C0_002), "gate should attenuate quiet signal");
+
+# ================================================================
+test_group("noise gate passes loud");
+var gl = dynamics_noise_gate_new(f64_neg(f64_from(40)), 0, C0_01, C0_01, f64_from(SR));
+i = 0;
+while (i < 2000) {
+    drop = dynamics_noise_gate_process_sample(gl, C0_5);
+    i = i + 1;
+}
+var gl_out = dynamics_noise_gate_process_sample(gl, C0_5);
+assert(f64_gt(gl_out, C0_3), "gate should pass loud signal");
+
+# ================================================================
+test_group("compressor ratio one is unity");
+var cu = dynamics_compressor_new(f64_neg(f64_from(20)), F64_ONE, 0, C0_01, f64_from(SR));
+i = 0;
+while (i < 2000) {
+    drop = dynamics_compressor_process_sample(cu, F64_ONE);
+    i = i + 1;
+}
+var cu_out = dynamics_compressor_process_sample(cu, F64_ONE);
+assert(f64_lt(f64_abs(f64_sub(cu_out, F64_ONE)), C1E_3), "ratio=1.0 must be unity gain");
+
+# ================================================================
+test_group("noise gate hold timer keeps gate open");
+var hold = C0_1;   # 100 ms
+var gh = dynamics_noise_gate_new(f64_neg(f64_from(10)), 0, hold, C0_001, f64_from(SR));
+i = 0;
+while (i < 1000) {
+    drop = dynamics_noise_gate_process_sample(gh, F64_ONE);
+    i = i + 1;
+}
+i = 0;
+while (i < 500) {
+    drop = dynamics_noise_gate_process_sample(gh, C0_05);
+    i = i + 1;
+}
+var mid_hold = dynamics_noise_gate_process_sample(gh, C0_05);
+assert(f64_gt(mid_hold, C0_04), "gate must remain open during hold window");
+var hold_samples = f64_to(f64_mul(hold, f64_from(SR)));
+var runs = hold_samples + 5000;
+i = 0;
+while (i < runs) {
+    drop = dynamics_noise_gate_process_sample(gh, C0_05);
+    i = i + 1;
+}
+var after_hold = dynamics_noise_gate_process_sample(gh, C0_05);
+assert(f64_lt(after_hold, C0_005), "gate must close after hold expires");
+
+# ================================================================
+test_group("limiter ceiling exact match passes through");
+var ceiling_db = f64_neg(f64_from(3));
+var amp_at_ceiling = db_to_amplitude(ceiling_db);   # 10^(ceiling_db/20)
+var le = dynamics_limiter_new(ceiling_db, C0_01, f64_from(SR));
+i = 0;
+while (i < 2000) {
+    drop = dynamics_limiter_process_sample(le, amp_at_ceiling);
+    i = i + 1;
+}
+var out_at = dynamics_limiter_process_sample(le, amp_at_ceiling);
+assert(f64_lt(f64_abs(f64_sub(out_at, amp_at_ceiling)), C1E_3), "input at ceiling passes through");
+var above = f64_mul(amp_at_ceiling, F64_TWO);
+i = 0;
+while (i < 2000) {
+    drop = dynamics_limiter_process_sample(le, above);
+    i = i + 1;
+}
+var out_above = dynamics_limiter_process_sample(le, above);
+assert(f64_lt(out_above, above), "input above ceiling must be reduced");
+
+var rc = assert_summary();
+syscall(60, rc);

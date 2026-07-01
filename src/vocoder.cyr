@@ -1,0 +1,183 @@
+# vocoder.cyr -- Channel vocoder.
+#
+# Ports rust-old/src/synth/vocoder.rs. f32 -> f64 throughout. Splits both a
+# modulator (voice) and carrier (synth) into log-spaced frequency bands with
+# bandpass filters, extracts each modulator band's envelope, and applies it
+# to the corresponding carrier band -- the classic "talking synth" effect.
+#
+# The `SmallVec<[VocoderBand; 16]>` band store becomes a stdlib `vec` of
+# VocoderBand struct pointers. Each band owns two BiquadFilter pointers
+# (analysis/synthesis) from filter.cyr. Methods become free `vocoder_*`
+# functions; serde derives/tests are dropped. Constructors return the struct
+# pointer on success, or a negative ERR_* on invalid parameters.
+#
+# Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE/TWO/
+# HALF, f64_min/clamp), error.cyr (flush_denormal, naad_is_finite, ERR_*),
+# and filter.cyr (filter_biquad_new, filter_biquad_process_sample, FILTER_*).
+# The module file itself has no `include` lines.
+
+# ================================================================
+# Non-integer float literals (IEEE-754 bit patterns).
+# ================================================================
+var VOCODER_C0_005 = 0x3F747AE147AE147B;   # 0.005 (~5ms attack time constant)
+var VOCODER_C0_02  = 0x3F947AE147AE147B;   # 0.020 (~20ms release time constant)
+var VOCODER_C0_49  = 0x3FDF5C28F5C28F5C;   # 0.49  (Nyquist safety fraction)
+
+# ================================================================
+# VocoderBand -- one frequency band.
+#   analysis_filter   : BiquadFilter pointer (bandpass, modulator path)
+#   synthesis_filter  : BiquadFilter pointer (bandpass, carrier path)
+#   envelope_follower : f64 envelope follower state
+#   attack_coeff      : f64 smoothing coeff for a rising envelope
+#   release_coeff     : f64 smoothing coeff for a falling envelope
+# ================================================================
+#derive(accessors)
+struct VocoderBand {
+    analysis_filter;
+    synthesis_filter;
+    envelope_follower;
+    attack_coeff;
+    release_coeff;
+}
+
+# ================================================================
+# Vocoder -- channel vocoder with a configurable number of bands.
+#   bands       : vec of VocoderBand pointers
+#   sample_rate : f64 Hz
+# ================================================================
+#derive(accessors)
+struct Vocoder {
+    bands;
+    sample_rate;
+}
+
+# ================================================================
+# vocoder_band_process -- process one sample through a band. Returns the
+# carrier bandpassed and amplitude-modulated by the modulator's envelope.
+# Ports VocoderBand::process.
+# ================================================================
+#inline
+#must_use
+fn vocoder_band_process(self, modulator, carrier) {
+    # Bandpass the modulator and extract its envelope.
+    var mod_filtered = filter_biquad_process_sample(VocoderBand_analysis_filter(self), modulator);
+    var mod_level = f64_abs(mod_filtered);
+
+    # Envelope follower with separate attack/release.
+    var env = VocoderBand_envelope_follower(self);
+    var coeff = VocoderBand_release_coeff(self);
+    if (f64_gt(mod_level, env) == 1) {
+        coeff = VocoderBand_attack_coeff(self);
+    }
+    var new_env = flush_denormal(f64_add(env, f64_mul(coeff, f64_sub(mod_level, env))));
+    VocoderBand_set_envelope_follower(self, new_env);
+
+    # Bandpass the carrier and apply the modulator envelope.
+    var car_filtered = filter_biquad_process_sample(VocoderBand_synthesis_filter(self), carrier);
+    return f64_mul(car_filtered, new_env);
+}
+
+# ================================================================
+# vocoder_new -- create a vocoder with logarithmically-spaced bands.
+# Returns the struct pointer on success, or a negative ERR_* on invalid
+# sample_rate / num_bands / frequency range (or a propagated filter error).
+# Ports Vocoder::new.
+# ================================================================
+#must_use
+fn vocoder_new(num_bands, low_freq, high_freq, sample_rate) {
+    if (f64_le(sample_rate, 0) == 1) { return ERR_INVALID_SAMPLE_RATE; }
+    if (naad_is_finite(sample_rate) == 0) { return ERR_INVALID_SAMPLE_RATE; }
+    if (num_bands == 0) { return ERR_INVALID_PARAMETER; }
+    if (f64_le(low_freq, 0) == 1) { return ERR_INVALID_PARAMETER; }
+    if (f64_le(high_freq, low_freq) == 1) { return ERR_INVALID_PARAMETER; }
+
+    var log_low = f64_ln(low_freq);
+    var log_high = f64_ln(high_freq);
+    var step = 0;
+    if (num_bands > 1) {
+        step = f64_div(f64_sub(log_high, log_low), f64_from(num_bands - 1));
+    }
+
+    # Envelope follower coefficients: ~5ms attack, ~20ms release.
+    var attack_coeff = f64_sub(F64_ONE, f64_exp(f64_div(f64_neg(F64_ONE), f64_mul(VOCODER_C0_005, sample_rate))));
+    var release_coeff = f64_sub(F64_ONE, f64_exp(f64_div(f64_neg(F64_ONE), f64_mul(VOCODER_C0_02, sample_rate))));
+
+    var nyq_safe = f64_mul(sample_rate, VOCODER_C0_49);
+    var bands = vec_new();
+    var i = 0;
+    while (i < num_bands) {
+        var center = f64_exp(f64_add(log_low, f64_mul(step, f64_from(i))));
+        # Clamp to Nyquist safety.
+        center = f64_min(center, nyq_safe);
+        # Q scales with band spacing: Q ~ 1/(exp(step)-1) so adjacent bands
+        # overlap at their -3dB points; single-band fallback Q = 4.0.
+        var q = f64_from(4);
+        if (f64_gt(step, 0) == 1) {
+            q = f64_clamp(f64_div(F64_ONE, f64_sub(f64_exp(step), F64_ONE)), F64_ONE, f64_from(20));
+        }
+
+        var analysis_filter = filter_biquad_new(FILTER_BANDPASS, sample_rate, center, q);
+        if (naad_is_err(analysis_filter) == 1) { return analysis_filter; }
+        var synthesis_filter = filter_biquad_new(FILTER_BANDPASS, sample_rate, center, q);
+        if (naad_is_err(synthesis_filter) == 1) { return synthesis_filter; }
+
+        var band = alloc(sizeof(VocoderBand));
+        VocoderBand_set_analysis_filter(band, analysis_filter);
+        VocoderBand_set_synthesis_filter(band, synthesis_filter);
+        VocoderBand_set_envelope_follower(band, 0);
+        VocoderBand_set_attack_coeff(band, attack_coeff);
+        VocoderBand_set_release_coeff(band, release_coeff);
+        vec_push(bands, band);
+        i = i + 1;
+    }
+
+    var self = alloc(sizeof(Vocoder));
+    Vocoder_set_bands(self, bands);
+    Vocoder_set_sample_rate(self, sample_rate);
+    return self;
+}
+
+# ================================================================
+# vocoder_process_sample -- process one (modulator, carrier) pair through
+# all bands. Returns the sum of all band outputs. Ports Vocoder::process_sample.
+# ================================================================
+#inline
+#must_use
+fn vocoder_process_sample(self, modulator, carrier) {
+    var bands = Vocoder_bands(self);
+    var n = vec_len(bands);
+    var sum = 0;
+    var i = 0;
+    while (i < n) {
+        sum = f64_add(sum, vocoder_band_process(vec_get(bands, i), modulator, carrier));
+        i = i + 1;
+    }
+    return sum;
+}
+
+# ================================================================
+# vocoder_process_buffer -- process a buffer of modulator/carrier pairs into
+# `output`. Iterates over min(len(modulator), len(carrier), len(output)).
+# Ports Vocoder::process_buffer.
+# ================================================================
+fn vocoder_process_buffer(self, modulator, carrier, output) {
+    var len = vec_len(modulator);
+    var lc = vec_len(carrier);
+    var lo = vec_len(output);
+    if (lc < len) { len = lc; }
+    if (lo < len) { len = lo; }
+    var i = 0;
+    while (i < len) {
+        vec_set(output, i, vocoder_process_sample(self, vec_get(modulator, i), vec_get(carrier, i)));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# vocoder_num_bands -- number of bands. Ports Vocoder::num_bands.
+# ================================================================
+#must_use
+fn vocoder_num_bands(self) {
+    return vec_len(Vocoder_bands(self));
+}

@@ -1,0 +1,229 @@
+# oscillator.tcyr -- parity tests for the oscillator cluster:
+# src/osc_core.cyr, src/osc_unison.cyr, src/osc_sub.cyr, src/osc_sync.cyr.
+# Ports every non-serde #[test] from the four oracle files
+# (rust-old/src/oscillator/{core,unison,sub,sync}.rs), grouped by source
+# module. serde round-trip tests dropped (no serde). f32 tolerances widened
+# to f64. Noise waveforms embed a real NoiseGenerator (noise.cyr): the noise
+# group asserts Pink/Brown are distinct from White (parity, not a stand-in).
+
+include "src/error.cyr"
+include "src/dsp_util.cyr"
+include "src/noise.cyr"
+include "src/osc_core.cyr"
+include "src/osc_unison.cyr"
+include "src/osc_sub.cyr"
+include "src/osc_sync.cyr"
+
+alloc_init();
+
+var C0_01  = 0x3F847AE147AE147B;   # 0.01
+var C0_001 = 0x3F50624DD2F1A9FC;   # 0.001
+var C0_1   = 0x3FB999999999999A;   # 0.1
+var C1_01  = 0x3FF028F5C28F5C29;   # 1.01
+
+var i = 0;
+
+# ================================================================
+# core: sine range -- 1000 samples in [-1, 1].
+# ================================================================
+test_group("core: sine range");
+var sine = osc_new(WAVEFORM_SINE, f64_from(440), f64_from(44100));
+var sine_ok = 1;
+i = 0;
+while (i < 1000) {
+    var s = osc_next_sample(sine);
+    if (f64_ge(s, f64_neg(F64_ONE)) == 0) { sine_ok = 0; }
+    if (f64_le(s, F64_ONE) == 0) { sine_ok = 0; }
+    i = i + 1;
+}
+assert(sine_ok, "sine samples in [-1,1]");
+
+# ================================================================
+# core: saw range -- 1000 samples in [-1.5, 1.5].
+# ================================================================
+test_group("core: saw range");
+var saw = osc_new(WAVEFORM_SAW, f64_from(440), f64_from(44100));
+var saw_ok = 1;
+i = 0;
+while (i < 1000) {
+    var ss = osc_next_sample(saw);
+    if (f64_ge(ss, f64_neg(F64_ONE_HALF)) == 0) { saw_ok = 0; }
+    if (f64_le(ss, F64_ONE_HALF) == 0) { saw_ok = 0; }
+    i = i + 1;
+}
+assert(saw_ok, "saw samples in [-1.5,1.5]");
+
+# ================================================================
+# core: invalid frequency -- negative, zero, above-Nyquist all error.
+# ================================================================
+test_group("core: invalid frequency");
+assert(naad_is_err(osc_new(WAVEFORM_SINE, f64_neg(F64_ONE), f64_from(44100))), "freq -1 err");
+assert(naad_is_err(osc_new(WAVEFORM_SINE, 0, f64_from(44100))), "freq 0 err");
+assert(naad_is_err(osc_new(WAVEFORM_SINE, f64_from(25000), f64_from(44100))), "freq above nyquist err");
+
+# ================================================================
+# core: invalid sample rate -- zero and negative error.
+# ================================================================
+test_group("core: invalid sample rate");
+assert(naad_is_err(osc_new(WAVEFORM_SINE, f64_from(440), 0)), "sr 0 err");
+assert(naad_is_err(osc_new(WAVEFORM_SINE, f64_from(440), f64_neg(F64_ONE))), "sr -1 err");
+
+# ================================================================
+# core: set frequency -- valid ok, zero errors.
+# ================================================================
+test_group("core: set frequency");
+var setf = osc_new(WAVEFORM_SINE, f64_from(440), f64_from(44100));
+assert_eq(osc_set_frequency(setf, f64_from(880)), ERR_NONE, "set_frequency(880) ok");
+assert(naad_is_err(osc_set_frequency(setf, 0)), "set_frequency(0) err");
+
+# ================================================================
+# core: fill buffer -- writes at least one nonzero sample.
+# ================================================================
+test_group("core: fill buffer");
+var fb = osc_new(WAVEFORM_SINE, f64_from(440), f64_from(44100));
+var fbuf = vec_new();
+i = 0;
+while (i < 128) { vec_push(fbuf, 0); i = i + 1; }
+osc_fill_buffer(fb, fbuf);
+var fb_any = 0;
+i = 0;
+while (i < 128) {
+    if (vec_get(fbuf, i) != 0) { fb_any = 1; }
+    i = i + 1;
+}
+assert(fb_any, "fill_buffer wrote a nonzero sample");
+
+# ================================================================
+# core: polyblep -- ~0 in the flat interior, nonzero near a discontinuity.
+# ================================================================
+test_group("core: polyblep");
+assert(f64_lt(f64_abs(osc_polyblep(F64_HALF, C0_01)), NAAD_EPSILON), "polyblep(0.5,0.01) ~ 0");
+assert(f64_gt(f64_abs(osc_polyblep(C0_001, C0_01)), 0), "polyblep(0.001,0.01) nonzero");
+
+# ================================================================
+# core: noise waveform -- next_sample is finite.
+# ================================================================
+test_group("core: noise finite");
+var wn = osc_new(WAVEFORM_WHITE_NOISE, C0_1, f64_from(44100));
+assert(naad_is_finite(osc_next_sample(wn)), "white noise sample finite");
+# Parity: Pink (Voss-McCartney) and Brown (integrated) are distinct algorithms,
+# NOT a white-noise stand-in. Same seed 42 → different first samples per type.
+var wn2 = osc_new(WAVEFORM_WHITE_NOISE, C0_1, f64_from(44100));
+var pn = osc_new(WAVEFORM_PINK_NOISE, C0_1, f64_from(44100));
+var bn = osc_new(WAVEFORM_BROWN_NOISE, C0_1, f64_from(44100));
+var w0 = osc_next_sample(wn2);
+var p0 = osc_next_sample(pn);
+var b0 = osc_next_sample(bn);
+assert(naad_is_finite(p0), "pink noise sample finite");
+assert(naad_is_finite(b0), "brown noise sample finite");
+assert(f64_gt(f64_abs(f64_sub(p0, w0)), NAAD_EPSILON), "pink differs from white (real Voss-McCartney)");
+assert(f64_gt(f64_abs(f64_sub(b0, w0)), NAAD_EPSILON), "brown differs from white (real integration)");
+
+# ================================================================
+# unison: mono -- 1024 samples all finite, at least one nonzero.
+# ================================================================
+test_group("unison: mono");
+var um = unison_new(WAVEFORM_SAW, f64_from(440), 4, f64_from(10), f64_from(44100));
+var umbuf = vec_new();
+i = 0;
+while (i < 1024) { vec_push(umbuf, 0); i = i + 1; }
+unison_fill_buffer(um, umbuf);
+var um_finite = 1;
+var um_any = 0;
+i = 0;
+while (i < 1024) {
+    var uv = vec_get(umbuf, i);
+    if (naad_is_finite(uv) == 0) { um_finite = 0; }
+    if (uv != 0) { um_any = 1; }
+    i = i + 1;
+}
+assert(um_finite, "unison mono all finite");
+assert(um_any, "unison mono any nonzero");
+
+# ================================================================
+# unison: stereo spread -- with spread=1 the channels differ.
+# ================================================================
+test_group("unison: stereo spread");
+var us = unison_new(WAVEFORM_SAW, f64_from(440), 4, f64_from(10), f64_from(44100));
+unison_set_stereo_spread(us, F64_ONE);
+var usl = vec_new();
+var usr = vec_new();
+i = 0;
+while (i < 512) { vec_push(usl, 0); vec_push(usr, 0); i = i + 1; }
+unison_fill_buffer_stereo(us, usl, usr);
+var sdiff = 0;
+i = 0;
+while (i < 512) {
+    sdiff = f64_add(sdiff, f64_abs(f64_sub(vec_get(usl, i), vec_get(usr, i))));
+    i = i + 1;
+}
+assert(f64_gt(sdiff, C0_01), "stereo channels differ with spread=1");
+
+# ================================================================
+# unison: single voice -- 100 samples in [-1.01, 1.01].
+# ================================================================
+test_group("unison: single voice");
+var uv1 = unison_new(WAVEFORM_SINE, f64_from(440), 1, 0, f64_from(44100));
+var uv1_ok = 1;
+i = 0;
+while (i < 100) {
+    var vs = unison_next_sample(uv1);
+    if (f64_ge(vs, f64_neg(C1_01)) == 0) { uv1_ok = 0; }
+    if (f64_le(vs, C1_01) == 0) { uv1_ok = 0; }
+    i = i + 1;
+}
+assert(uv1_ok, "single-voice unison in [-1.01,1.01]");
+
+# ================================================================
+# sub: oscillator -- 1024 samples all finite, at least one nonzero.
+# ================================================================
+test_group("sub: oscillator");
+var sub = subosc_new(WAVEFORM_SQUARE, f64_from(440), SUBOCT_DOWN1, f64_from(44100));
+var subbuf = vec_new();
+i = 0;
+while (i < 1024) { vec_push(subbuf, 0); i = i + 1; }
+subosc_fill_buffer(sub, subbuf);
+var sub_finite = 1;
+var sub_any = 0;
+i = 0;
+while (i < 1024) {
+    var bv = vec_get(subbuf, i);
+    if (naad_is_finite(bv) == 0) { sub_finite = 0; }
+    if (bv != 0) { sub_any = 1; }
+    i = i + 1;
+}
+assert(sub_finite, "sub all finite");
+assert(sub_any, "sub any nonzero");
+
+# ================================================================
+# sub: octave frequencies -- Down1 = 220 Hz, Down2 = 110 Hz (base 440).
+# ================================================================
+test_group("sub: octave frequencies");
+var sub1 = subosc_new(WAVEFORM_SINE, f64_from(440), SUBOCT_DOWN1, f64_from(44100));
+var sub2 = subosc_new(WAVEFORM_SINE, f64_from(440), SUBOCT_DOWN2, f64_from(44100));
+assert(f64_lt(f64_abs(f64_sub(osc_frequency(SubOscillator_osc(sub1)), f64_from(220))), C0_01), "Down1 = 220 Hz");
+assert(f64_lt(f64_abs(f64_sub(osc_frequency(SubOscillator_osc(sub2)), f64_from(110))), C0_01), "Down2 = 110 Hz");
+
+# ================================================================
+# sync: resets slave -- 1024 samples all finite, at least one nonzero.
+# ================================================================
+test_group("sync: resets slave");
+var sync = hardsync_new(f64_from(440), f64_from(880), WAVEFORM_SAW, f64_from(44100));
+var syncbuf = vec_new();
+i = 0;
+while (i < 1024) { vec_push(syncbuf, 0); i = i + 1; }
+hardsync_fill_buffer(sync, syncbuf);
+var sync_finite = 1;
+var sync_any = 0;
+i = 0;
+while (i < 1024) {
+    var yv = vec_get(syncbuf, i);
+    if (naad_is_finite(yv) == 0) { sync_finite = 0; }
+    if (yv != 0) { sync_any = 1; }
+    i = i + 1;
+}
+assert(sync_finite, "hard sync all finite");
+assert(sync_any, "hard sync any nonzero");
+
+var rc = assert_summary();
+syscall(60, rc);

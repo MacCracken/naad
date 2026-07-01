@@ -1,0 +1,160 @@
+# dsp_util.tcyr -- parity tests for src/dsp_util.cyr (scalar core).
+# Ported from the non-`synthesis`-gated #[test] blocks in
+# rust-old/src/dsp_util.rs. The FFT/spline/pitch tests follow the deferred
+# hisab-interop functions and land with them (tracked in port-audit.md).
+
+include "src/error.cyr"
+include "src/dsp_util.cyr"
+
+alloc_init();
+
+var C0_5   = 0x3FE0000000000000;   # 0.5
+var C0_25  = 0x3FD0000000000000;   # 0.25
+var CN0_5  = 0xBFE0000000000000;   # -0.5
+var C0_8   = 0x3FE999999999999A;   # 0.8
+var C0_3   = 0x3FD3333333333333;   # 0.3
+var C0_9   = 0x3FECCCCCCCCCCCCD;   # 0.9
+var C0_01  = 0x3F847AE147AE147B;   # 0.01
+var C0_05  = 0x3FA999999999999A;   # 0.05
+var C1E5   = 0x3EE4F8B588E368F1;   # 1e-5
+var C0_005 = 0x3F747AE147AE147B;   # 0.005
+var C2_75  = 0x4006000000000000;   # 2.75
+var C0_75  = 0x3FE8000000000000;   # 0.75
+
+# ================================================================
+test_group("db conversions");
+# roundtrip 0.5 -> dB -> back
+var db05 = amplitude_to_db(C0_5);
+var back = db_to_amplitude(db05);
+assert(f64_lt(f64_abs(f64_sub(C0_5, back)), C1E5), "dB roundtrip 0.5");
+# amplitude_to_db(1.0) == 0.0
+assert(f64_lt(f64_abs(amplitude_to_db(F64_ONE)), C1E5), "amp_to_db(1.0) ~ 0");
+# db_to_amplitude(0.0) == 1.0
+assert(f64_lt(f64_abs(f64_sub(db_to_amplitude(0), F64_ONE)), C1E5), "db_to_amp(0) ~ 1");
+# neg-inf endpoints
+assert_eq(amplitude_to_db(0), NAAD_NEG_INF, "amp_to_db(0) = -inf");
+assert_eq(db_to_amplitude(NAAD_NEG_INF), 0, "db_to_amp(-inf) = 0");
+
+# ================================================================
+test_group("normalize / rms / peak");
+var buf = vec_new();
+vec_push(buf, C0_5); vec_push(buf, f64_neg(F64_ONE)); vec_push(buf, C0_25);
+normalize(buf);
+assert(f64_lt(f64_abs(f64_sub(f64_abs(vec_get(buf, 1)), F64_ONE)), NAAD_EPSILON), "normalize peak -> 1");
+# silence stays silent
+var sil = vec_new();
+vec_push(sil, 0); vec_push(sil, 0); vec_push(sil, 0);
+normalize(sil);
+assert_eq(vec_get(sil, 0), 0, "normalize silence stays 0");
+# rms of [1;100] == 1, rms empty == 0
+var ones = vec_new();
+var oi = 0;
+while (oi < 100) { vec_push(ones, F64_ONE); oi = oi + 1; }
+assert(f64_lt(f64_abs(f64_sub(rms(ones), F64_ONE)), NAAD_EPSILON), "rms ones = 1");
+var empty = vec_new();
+assert_eq(rms(empty), 0, "rms empty = 0");
+# peak of [0.5,-0.8,0.3] == 0.8
+var pk = vec_new();
+vec_push(pk, C0_5); vec_push(pk, f64_neg(C0_8)); vec_push(pk, C0_3);
+assert(f64_lt(f64_abs(f64_sub(peak(pk), C0_8)), NAAD_EPSILON), "peak = 0.8");
+
+# ================================================================
+test_group("clip / interp / crossfade");
+assert_eq(hard_limit(F64_TWO, F64_ONE), F64_ONE, "hard_limit(2,1)=1");
+assert_eq(hard_limit(f64_neg(F64_TWO), F64_ONE), f64_neg(F64_ONE), "hard_limit(-2,1)=-1");
+assert_eq(hard_limit(C0_5, F64_ONE), C0_5, "hard_limit(0.5,1)=0.5");
+assert(f64_lt(f64_abs(f64_sub(soft_clip_tanh(f64_from(10), F64_ONE), F64_ONE)), C0_01), "soft_clip tanh(10)~1");
+assert(f64_lt(f64_abs(f64_sub(lerp(0, F64_ONE, C0_5), C0_5)), NAAD_EPSILON), "lerp midpoint");
+# hermite on straight line 0,1,2,3 at t=0.5 -> 1.5
+assert(f64_lt(f64_abs(f64_sub(hermite_interpolate(0, F64_ONE, F64_TWO, f64_from(3), C0_5), DSP_C1_5)), C0_01), "hermite linear -> 1.5");
+assert(f64_lt(f64_abs(f64_sub(crossfade_equal_power(F64_ONE, 0, 0), F64_ONE)), C0_01), "crossfade dry");
+assert(f64_lt(f64_abs(f64_sub(crossfade_equal_power(0, F64_ONE, F64_ONE), F64_ONE)), C0_01), "crossfade wet");
+
+# ================================================================
+test_group("windows");
+var hann = vec_new();
+var hi = 0;
+while (hi < 64) { vec_push(hann, F64_ONE); hi = hi + 1; }
+apply_hann_window(hann);
+assert(f64_lt(f64_abs(vec_get(hann, 0)), C0_01), "hann[0] ~ 0");
+assert(f64_lt(f64_abs(vec_get(hann, 63)), C0_05), "hann[63] ~ 0");
+assert(f64_gt(vec_get(hann, 32), C0_9), "hann[32] > 0.9");
+var black = vec_new();
+var bi = 0;
+while (bi < 64) { vec_push(black, F64_ONE); bi = bi + 1; }
+apply_blackman_window(black);
+assert(f64_lt(f64_abs(vec_get(black, 0)), C0_01), "blackman[0] ~ 0");
+assert(f64_gt(vec_get(black, 32), C0_9), "blackman[32] > 0.9");
+
+# ================================================================
+test_group("eval_polynomial");
+# p(x) = 1 + 2x + 3x^2
+var coeffs = vec_new();
+vec_push(coeffs, F64_ONE); vec_push(coeffs, F64_TWO); vec_push(coeffs, f64_from(3));
+assert(f64_lt(f64_abs(f64_sub(eval_polynomial(coeffs, 0), F64_ONE)), C1E5), "p(0)=1");
+assert(f64_lt(f64_abs(f64_sub(eval_polynomial(coeffs, C0_5), C2_75)), C1E5), "p(0.5)=2.75");
+assert(f64_lt(f64_abs(f64_sub(eval_polynomial(coeffs, CN0_5), C0_75)), C1E5), "p(-0.5)=0.75");
+assert(f64_lt(f64_abs(f64_sub(eval_polynomial(coeffs, F64_TWO), f64_from(17))), C1E5), "p(2)=17");
+var noco = vec_new();
+assert_eq(eval_polynomial(noco, F64_ONE), 0, "empty poly = 0");
+
+# ================================================================
+test_group("db LUT");
+# LUT within 0.5% of the powf reference across [-80, +20] dB.
+var lut_ok = 1;
+var k = 0;
+while (k <= 200) {
+    var db = f64_add(DB_LUT_MIN, f64_mul(f64_from(k), C0_5));   # -80 + k*0.5
+    var exact = db_to_amplitude(db);
+    var lut = db_to_amplitude_lut(db);
+    var rel = f64_abs(f64_div(f64_sub(lut, exact), exact));
+    if (f64_ge(rel, C0_005) == 1) { lut_ok = 0; }
+    k = k + 1;
+}
+assert(lut_ok, "dB LUT within 0.5% of powf reference");
+# clamps
+assert_eq(db_to_amplitude_lut(f64_neg(f64_from(200))), db_to_amplitude_lut(DB_LUT_MIN), "LUT clamps low");
+assert_eq(db_to_amplitude_lut(f64_from(60)), db_to_amplitude_lut(DB_LUT_MAX), "LUT clamps high");
+
+# ================================================================
+test_group("xorshift32 PRNG");
+# zero-state guard
+var st = alloc(8);
+store64(st, 0);
+var v0 = xorshift32(st);
+assert(v0 != 0, "zero-state guard -> non-zero output");
+assert(load64(st) != 0, "state not left zero");
+# deterministic: two identical seeds track each other
+var sa = alloc(8); store64(sa, 42);
+var sb = alloc(8); store64(sb, 42);
+var det = 1;
+var d = 0;
+while (d < 100) {
+    if (xorshift32(sa) != xorshift32(sb)) { det = 0; }
+    d = d + 1;
+}
+assert(det, "same seed -> identical stream");
+# signed range [-1,1], unit range [0,1]
+var ss = alloc(8); store64(ss, 12345);
+var srange = 1;
+var r = 0;
+while (r < 10000) {
+    var sv = xorshift32_signed_f32(ss);
+    if (f64_lt(sv, f64_neg(F64_ONE)) == 1) { srange = 0; }
+    if (f64_gt(sv, F64_ONE) == 1) { srange = 0; }
+    r = r + 1;
+}
+assert(srange, "signed PRNG in [-1,1]");
+var us = alloc(8); store64(us, 67890);
+var urange = 1;
+var u = 0;
+while (u < 10000) {
+    var uv = xorshift32_unit_f32(us);
+    if (f64_lt(uv, 0) == 1) { urange = 0; }
+    if (f64_gt(uv, F64_ONE) == 1) { urange = 0; }
+    u = u + 1;
+}
+assert(urange, "unit PRNG in [0,1]");
+
+var rc = assert_summary();
+syscall(60, rc);

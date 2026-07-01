@@ -1,0 +1,405 @@
+# filter.cyr -- Biquad and state variable filters.
+#
+# Ports rust-old/src/filter.rs. f32 -> f64 throughout. Implements the Audio
+# EQ Cookbook (Robert Bristow-Johnson) biquad coefficient formulas plus a
+# Cytomic/Simper state-variable filter with simultaneous LP/HP/BP/Notch
+# outputs. The `FilterType` enum becomes integer constants; serde derives are
+# dropped; validators return integer ERR_* codes and constructors return the
+# struct pointer on success (or a negative ERR_* on failure). Methods become
+# free `filter_*` functions taking the struct pointer.
+#
+# Requires (from the build/test unit): stdlib alloc/vec + math/ganita
+# (F64_ONE/TWO/HALF/PI/TAU, f64_pow) and error.cyr (validate_frequency/
+# validate_sample_rate, flush_denormal, naad_is_finite, ERR_*). No `include`.
+
+# ================================================================
+# FilterType -> integer constants (was `enum FilterType`).
+# ================================================================
+var FILTER_LOWPASS   = 0;
+var FILTER_HIGHPASS  = 1;
+var FILTER_BANDPASS  = 2;
+var FILTER_NOTCH     = 3;
+var FILTER_ALLPASS   = 4;
+var FILTER_LOWSHELF  = 5;
+var FILTER_HIGHSHELF = 6;
+var FILTER_PEAK      = 7;
+
+# ================================================================
+# BiquadFilter -- Direct Form II Transposed biquad.
+#   b0,b1,b2,a1,a2 : coefficients (normalized by a0)
+#   z1,z2          : state (delay elements)
+#   filter_type    : FILTER_* constant
+#   sample_rate    : Hz
+#   frequency      : cutoff/center Hz
+#   q              : resonance (> 0)
+#   gain_db        : shelf/peak gain in dB
+# ================================================================
+#derive(accessors)
+struct BiquadFilter { b0; b1; b2; a1; a2; z1; z2; filter_type; sample_rate; frequency; q; gain_db; }
+
+# ================================================================
+# SvfOutput -- the four simultaneous state-variable filter outputs.
+# ================================================================
+#derive(accessors)
+struct SvfOutput { low_pass; high_pass; band_pass; notch; }
+
+# ================================================================
+# StateVariableFilter -- Cytomic/Simper SVF; cached coefficients.
+#   frequency,q,sample_rate : parameters
+#   g,k,a1,a2,a3            : cached coefficients
+#   ic1eq,ic2eq             : internal integrator state
+# ================================================================
+#derive(accessors)
+struct StateVariableFilter { frequency; q; sample_rate; g; k; a1; a2; a3; ic1eq; ic2eq; }
+
+# ================================================================
+# Biquad constructors.
+# ================================================================
+
+# Create a biquad filter with gain (shelf/peak types). Returns the struct
+# pointer on success, or a negative ERR_* on invalid sample_rate/frequency/q.
+#must_use
+fn filter_biquad_with_gain(filter_type, sample_rate, frequency, q, gain_db) {
+    var e = validate_sample_rate(sample_rate);
+    if (naad_is_err(e) == 1) { return e; }
+    e = validate_frequency(frequency, sample_rate);
+    if (naad_is_err(e) == 1) { return e; }
+    if (f64_le(q, 0) == 1) { return ERR_INVALID_PARAMETER; }
+    if (naad_is_finite(q) == 0) { return ERR_INVALID_PARAMETER; }
+
+    var self = alloc(sizeof(BiquadFilter));
+    BiquadFilter_set_b0(self, F64_ONE);
+    BiquadFilter_set_b1(self, 0);
+    BiquadFilter_set_b2(self, 0);
+    BiquadFilter_set_a1(self, 0);
+    BiquadFilter_set_a2(self, 0);
+    BiquadFilter_set_z1(self, 0);
+    BiquadFilter_set_z2(self, 0);
+    BiquadFilter_set_filter_type(self, filter_type);
+    BiquadFilter_set_sample_rate(self, sample_rate);
+    BiquadFilter_set_frequency(self, frequency);
+    BiquadFilter_set_q(self, q);
+    BiquadFilter_set_gain_db(self, gain_db);
+    filter_biquad_compute_coefficients(self);
+    return self;
+}
+
+# Create a biquad filter (gain_db = 0.0). Returns pointer or negative ERR_*.
+#must_use
+fn filter_biquad_new(filter_type, sample_rate, frequency, q) {
+    return filter_biquad_with_gain(filter_type, sample_rate, frequency, q, 0);
+}
+
+# ================================================================
+# filter_biquad_compute_coefficients -- Audio EQ Cookbook coefficients.
+# ================================================================
+fn filter_biquad_compute_coefficients(self) {
+    var frequency = BiquadFilter_frequency(self);
+    var sample_rate = BiquadFilter_sample_rate(self);
+    var q = BiquadFilter_q(self);
+    var gain_db = BiquadFilter_gain_db(self);
+    var ft = BiquadFilter_filter_type(self);
+
+    var w0 = f64_div(f64_mul(F64_TAU, frequency), sample_rate);
+    var cos_w0 = f64_cos(w0);
+    var sin_w0 = f64_sin(w0);
+    var alpha = f64_div(sin_w0, f64_mul(F64_TWO, q));
+    var neg2 = f64_neg(F64_TWO);
+
+    var b0 = 0;
+    var b1 = 0;
+    var b2 = 0;
+    var a0 = 0;
+    var a1 = 0;
+    var a2 = 0;
+
+    if (ft == FILTER_LOWPASS) {
+        b1 = f64_sub(F64_ONE, cos_w0);
+        b0 = f64_div(b1, F64_TWO);
+        b2 = b0;
+        a0 = f64_add(F64_ONE, alpha);
+        a1 = f64_mul(neg2, cos_w0);
+        a2 = f64_sub(F64_ONE, alpha);
+    } elif (ft == FILTER_HIGHPASS) {
+        var onepc = f64_add(F64_ONE, cos_w0);
+        b0 = f64_div(onepc, F64_TWO);
+        b1 = f64_neg(onepc);
+        b2 = b0;
+        a0 = f64_add(F64_ONE, alpha);
+        a1 = f64_mul(neg2, cos_w0);
+        a2 = f64_sub(F64_ONE, alpha);
+    } elif (ft == FILTER_BANDPASS) {
+        b0 = alpha;
+        b1 = 0;
+        b2 = f64_neg(alpha);
+        a0 = f64_add(F64_ONE, alpha);
+        a1 = f64_mul(neg2, cos_w0);
+        a2 = f64_sub(F64_ONE, alpha);
+    } elif (ft == FILTER_NOTCH) {
+        b0 = F64_ONE;
+        b1 = f64_mul(neg2, cos_w0);
+        b2 = F64_ONE;
+        a0 = f64_add(F64_ONE, alpha);
+        a1 = f64_mul(neg2, cos_w0);
+        a2 = f64_sub(F64_ONE, alpha);
+    } elif (ft == FILTER_ALLPASS) {
+        b0 = f64_sub(F64_ONE, alpha);
+        b1 = f64_mul(neg2, cos_w0);
+        b2 = f64_add(F64_ONE, alpha);
+        a0 = f64_add(F64_ONE, alpha);
+        a1 = f64_mul(neg2, cos_w0);
+        a2 = f64_sub(F64_ONE, alpha);
+    } elif (ft == FILTER_LOWSHELF) {
+        # Distinct names per branch: Cyrius shares one scope across all elif
+        # bodies, so a repeated `var` name across branches is a duplicate.
+        var ls_a = f64_pow(f64_from(10), f64_div(gain_db, f64_from(40)));
+        var ls_ts = f64_mul(f64_mul(F64_TWO, f64_sqrt(ls_a)), alpha);
+        var ls_ap1 = f64_add(ls_a, F64_ONE);
+        var ls_am1 = f64_sub(ls_a, F64_ONE);
+        var ls_am1c = f64_mul(ls_am1, cos_w0);
+        var ls_ap1c = f64_mul(ls_ap1, cos_w0);
+        b0 = f64_mul(ls_a, f64_add(f64_sub(ls_ap1, ls_am1c), ls_ts));
+        b1 = f64_mul(f64_mul(F64_TWO, ls_a), f64_sub(ls_am1, ls_ap1c));
+        b2 = f64_mul(ls_a, f64_sub(f64_sub(ls_ap1, ls_am1c), ls_ts));
+        a0 = f64_add(f64_add(ls_ap1, ls_am1c), ls_ts);
+        a1 = f64_mul(neg2, f64_add(ls_am1, ls_ap1c));
+        a2 = f64_sub(f64_add(ls_ap1, ls_am1c), ls_ts);
+    } elif (ft == FILTER_HIGHSHELF) {
+        var hs_a = f64_pow(f64_from(10), f64_div(gain_db, f64_from(40)));
+        var hs_ts = f64_mul(f64_mul(F64_TWO, f64_sqrt(hs_a)), alpha);
+        var hs_ap1 = f64_add(hs_a, F64_ONE);
+        var hs_am1 = f64_sub(hs_a, F64_ONE);
+        var hs_am1c = f64_mul(hs_am1, cos_w0);
+        var hs_ap1c = f64_mul(hs_ap1, cos_w0);
+        b0 = f64_mul(hs_a, f64_add(f64_add(hs_ap1, hs_am1c), hs_ts));
+        b1 = f64_mul(f64_mul(neg2, hs_a), f64_add(hs_am1, hs_ap1c));
+        b2 = f64_mul(hs_a, f64_sub(f64_add(hs_ap1, hs_am1c), hs_ts));
+        a0 = f64_add(f64_sub(hs_ap1, hs_am1c), hs_ts);
+        a1 = f64_mul(F64_TWO, f64_sub(hs_am1, hs_ap1c));
+        a2 = f64_sub(f64_sub(hs_ap1, hs_am1c), hs_ts);
+    } elif (ft == FILTER_PEAK) {
+        var pk_a = f64_pow(f64_from(10), f64_div(gain_db, f64_from(40)));
+        var pk_aa = f64_mul(alpha, pk_a);
+        var pk_ad = f64_div(alpha, pk_a);
+        b0 = f64_add(F64_ONE, pk_aa);
+        b1 = f64_mul(neg2, cos_w0);
+        b2 = f64_sub(F64_ONE, pk_aa);
+        a0 = f64_add(F64_ONE, pk_ad);
+        a1 = f64_mul(neg2, cos_w0);
+        a2 = f64_sub(F64_ONE, pk_ad);
+    }
+
+    var inv_a0 = f64_div(F64_ONE, a0);
+    BiquadFilter_set_b0(self, f64_mul(b0, inv_a0));
+    BiquadFilter_set_b1(self, f64_mul(b1, inv_a0));
+    BiquadFilter_set_b2(self, f64_mul(b2, inv_a0));
+    BiquadFilter_set_a1(self, f64_mul(a1, inv_a0));
+    BiquadFilter_set_a2(self, f64_mul(a2, inv_a0));
+    return 0;
+}
+
+# ================================================================
+# filter_biquad_process_sample -- Direct Form II Transposed; denormal-flushed.
+# ================================================================
+#inline
+#must_use
+fn filter_biquad_process_sample(self, input) {
+    var b0 = BiquadFilter_b0(self);
+    var b1 = BiquadFilter_b1(self);
+    var b2 = BiquadFilter_b2(self);
+    var a1 = BiquadFilter_a1(self);
+    var a2 = BiquadFilter_a2(self);
+    var z1 = BiquadFilter_z1(self);
+    var z2 = BiquadFilter_z2(self);
+
+    var output = f64_add(f64_mul(b0, input), z1);
+    var new_z1 = flush_denormal(f64_add(f64_sub(f64_mul(b1, input), f64_mul(a1, output)), z2));
+    var new_z2 = flush_denormal(f64_sub(f64_mul(b2, input), f64_mul(a2, output)));
+    BiquadFilter_set_z1(self, new_z1);
+    BiquadFilter_set_z2(self, new_z2);
+    return output;
+}
+
+# ================================================================
+# filter_biquad_set_params -- update parameters + recompute. Returns ERR_NONE
+# on success, or a negative ERR_* on invalid frequency/q.
+# ================================================================
+fn filter_biquad_set_params(self, frequency, q, gain_db) {
+    var e = validate_frequency(frequency, BiquadFilter_sample_rate(self));
+    if (naad_is_err(e) == 1) { return e; }
+    if (f64_le(q, 0) == 1) { return ERR_INVALID_PARAMETER; }
+    if (naad_is_finite(q) == 0) { return ERR_INVALID_PARAMETER; }
+    BiquadFilter_set_frequency(self, frequency);
+    BiquadFilter_set_q(self, q);
+    BiquadFilter_set_gain_db(self, gain_db);
+    filter_biquad_compute_coefficients(self);
+    return ERR_NONE;
+}
+
+# ================================================================
+# filter_biquad_process_buffer -- process a vec of samples in place.
+# ================================================================
+#inline
+fn filter_biquad_process_buffer(self, buffer) {
+    var n = vec_len(buffer);
+    var i = 0;
+    while (i < n) {
+        vec_set(buffer, i, filter_biquad_process_sample(self, vec_get(buffer, i)));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# filter_biquad_reset -- clear delay line.
+# ================================================================
+fn filter_biquad_reset(self) {
+    BiquadFilter_set_z1(self, 0);
+    BiquadFilter_set_z2(self, 0);
+    return 0;
+}
+
+# ================================================================
+# State variable filter.
+# ================================================================
+
+# Recompute g/k/a1/a2/a3 from frequency/q/sample_rate.
+fn _filter_svf_compute(self) {
+    var frequency = StateVariableFilter_frequency(self);
+    var sample_rate = StateVariableFilter_sample_rate(self);
+    var q = StateVariableFilter_q(self);
+    var g = f64_tan(f64_div(f64_mul(F64_PI, frequency), sample_rate));
+    var k = f64_div(F64_ONE, q);
+    var a1 = f64_div(F64_ONE, f64_add(F64_ONE, f64_mul(g, f64_add(g, k))));
+    var a2 = f64_mul(g, a1);
+    var a3 = f64_mul(g, a2);
+    StateVariableFilter_set_g(self, g);
+    StateVariableFilter_set_k(self, k);
+    StateVariableFilter_set_a1(self, a1);
+    StateVariableFilter_set_a2(self, a2);
+    StateVariableFilter_set_a3(self, a3);
+    return 0;
+}
+
+# Create a state variable filter. Returns the struct pointer on success, or a
+# negative ERR_* on invalid sample_rate/frequency/q.
+#must_use
+fn filter_svf_new(frequency, q, sample_rate) {
+    var e = validate_sample_rate(sample_rate);
+    if (naad_is_err(e) == 1) { return e; }
+    e = validate_frequency(frequency, sample_rate);
+    if (naad_is_err(e) == 1) { return e; }
+    if (f64_le(q, 0) == 1) { return ERR_INVALID_PARAMETER; }
+    if (naad_is_finite(q) == 0) { return ERR_INVALID_PARAMETER; }
+
+    var self = alloc(sizeof(StateVariableFilter));
+    StateVariableFilter_set_frequency(self, frequency);
+    StateVariableFilter_set_q(self, q);
+    StateVariableFilter_set_sample_rate(self, sample_rate);
+    StateVariableFilter_set_ic1eq(self, 0);
+    StateVariableFilter_set_ic2eq(self, 0);
+    _filter_svf_compute(self);
+    return self;
+}
+
+# Current cutoff frequency (Hz).
+#inline
+#must_use
+fn filter_svf_frequency(self) {
+    return StateVariableFilter_frequency(self);
+}
+
+# Current Q factor.
+#inline
+#must_use
+fn filter_svf_q(self) {
+    return StateVariableFilter_q(self);
+}
+
+# Sample rate (Hz).
+#inline
+#must_use
+fn filter_svf_sample_rate(self) {
+    return StateVariableFilter_sample_rate(self);
+}
+
+# ================================================================
+# filter_svf_set_params -- update frequency/q + recompute. Returns ERR_NONE
+# on success, or a negative ERR_* on invalid frequency/q.
+# ================================================================
+fn filter_svf_set_params(self, frequency, q) {
+    var e = validate_frequency(frequency, StateVariableFilter_sample_rate(self));
+    if (naad_is_err(e) == 1) { return e; }
+    if (f64_le(q, 0) == 1) { return ERR_INVALID_PARAMETER; }
+    if (naad_is_finite(q) == 0) { return ERR_INVALID_PARAMETER; }
+    StateVariableFilter_set_frequency(self, frequency);
+    StateVariableFilter_set_q(self, q);
+    _filter_svf_compute(self);
+    return ERR_NONE;
+}
+
+# ================================================================
+# filter_svf_process_sample -- one sample -> all four outputs (SvfOutput
+# pointer). Integrator state is denormal-flushed.
+# ================================================================
+#must_use
+fn filter_svf_process_sample(self, input) {
+    var a1 = StateVariableFilter_a1(self);
+    var a2 = StateVariableFilter_a2(self);
+    var a3 = StateVariableFilter_a3(self);
+    var k = StateVariableFilter_k(self);
+    var ic1eq = StateVariableFilter_ic1eq(self);
+    var ic2eq = StateVariableFilter_ic2eq(self);
+
+    var v3 = f64_sub(input, ic2eq);
+    var v1 = f64_add(f64_mul(a1, ic1eq), f64_mul(a2, v3));
+    var v2 = f64_add(f64_add(ic2eq, f64_mul(a2, ic1eq)), f64_mul(a3, v3));
+
+    StateVariableFilter_set_ic1eq(self, flush_denormal(f64_sub(f64_mul(F64_TWO, v1), ic1eq)));
+    StateVariableFilter_set_ic2eq(self, flush_denormal(f64_sub(f64_mul(F64_TWO, v2), ic2eq)));
+
+    var low_pass = v2;
+    var band_pass = v1;
+    var high_pass = f64_sub(f64_sub(input, f64_mul(k, v1)), v2);
+    var notch = f64_add(low_pass, high_pass);
+
+    var out = alloc(sizeof(SvfOutput));
+    SvfOutput_set_low_pass(out, low_pass);
+    SvfOutput_set_high_pass(out, high_pass);
+    SvfOutput_set_band_pass(out, band_pass);
+    SvfOutput_set_notch(out, notch);
+    return out;
+}
+
+# ================================================================
+# filter_svf_process_sample_lowpass -- convenience: low-pass output only.
+# ================================================================
+#inline
+#must_use
+fn filter_svf_process_sample_lowpass(self, input) {
+    var out = filter_svf_process_sample(self, input);
+    return SvfOutput_low_pass(out);
+}
+
+# ================================================================
+# filter_svf_process_buffer_lowpass -- write low-pass output in place.
+# ================================================================
+#inline
+fn filter_svf_process_buffer_lowpass(self, buffer) {
+    var n = vec_len(buffer);
+    var i = 0;
+    while (i < n) {
+        vec_set(buffer, i, filter_svf_process_sample_lowpass(self, vec_get(buffer, i)));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# filter_svf_reset -- clear integrator state.
+# ================================================================
+fn filter_svf_reset(self) {
+    StateVariableFilter_set_ic1eq(self, 0);
+    StateVariableFilter_set_ic2eq(self, 0);
+    return 0;
+}

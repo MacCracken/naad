@@ -1,0 +1,40 @@
+# bundle.tcyr -- cross-layer smoke test for the dist/naad.cyr distlib bundle.
+# Includes the single concatenated bundle (+ its consumer deps hisab/goonj)
+# and exercises one symbol from each major layer, proving the 39 modules
+# coexist and link in one flat namespace.
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "dist/naad.cyr"
+
+alloc_init();
+
+test_group("bundle: base + dsp_util");
+assert_eq(validate_frequency(f64_from(440), f64_from(44100)), ERR_NONE, "error base");
+assert_eq(flush_denormal(0), 0, "flush_denormal");
+assert(f64_lt(f64_abs(f64_sub(lerp(0, F64_ONE, F64_HALF), F64_HALF)), NAAD_EPSILON), "dsp_util lerp");
+
+test_group("bundle: noise + oscillator");
+var ng = noise_new(NOISE_WHITE, 42);
+assert(naad_is_finite(noise_next_sample(ng)), "noise layer");
+var osc = osc_new(WAVEFORM_SINE, f64_from(440), f64_from(44100));
+assert(naad_is_finite(osc_next_sample(osc)), "oscillator layer");
+var posc = osc_new(WAVEFORM_PINK_NOISE, f64_from(440), f64_from(44100));
+assert(naad_is_finite(osc_next_sample(posc)), "oscillator pink (noise-backed) layer");
+
+test_group("bundle: dsp_spectral (hisab FFT)");
+var sig = vec_new();
+var i = 0;
+while (i < 8) {
+    vec_push(sig, f64_sin(f64_div(f64_mul(F64_TAU, f64_from(i)), f64_from(8))));
+    i = i + 1;
+}
+var mags = fft_magnitudes(sig);
+assert_eq(vec_len(mags), 5, "fft_magnitudes bins = n/2+1");
+
+test_group("bundle: acoustics (goonj-backed)");
+assert(naad_acoustics_material_by_name("concrete") != 0, "acoustics material base");
+assert_eq(naad_acoustics_material_by_name("nope"), 0, "unknown material -> None");
+
+var rc = assert_summary();
+syscall(60, rc);

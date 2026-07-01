@@ -1,0 +1,183 @@
+# mod_matrix.cyr -- modulation matrix for source-to-destination routing.
+#
+# Ports rust-old/src/mod_matrix.rs. f32 -> f64 throughout. serde derives
+# dropped (no serde). The two `enum`s (ModSource / ModDestination) become
+# integer `var` constants whose value IS the array index -- Rust's private
+# `index()` maps each variant to 0..7 in declaration order, so the constant
+# doubles as the slot index used by set_source / compute / get_destination.
+# `Vec<ModRouting>` -> a stdlib `vec` holding ModRouting struct pointers.
+# The fixed `[f32; 8]` source/destination arrays -> stdlib `vec`s of 8 f64
+# slots. Methods become free `mod_matrix_*` functions on the struct pointer;
+# `bool` returns become integer 1/0 (`add_routing` full-check, `enabled`).
+#
+# Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE,
+# f64_clamp/neg). No `include` lines in the module itself.
+
+# ================================================================
+# Slot counts (was pub const NUM_SOURCES / NUM_DESTINATIONS / MAX_ROUTINGS).
+# Prefixed to stay collision-free in the eventual flat bundle.
+# ================================================================
+var MOD_MATRIX_NUM_SOURCES      = 8;
+var MOD_MATRIX_NUM_DESTINATIONS = 8;
+var MOD_MATRIX_MAX_ROUTINGS     = 16;
+
+# ================================================================
+# ModSource -- modulation source id. Value == array index (see header).
+# ================================================================
+var MOD_SOURCE_LFO1            = 0;
+var MOD_SOURCE_LFO2            = 1;
+var MOD_SOURCE_AMP_ENVELOPE    = 2;
+var MOD_SOURCE_FILTER_ENVELOPE = 3;
+var MOD_SOURCE_VELOCITY        = 4;
+var MOD_SOURCE_MOD_WHEEL       = 5;
+var MOD_SOURCE_AFTERTOUCH      = 6;
+var MOD_SOURCE_PITCH_BEND      = 7;
+
+# ================================================================
+# ModDestination -- modulation destination id. Value == array index.
+# ================================================================
+var MOD_DEST_PITCH            = 0;
+var MOD_DEST_FILTER_CUTOFF    = 1;
+var MOD_DEST_FILTER_RESONANCE = 2;
+var MOD_DEST_AMPLITUDE        = 3;
+var MOD_DEST_PAN              = 4;
+var MOD_DEST_PULSE_WIDTH      = 5;
+var MOD_DEST_FM_INDEX         = 6;
+var MOD_DEST_LFO_RATE         = 7;
+
+# ================================================================
+# ModRouting -- one source -> destination route with a signed depth.
+#   source      : MOD_SOURCE_* index
+#   destination : MOD_DEST_* index
+#   depth       : f64 modulation depth (clamped to [-1.0, 1.0])
+#   enabled     : 1 = active, 0 = bypassed
+# ================================================================
+#derive(accessors)
+struct ModRouting { source; destination; depth; enabled; }
+
+# Create a routing; depth clamped to [-1, 1], enabled by default.
+#must_use
+fn mod_matrix_routing_new(source, destination, depth) {
+    var r = alloc(sizeof(ModRouting));
+    ModRouting_set_source(r, source);
+    ModRouting_set_destination(r, destination);
+    ModRouting_set_depth(r, f64_clamp(depth, f64_neg(F64_ONE), F64_ONE));
+    ModRouting_set_enabled(r, 1);
+    return r;
+}
+
+# ================================================================
+# ModMatrix -- up to 16 routing slots plus per-frame source/dest scratch.
+#   routings           : vec of ModRouting pointers
+#   source_values      : vec of 8 f64 source inputs for the current frame
+#   destination_values : vec of 8 f64 accumulated destination amounts
+# ================================================================
+#derive(accessors)
+struct ModMatrix { routings; source_values; destination_values; }
+
+# Create an empty modulation matrix (all source/dest slots zeroed).
+#must_use
+fn mod_matrix_new() {
+    var m = alloc(sizeof(ModMatrix));
+    ModMatrix_set_routings(m, vec_new());
+    var src = vec_new();
+    var dst = vec_new();
+    var i = 0;
+    while (i < MOD_MATRIX_NUM_SOURCES) {
+        vec_push(src, 0);
+        i = i + 1;
+    }
+    i = 0;
+    while (i < MOD_MATRIX_NUM_DESTINATIONS) {
+        vec_push(dst, 0);
+        i = i + 1;
+    }
+    ModMatrix_set_source_values(m, src);
+    ModMatrix_set_destination_values(m, dst);
+    return m;
+}
+
+# Add a routing. Returns 0 (false) if the matrix is full, else 1 (true).
+fn mod_matrix_add_routing(m, routing) {
+    var routings = ModMatrix_routings(m);
+    if (vec_len(routings) >= MOD_MATRIX_MAX_ROUTINGS) { return 0; }
+    vec_push(routings, routing);
+    return 1;
+}
+
+# Remove a routing by index (no-op if out of range).
+fn mod_matrix_remove_routing(m, index) {
+    var routings = ModMatrix_routings(m);
+    if (index < vec_len(routings)) {
+        vec_remove(routings, index);
+    }
+    return 0;
+}
+
+# Clear all routings.
+fn mod_matrix_clear(m) {
+    vec_truncate(ModMatrix_routings(m), 0);
+    return 0;
+}
+
+# Set a source value for the current frame.
+fn mod_matrix_set_source(m, source, value) {
+    vec_set(ModMatrix_source_values(m), source, value);
+    return 0;
+}
+
+# Compute all destination modulation amounts from the current sources.
+# Call once per frame after every set_source. Zeroes the dest scratch,
+# then sums src_val * depth into each destination over enabled routings.
+fn mod_matrix_compute(m) {
+    var dst = ModMatrix_destination_values(m);
+    var i = 0;
+    while (i < MOD_MATRIX_NUM_DESTINATIONS) {
+        vec_set(dst, i, 0);
+        i = i + 1;
+    }
+    var src = ModMatrix_source_values(m);
+    var routings = ModMatrix_routings(m);
+    var n = vec_len(routings);
+    var r = 0;
+    while (r < n) {
+        var routing = vec_get(routings, r);
+        if (ModRouting_enabled(routing) == 1) {
+            var s = ModRouting_source(routing);
+            var d = ModRouting_destination(routing);
+            var src_val = vec_get(src, s);
+            var mod_amount = f64_mul(src_val, ModRouting_depth(routing));
+            vec_set(dst, d, f64_add(vec_get(dst, d), mod_amount));
+        }
+        r = r + 1;
+    }
+    return 0;
+}
+
+# Total modulation amount for a destination (0.0 if nothing targets it).
+#inline
+#must_use
+fn mod_matrix_get_destination(m, dest) {
+    return vec_get(ModMatrix_destination_values(m), dest);
+}
+
+# Number of active routings.
+#must_use
+fn mod_matrix_num_routings(m) {
+    return vec_len(ModMatrix_routings(m));
+}
+
+# The vec of all routings (ModRouting pointers).
+#must_use
+fn mod_matrix_routings(m) {
+    return ModMatrix_routings(m);
+}
+
+# Pointer to a routing by index, or 0 (None) if out of range.
+#must_use
+fn mod_matrix_routing_mut(m, index) {
+    var routings = ModMatrix_routings(m);
+    if (index < 0) { return 0; }
+    if (index >= vec_len(routings)) { return 0; }
+    return vec_get(routings, index);
+}

@@ -1,0 +1,161 @@
+# acoustics_room.cyr -- naad room simulation reverb (thin goonj wrapper).
+#
+# Ports rust-old/src/acoustics/room.rs. Builds a shoebox room in goonj,
+# generates a broadband impulse response via image-source + diffuse rain,
+# and applies it as a sample-by-sample convolution reverb. f32 -> f64
+# throughout. Rust's serde derives and the `debug!` log are dropped.
+#
+# Cross-crate goonj mapping (discovered from lib/goonj.cyr + goonj src/tests):
+#   goonj::room::AcousticRoom::shoebox   -> acoustic_room_shoebox(l, w, h, mat)
+#   goonj::impulse::IrConfig{..}         -> ir_config_new(rate, order, rays,
+#                                                          bounces, secs, seed)
+#   goonj::impulse::generate_ir          -> generate_ir(src, lis, room, cfg)
+#   MultibandIr::to_broadband            -> multiband_ir_to_broadband(mi)
+#   ImpulseResponse.samples              -> ImpulseResponse_samples(ir)
+#   hisab::Vec3::new                     -> hvec3_new(x, y, z)
+# The wall material name resolves through naad_acoustics_material_by_name
+# (src/acoustics.cyr). Result<Self> -> struct pointer on success or a
+# negative ERR_COMPUTATION on unknown material / non-positive dimensions.
+#
+# Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE,
+# f64_add/mul/le, f64_abs/lt), hisab (hvec3_new), the goonj bundle
+# (acoustic_room_shoebox, ir_config_new, generate_ir,
+# multiband_ir_to_broadband, ImpulseResponse_samples), and the naad L0
+# modules error.cyr (ERR_COMPUTATION, naad_is_err) + acoustics.cyr
+# (naad_acoustics_material_by_name). This file has no `include` lines.
+
+# ================================================================
+# RoomReverbConfig -- configuration for a room simulation reverb.
+#   length            : room length in metres (X axis)
+#   width             : room width  in metres (Z axis)
+#   height            : room height in metres (Y axis)
+#   wall_material_name: goonj material name ("concrete", "carpet", ...)
+#   source_position   : source HVec3 [x, y, z] in metres
+#   listener_position : listener HVec3 [x, y, z] in metres
+#   sample_rate       : sample rate in Hz
+# The Rust `[f32; 3]` source/listener arrays map to hisab HVec3 points.
+# ================================================================
+#derive(accessors)
+struct RoomReverbConfig {
+    length;
+    width;
+    height;
+    wall_material_name;
+    source_position;
+    listener_position;
+    sample_rate;
+}
+
+# Build a RoomReverbConfig. `source_position` / `listener_position` are
+# HVec3 pointers (hvec3_new). Ports the Rust struct literal.
+#must_use
+fn naad_room_reverb_config_new(length, width, height, wall_material_name,
+source_position, listener_position, sample_rate) {
+    var c = alloc(sizeof(RoomReverbConfig));
+    RoomReverbConfig_set_length(c, length);
+    RoomReverbConfig_set_width(c, width);
+    RoomReverbConfig_set_height(c, height);
+    RoomReverbConfig_set_wall_material_name(c, wall_material_name);
+    RoomReverbConfig_set_source_position(c, source_position);
+    RoomReverbConfig_set_listener_position(c, listener_position);
+    RoomReverbConfig_set_sample_rate(c, sample_rate);
+    return c;
+}
+
+# ================================================================
+# RoomReverb -- room simulation reverb backed by a goonj impulse response.
+#   config          : the RoomReverbConfig used to build this reverb
+#   impulse_response: pre-computed broadband IR (vec of f64, may be empty)
+#   input_buffer    : ring-buffer of recent inputs (len == max(ir_len, 1))
+#   current_position: current write position in the ring buffer
+# ================================================================
+#derive(accessors)
+struct RoomReverb {
+    config;
+    impulse_response;
+    input_buffer;
+    current_position;
+}
+
+# ================================================================
+# naad_room_reverb_new -- create a room reverb from a config. Builds a
+# shoebox room in goonj, generates a broadband impulse response via
+# image-source + diffuse-rain, and stores it for sample-by-sample
+# convolution. Returns the struct pointer on success, or a negative
+# ERR_COMPUTATION if the wall material name is unknown or the room
+# dimensions are not positive. Ports RoomReverb::new.
+# ================================================================
+#must_use
+fn naad_room_reverb_new(config) {
+    var material = naad_acoustics_material_by_name(RoomReverbConfig_wall_material_name(config));
+    if (material == 0) { return ERR_COMPUTATION; }
+
+    if (f64_le(RoomReverbConfig_length(config), 0) == 1) { return ERR_COMPUTATION; }
+    if (f64_le(RoomReverbConfig_width(config), 0) == 1) { return ERR_COMPUTATION; }
+    if (f64_le(RoomReverbConfig_height(config), 0) == 1) { return ERR_COMPUTATION; }
+
+    var room = acoustic_room_shoebox(RoomReverbConfig_length(config),
+    RoomReverbConfig_width(config), RoomReverbConfig_height(config), material);
+
+    var source = RoomReverbConfig_source_position(config);
+    var listener = RoomReverbConfig_listener_position(config);
+
+    # Fixed generation parameters (mirrors the Rust IrConfig literal):
+    # order 3, 2000 diffuse rays, 30 bounces, 1.0 s, seed 42.
+    var ir_config = ir_config_new(RoomReverbConfig_sample_rate(config), 3, 2000, 30, F64_ONE, 42);
+
+    var multiband = generate_ir(source, listener, room, ir_config);
+    var broadband = multiband_ir_to_broadband(multiband);
+    var ir = ImpulseResponse_samples(broadband);
+
+    var ir_len = vec_len(ir);
+    var buf_len = ir_len;
+    if (buf_len < 1) { buf_len = 1; }
+
+    var input_buffer = vec_new();
+    var i = 0;
+    while (i < buf_len) {
+        vec_push(input_buffer, 0);
+        i = i + 1;
+    }
+
+    var self = alloc(sizeof(RoomReverb));
+    RoomReverb_set_config(self, config);
+    RoomReverb_set_impulse_response(self, ir);
+    RoomReverb_set_input_buffer(self, input_buffer);
+    RoomReverb_set_current_position(self, 0);
+    return self;
+}
+
+# ================================================================
+# naad_room_reverb_process_sample -- process a single audio sample via
+# direct convolution with the stored impulse response. An empty IR passes
+# the input through unchanged. Ports RoomReverb::process_sample.
+# ================================================================
+#inline
+#must_use
+fn naad_room_reverb_process_sample(self, input) {
+    var ir = RoomReverb_impulse_response(self);
+    var ir_len = vec_len(ir);
+    if (ir_len == 0) { return input; }
+
+    var buf = RoomReverb_input_buffer(self);
+    var pos = RoomReverb_current_position(self);
+    # Write input into the ring buffer.
+    vec_set(buf, pos, input);
+
+    # Direct convolution: output = sum(input_buffer[pos - k] * ir[k]).
+    var output = 0;
+    var k = 0;
+    while (k < ir_len) {
+        var idx_raw = pos + ir_len - k;
+        var idx = idx_raw % ir_len;
+        output = f64_add(output, f64_mul(vec_get(buf, idx), vec_get(ir, k)));
+        k = k + 1;
+    }
+
+    var nextp = pos + 1;
+    var np = nextp % ir_len;
+    RoomReverb_set_current_position(self, np);
+    return output;
+}

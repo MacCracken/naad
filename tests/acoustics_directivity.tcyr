@@ -1,0 +1,103 @@
+# acoustics_directivity.tcyr -- parity tests for src/acoustics_directivity.cyr.
+# Ported one-for-one from the #[test] blocks in
+# rust-old/src/acoustics/directivity.rs. The serde round-trip test is dropped
+# (no serde in Cyrius). f32 thresholds reused directly (loosened to f64):
+# 1e-5 exactness checks and the 1e-4 polar-vs-3D agreement check.
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "src/error.cyr"
+include "src/acoustics_directivity.cyr"
+
+var TOL_1E5 = 0x3ee4f8b588e368f1;   # 1e-5
+var TOL_1E4 = 0x3f1a36e2eb1c432d;   # 1e-4
+
+# |a - b| < tol  ->  1
+fn approx(a, b, tol) {
+    if (f64_lt(f64_abs(f64_sub(a, b)), tol) == 1) { return 1; }
+    return 0;
+}
+
+# degrees -> radians (deg · π / 180).
+fn _dir_radians(deg) {
+    return f64_div(f64_mul(f64_from(deg), F64_PI), f64_from(180));
+}
+
+# 1 if the 3D gain and the polar gain agree within 1e-4 for `kind` @ theta.
+# dir = (cos θ, sin θ, 0), front = +x -- axisymmetric so 3D == polar.
+fn _dir_polar_ok(kind, theta) {
+    var front = hvec3_unit_x();
+    var dir = hvec3_new(f64_cos(theta), f64_sin(theta), 0);
+    var g3d = naad_directivity_gain(kind, dir, front);
+    var gp = naad_directivity_gain_polar(kind, theta);
+    return approx(g3d, gp, TOL_1E4);
+}
+
+# 1 iff all four non-omni patterns agree (3D vs polar) at `theta`.
+fn _dir_all_polar_ok(theta) {
+    if (_dir_polar_ok(NAAD_DIR_CARDIOID, theta) == 0) { return 0; }
+    if (_dir_polar_ok(NAAD_DIR_SUBCARDIOID, theta) == 0) { return 0; }
+    if (_dir_polar_ok(NAAD_DIR_SUPERCARDIOID, theta) == 0) { return 0; }
+    if (_dir_polar_ok(NAAD_DIR_FIGURE8, theta) == 0) { return 0; }
+    return 1;
+}
+
+alloc_init();
+
+# ================================================================
+# test_omnidirectional_is_unity_in_all_directions
+# front = (1,0,0); gain ~ 1.0 for +x, -x, +y, +z.
+test_group("omnidirectional_is_unity_in_all_directions");
+var front_x = hvec3_unit_x();
+assert(approx(naad_directivity_gain(NAAD_DIR_OMNIDIRECTIONAL, hvec3_unit_x(), front_x), F64_ONE, TOL_1E5),
+"omni +x -> 1.0");
+assert(approx(naad_directivity_gain(NAAD_DIR_OMNIDIRECTIONAL, hvec3_neg(hvec3_unit_x()), front_x), F64_ONE, TOL_1E5),
+"omni -x -> 1.0");
+assert(approx(naad_directivity_gain(NAAD_DIR_OMNIDIRECTIONAL, hvec3_unit_y(), front_x), F64_ONE, TOL_1E5),
+"omni +y -> 1.0");
+assert(approx(naad_directivity_gain(NAAD_DIR_OMNIDIRECTIONAL, hvec3_unit_z(), front_x), F64_ONE, TOL_1E5),
+"omni +z -> 1.0");
+
+# ================================================================
+# test_cardioid_null_at_rear
+# On-axis = 1.0, 180° = 0.0.
+test_group("cardioid_null_at_rear");
+assert(approx(naad_directivity_gain_polar(NAAD_DIR_CARDIOID, 0), F64_ONE, TOL_1E5),
+"cardioid on-axis -> 1.0");
+assert(f64_lt(naad_directivity_gain_polar(NAAD_DIR_CARDIOID, F64_PI), TOL_1E5) == 1,
+"cardioid rear -> 0.0");
+
+# ================================================================
+# test_figure8_nulls_at_sides
+# Peaks at 0 and π, nulls at ±π/2.
+test_group("figure8_nulls_at_sides");
+assert(approx(naad_directivity_gain_polar(NAAD_DIR_FIGURE8, 0), F64_ONE, TOL_1E5),
+"figure8 on-axis -> 1.0");
+assert(approx(naad_directivity_gain_polar(NAAD_DIR_FIGURE8, F64_PI), F64_ONE, TOL_1E5),
+"figure8 rear -> 1.0");
+assert(f64_lt(naad_directivity_gain_polar(NAAD_DIR_FIGURE8, F64_PI_2), TOL_1E5) == 1,
+"figure8 side -> 0.0");
+
+# ================================================================
+# test_supercardioid_has_small_rear_lobe
+# Zero at π (clipped), positive at 2π/3.
+test_group("supercardioid_has_small_rear_lobe");
+assert(f64_lt(naad_directivity_gain_polar(NAAD_DIR_SUPERCARDIOID, F64_PI), TOL_1E5) == 1,
+"supercardioid rear -> 0.0 (clipped)");
+var theta_oblique = f64_div(f64_mul(F64_TWO, F64_PI), f64_from(3));
+assert(f64_gt(naad_directivity_gain_polar(NAAD_DIR_SUPERCARDIOID, theta_oblique), 0) == 1,
+"supercardioid oblique -> > 0.0");
+
+# ================================================================
+# test_polar_matches_3d_for_axisymmetric
+# For theta in {0,45,90,135,180}°, 3D gain (dir in xy-plane, front +x)
+# matches gain_polar within 1e-4 for cardioid / sub / super / figure-8.
+test_group("polar_matches_3d_for_axisymmetric");
+assert(_dir_all_polar_ok(_dir_radians(0)) == 1, "polar == 3D @ 0deg");
+assert(_dir_all_polar_ok(_dir_radians(45)) == 1, "polar == 3D @ 45deg");
+assert(_dir_all_polar_ok(_dir_radians(90)) == 1, "polar == 3D @ 90deg");
+assert(_dir_all_polar_ok(_dir_radians(135)) == 1, "polar == 3D @ 135deg");
+assert(_dir_all_polar_ok(_dir_radians(180)) == 1, "polar == 3D @ 180deg");
+
+var rc = assert_summary();
+syscall(60, rc);

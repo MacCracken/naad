@@ -1,0 +1,213 @@
+# tuning.cyr -- tuning and pitch utilities: equal temperament, MIDI note
+# <-> frequency, cents, and custom tuning tables (just intonation,
+# Pythagorean, etc.).
+#
+# Ports rust-old/src/tuning.rs. f32 -> f64 throughout. The `TuningSystem`
+# enum becomes integer constants; the `TuningTable` struct's fixed
+# `[f32; 12]` ratio array becomes a stdlib `vec` of 12 f64 slots. Rust's
+# `Result<T>` constructors return the pointer on success or a negative
+# `ERR_*` code on the error path (same validation predicates as Rust).
+# Serde round-trip test dropped (no serde). Methods become free
+# `tuning_*` functions taking the struct pointer.
+#
+# Requires (from the build/test unit): stdlib alloc/vec, math/ganita
+# (F64_ONE/TWO/LN2, f64_pow/ln/round/clamp/...), string/fmt (strlen,
+# memcpy, fmt_int_buf for note_name), and error.cyr (ERR_INVALID_PARAMETER,
+# naad_is_finite). The module file itself has no `include` lines.
+
+# ================================================================
+# TuningSystem -> integer constants (predefined tuning systems).
+# ================================================================
+var TUNING_EQUAL_TEMPERAMENT = 0;
+var TUNING_JUST_INTONATION   = 1;
+var TUNING_PYTHAGOREAN       = 2;
+
+# ================================================================
+# TuningTable -- custom tuning table with 12 pitch ratios per octave.
+#   name   : cstring name of this tuning
+#   ratios : vec of 12 f64 ratios (index 0 = unison, 11 = major seventh)
+#   a4_hz  : reference frequency for A4 (f64)
+# ================================================================
+#derive(accessors)
+struct TuningTable { name; ratios; a4_hz; }
+
+# ================================================================
+# equal_temperament_freq -- frequency of a note in 12-TET.
+# Formula: a4_hz * 2^((note - 69) / 12). Note 69 = A4.
+# ================================================================
+#inline
+#must_use
+fn tuning_equal_temperament_freq(note, a4_hz) {
+    var exp = f64_div(f64_sub(f64_from(note), f64_from(69)), f64_from(12));
+    return f64_mul(a4_hz, f64_pow(F64_TWO, exp));
+}
+
+# ================================================================
+# midi_to_freq -- MIDI note number to frequency in Hz (A4 = 440 Hz).
+# ================================================================
+#inline
+#must_use
+fn tuning_midi_to_freq(note) {
+    return tuning_equal_temperament_freq(note, f64_from(440));
+}
+
+# ================================================================
+# freq_to_midi -- frequency in Hz to nearest MIDI note (0-127).
+# note = 69 + 12 * log2(freq / 440); rounded and clamped to [0, 127].
+# ================================================================
+#inline
+#must_use
+fn tuning_freq_to_midi(freq) {
+    if (f64_le(freq, 0) == 1) { return 0; }
+    var ratio = f64_div(freq, f64_from(440));
+    var log2 = f64_div(f64_ln(ratio), F64_LN2);
+    var note = f64_add(f64_from(69), f64_mul(f64_from(12), log2));
+    var clamped = f64_clamp(f64_round(note), 0, f64_from(127));
+    return f64_to(clamped);
+}
+
+# ================================================================
+# cents -- interval in cents between two frequencies.
+# cents = 1200 * log2(f2 / f1); 100 cents = 1 semitone in 12-TET.
+# ================================================================
+#inline
+#must_use
+fn tuning_cents(f1, f2) {
+    if (f64_le(f1, 0) == 1) { return 0; }
+    if (f64_le(f2, 0) == 1) { return 0; }
+    var log2 = f64_div(f64_ln(f64_div(f2, f1)), F64_LN2);
+    return f64_mul(f64_from(1200), log2);
+}
+
+# ================================================================
+# tuning_table_from_system -- build a table from a predefined system.
+# ================================================================
+#must_use
+fn tuning_table_from_system(system, a4_hz) {
+    var ratios = vec_new();
+    var name = 0;
+    if (system == TUNING_EQUAL_TEMPERAMENT) {
+        var i = 0;
+        while (i < 12) {
+            vec_push(ratios, f64_pow(F64_TWO, f64_div(f64_from(i), f64_from(12))));
+            i = i + 1;
+        }
+        name = "Equal Temperament";
+    } elif (system == TUNING_JUST_INTONATION) {
+        vec_push(ratios, F64_ONE);
+        vec_push(ratios, f64_div(f64_from(16), f64_from(15)));
+        vec_push(ratios, f64_div(f64_from(9), f64_from(8)));
+        vec_push(ratios, f64_div(f64_from(6), f64_from(5)));
+        vec_push(ratios, f64_div(f64_from(5), f64_from(4)));
+        vec_push(ratios, f64_div(f64_from(4), f64_from(3)));
+        vec_push(ratios, f64_div(f64_from(45), f64_from(32)));
+        vec_push(ratios, f64_div(f64_from(3), f64_from(2)));
+        vec_push(ratios, f64_div(f64_from(8), f64_from(5)));
+        vec_push(ratios, f64_div(f64_from(5), f64_from(3)));
+        vec_push(ratios, f64_div(f64_from(9), f64_from(5)));
+        vec_push(ratios, f64_div(f64_from(15), f64_from(8)));
+        name = "Just Intonation";
+    } else {
+        vec_push(ratios, F64_ONE);
+        vec_push(ratios, f64_div(f64_from(256), f64_from(243)));
+        vec_push(ratios, f64_div(f64_from(9), f64_from(8)));
+        vec_push(ratios, f64_div(f64_from(32), f64_from(27)));
+        vec_push(ratios, f64_div(f64_from(81), f64_from(64)));
+        vec_push(ratios, f64_div(f64_from(4), f64_from(3)));
+        vec_push(ratios, f64_div(f64_from(729), f64_from(512)));
+        vec_push(ratios, f64_div(f64_from(3), f64_from(2)));
+        vec_push(ratios, f64_div(f64_from(128), f64_from(81)));
+        vec_push(ratios, f64_div(f64_from(27), f64_from(16)));
+        vec_push(ratios, f64_div(f64_from(16), f64_from(9)));
+        vec_push(ratios, f64_div(f64_from(243), f64_from(128)));
+        name = "Pythagorean";
+    }
+    var t = alloc(sizeof(TuningTable));
+    TuningTable_set_name(t, name);
+    TuningTable_set_ratios(t, ratios);
+    TuningTable_set_a4_hz(t, a4_hz);
+    return t;
+}
+
+# ================================================================
+# tuning_table_custom -- build a custom table with validation.
+# Returns ERR_INVALID_PARAMETER if a4_hz <= 0 / non-finite, or if any
+# ratio is <= 0 / non-finite; otherwise returns the table pointer.
+# ================================================================
+#must_use
+fn tuning_table_custom(name, ratios, a4_hz) {
+    if (f64_le(a4_hz, 0) == 1) { return ERR_INVALID_PARAMETER; }
+    if (naad_is_finite(a4_hz) == 0) { return ERR_INVALID_PARAMETER; }
+    var n = vec_len(ratios);
+    var i = 0;
+    while (i < n) {
+        var r = vec_get(ratios, i);
+        if (f64_le(r, 0) == 1) { return ERR_INVALID_PARAMETER; }
+        if (naad_is_finite(r) == 0) { return ERR_INVALID_PARAMETER; }
+        i = i + 1;
+    }
+    var t = alloc(sizeof(TuningTable));
+    TuningTable_set_name(t, name);
+    TuningTable_set_ratios(t, ratios);
+    TuningTable_set_a4_hz(t, a4_hz);
+    return t;
+}
+
+# ================================================================
+# tuning_note_to_freq -- frequency for a MIDI note using this table.
+# Note 69 = A4 (degree 9 in the octave). Euclidean division picks the
+# octave; the Euclidean remainder selects the ratio. a4_degree.div_euclid
+# (12) == 0, so the octave power exponent is simply `octave`.
+# ================================================================
+#must_use
+fn tuning_note_to_freq(self, note) {
+    var ratios = TuningTable_ratios(self);
+    var a4_hz = TuningTable_a4_hz(self);
+
+    # a4_degree (9) + (note - 69) == note - 60.
+    var total_degree = note - 60;
+    # rem_euclid(12): normalise to [0, 12); div_euclid(12) matches.
+    var degree = ((total_degree % 12) + 12) % 12;
+    var octave = (total_degree - degree) / 12;
+
+    var ratio = vec_get(ratios, degree);
+    var a4_ratio = vec_get(ratios, 9);
+    var pow = f64_pow(F64_TWO, f64_from(octave));
+    return f64_mul(f64_mul(a4_hz, f64_div(ratio, a4_ratio)), pow);
+}
+
+# ================================================================
+# tuning_note_name -- MIDI note number to a name string ("A4", "C#5").
+# octave = note / 12 - 1; name index = note % 12. Returns a freshly
+# allocated null-terminated cstring.
+# ================================================================
+#must_use
+fn tuning_note_name(note) {
+    var name = tuning_note_name_str(note % 12);
+    var octave = (note / 12) - 1;
+    var buf = alloc(16);
+    var nl = strlen(name);
+    memcpy(buf, name, nl);
+    var tmp = alloc(24);
+    var ol = fmt_int_buf(octave, tmp);
+    memcpy(buf + nl, tmp, ol);
+    store8(buf + nl + ol, 0);
+    return buf;
+}
+
+# Pitch-class name for a semitone index 0..11 (C, C#, D, ...).
+#must_use
+fn tuning_note_name_str(idx) {
+    if (idx == 0) { return "C"; }
+    if (idx == 1) { return "C#"; }
+    if (idx == 2) { return "D"; }
+    if (idx == 3) { return "D#"; }
+    if (idx == 4) { return "E"; }
+    if (idx == 5) { return "F"; }
+    if (idx == 6) { return "F#"; }
+    if (idx == 7) { return "G"; }
+    if (idx == 8) { return "G#"; }
+    if (idx == 9) { return "A"; }
+    if (idx == 10) { return "A#"; }
+    return "B";
+}

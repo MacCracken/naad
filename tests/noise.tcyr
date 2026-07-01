@@ -1,0 +1,90 @@
+# noise.tcyr -- parity tests for src/noise.cyr.
+# Ported one-for-one from the #[test] blocks in rust-old/src/noise.rs,
+# dropping only test_serde_roundtrip (no serde). Ranges use inclusive
+# bounds matching the Rust `(lo..=hi).contains(&s)` checks.
+
+include "src/error.cyr"
+include "src/dsp_util.cyr"
+include "src/noise.cyr"
+
+alloc_init();
+
+var NEG_ONE = 0xBFF0000000000000;   # -1.0
+var NEG_TWO = 0xC000000000000000;   # -2.0
+
+# ================================================================
+test_group("white noise range");
+var wg = noise_new(NOISE_WHITE, 42);
+var white_ok = 1;
+var i = 0;
+while (i < 10000) {
+    var s = noise_next_sample(wg);
+    if (f64_ge(s, NEG_ONE) == 0) { white_ok = 0; }
+    if (f64_le(s, F64_ONE) == 0) { white_ok = 0; }
+    i = i + 1;
+}
+assert(white_ok, "white noise in [-1,1]");
+
+# ================================================================
+test_group("pink noise range");
+var pg = noise_new(NOISE_PINK, 42);
+var pink_ok = 1;
+i = 0;
+while (i < 10000) {
+    var ps = noise_next_sample(pg);
+    if (f64_ge(ps, NEG_TWO) == 0) { pink_ok = 0; }
+    if (f64_le(ps, F64_TWO) == 0) { pink_ok = 0; }
+    i = i + 1;
+}
+assert(pink_ok, "pink noise in [-2,2]");
+
+# ================================================================
+test_group("brown noise range");
+var bg = noise_new(NOISE_BROWN, 42);
+var brown_ok = 1;
+i = 0;
+while (i < 10000) {
+    var bs = noise_next_sample(bg);
+    if (f64_ge(bs, NEG_ONE) == 0) { brown_ok = 0; }
+    if (f64_le(bs, F64_ONE) == 0) { brown_ok = 0; }
+    i = i + 1;
+}
+assert(brown_ok, "brown noise in [-1,1]");
+
+# ================================================================
+test_group("deterministic");
+var d1 = noise_new(NOISE_WHITE, 42);
+var d2 = noise_new(NOISE_WHITE, 42);
+var det_ok = 1;
+var j = 0;
+while (j < 100) {
+    var a = noise_next_sample(d1);
+    var b = noise_next_sample(d2);
+    if (f64_lt(f64_abs(f64_sub(a, b)), NAAD_EPSILON) == 0) { det_ok = 0; }
+    j = j + 1;
+}
+assert(det_ok, "same seed -> identical stream");
+
+# ================================================================
+test_group("fill buffer");
+var fg = noise_new(NOISE_WHITE, 42);
+var buf = vec_new();
+var k = 0;
+while (k < 256) { vec_push(buf, 0); k = k + 1; }
+noise_fill_buffer(fg, buf);
+var any_nonzero = 0;
+k = 0;
+while (k < 256) {
+    if (vec_get(buf, k) != 0) { any_nonzero = 1; }
+    k = k + 1;
+}
+assert(any_nonzero, "fill_buffer wrote a nonzero sample");
+
+# ================================================================
+test_group("noise_type accessor");
+assert_eq(NoiseGenerator_noise_type(wg), NOISE_WHITE, "white type");
+assert_eq(NoiseGenerator_noise_type(pg), NOISE_PINK, "pink type");
+assert_eq(NoiseGenerator_noise_type(bg), NOISE_BROWN, "brown type");
+
+var rc = assert_summary();
+syscall(60, rc);

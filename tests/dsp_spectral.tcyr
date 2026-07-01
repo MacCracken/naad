@@ -1,0 +1,381 @@
+# dsp_spectral.tcyr -- parity tests for src/dsp_spectral.cyr (the hisab-interop
+# spectral/analysis block deferred out of dsp_util). Ports every
+# `#[cfg(feature="synthesis")]` #[test] from rust-old/src/dsp_util.rs
+# one-for-one (serde tests dropped; eval_polynomial tests stay in dsp_util).
+# f32 -> f64; oracle tolerances kept (loosened only where the oracle already
+# used a slack bound).
+
+include "lib/hisab.cyr"
+include "src/error.cyr"
+include "src/dsp_util.cyr"
+include "src/dsp_spectral.cyr"
+
+# --- float literals used by the ported tests (IEEE-754 bit patterns) ---
+var T_0_5    = 0x3FE0000000000000;   # 0.5
+var T_N0_3   = 0xBFD3333333333333;   # -0.3
+var T_0_2    = 0x3FC999999999999A;   # 0.2
+var T_1E5    = 0x3EE4F8B588E368F1;   # 1e-5
+var T_0_05   = 0x3FA999999999999A;   # 0.05
+var T_N0_1   = 0xBFB999999999999A;   # -0.1
+var T_1_1    = 0x3FF199999999999A;   # 1.1
+var T_1E9    = 0x3E112E0BE826D695;   # 1e-9
+var T_0_02   = 0x3F947AE147AE147B;   # 0.02
+var T_N1_5   = 0xBFF8000000000000;   # -1.5
+var T_0_1    = 0x3FB999999999999A;   # 0.1
+var T_0_015  = 0x3F8EB851EB851EB8;   # 0.015
+var T_0_8    = 0x3FE999999999999A;   # 0.8
+var T_0_25   = 0x3FD0000000000000;   # 0.25
+var T_0_6    = 0x3FE3333333333333;   # 0.6
+var T_N2_0   = 0xC000000000000000;   # -2.0
+var T_437_3  = 0x407B54CCCCCCCCCD;   # 437.3
+
+# ================================================================
+# Helpers.
+# ================================================================
+
+# 1 if |a - b| < tol, else 0.
+fn approx(a, b, tol) {
+    if (f64_lt(f64_abs(f64_sub(a, b)), tol) == 1) { return 1; }
+    return 0;
+}
+
+# sin sweep: sample i = sin(TAU * freq * i / sr). Returns a vec of n f64.
+fn synth_sine(freq, sr, n) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) {
+        var phase = f64_mul(f64_mul(F64_TAU, freq), f64_div(f64_from(i), sr));
+        vec_push(v, f64_sin(phase));
+        i = i + 1;
+    }
+    return v;
+}
+
+# Index of the maximum element scanning from `start` (keeps first max).
+fn argmax_from(v, start) {
+    var n = vec_len(v);
+    var best = start;
+    var bestv = vec_get(v, start);
+    var i = start + 1;
+    while (i < n) {
+        var x = vec_get(v, i);
+        if (f64_gt(x, bestv) == 1) {
+            bestv = x;
+            best = i;
+        }
+        i = i + 1;
+    }
+    return best;
+}
+
+# 1200 * log2(pitch / reference) -- cents deviation.
+fn cents_off(pitch, reference) {
+    var log2 = f64_div(f64_ln(f64_div(pitch, reference)), F64_LN2);
+    return f64_mul(f64_from(1200), log2);
+}
+
+# Fill a 50 ms 440 Hz burst (amplitude 0.8) into signal at start_sample.
+fn fill_burst(signal, n, start_sample, burst_len, sr) {
+    var i = 0;
+    while (i < burst_len) {
+        var idx = start_sample + i;
+        if (idx < n) {
+            var phase = f64_mul(f64_mul(F64_TAU, f64_from(440)), f64_div(f64_from(i), sr));
+            vec_set(signal, idx, f64_mul(f64_sin(phase), T_0_8));
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+alloc_init();
+
+# ================================================================
+test_group("fft_magnitudes locates 440 Hz peak");
+var fm_buf = synth_sine(f64_from(440), f64_from(44100), 1024);
+var fm_mags = fft_magnitudes(fm_buf);
+assert_eq(vec_len(fm_mags), 513, "fft mags length = N/2+1");
+var fm_peak = argmax_from(fm_mags, 1);
+# expected bin = round(440 * 1024 / 44100) ~ 10.
+var fm_eb = f64_to(f64_add(f64_div(f64_from(440 * 1024), f64_from(44100)), F64_HALF));
+var fm_dev = fm_peak - fm_eb;
+if (fm_dev < 0) { fm_dev = 0 - fm_dev; }
+assert(fm_dev <= 1, "fft peak within 1 bin of expected");
+
+# ================================================================
+test_group("power_spectrum DC dominance");
+var ps_buf = vec_new();
+var ps_i = 0;
+while (ps_i < 256) {
+    vec_push(ps_buf, T_0_5);
+    ps_i = ps_i + 1;
+}
+var ps = power_spectrum(ps_buf);
+assert_eq(vec_len(ps), 129, "power spectrum length = N/2+1");
+assert(f64_gt(vec_get(ps, 0), vec_get(ps, 1)), "DC bin has the most power");
+
+# ================================================================
+test_group("bspline_eval_1d interpolates endpoints");
+var bs_cps = vec_new();
+vec_push(bs_cps, 0);
+vec_push(bs_cps, T_0_5);
+vec_push(bs_cps, T_N0_3);
+vec_push(bs_cps, F64_ONE);
+vec_push(bs_cps, T_0_2);
+var bs_at0 = bspline_eval_1d(3, bs_cps, 0);
+var bs_at1 = bspline_eval_1d(3, bs_cps, F64_ONE);
+assert(approx(bs_at0, vec_get(bs_cps, 0), T_1E5), "spline(0) hits first control point");
+assert(approx(bs_at1, vec_get(bs_cps, 4), T_1E5), "spline(1) hits last control point");
+
+# ================================================================
+test_group("bspline_eval_1d smooth, no kinks");
+var sk_cps = vec_new();
+vec_push(sk_cps, 0);
+vec_push(sk_cps, F64_ONE);
+vec_push(sk_cps, 0);
+vec_push(sk_cps, F64_ONE);
+vec_push(sk_cps, 0);
+var sk_n = 1024;
+var sk_buf = vec_new();
+var sk_all_finite = 1;
+var sk_i = 0;
+while (sk_i < sk_n) {
+    var sk_t = f64_div(f64_from(sk_i), f64_from(sk_n - 1));
+    var sk_v = bspline_eval_1d(3, sk_cps, sk_t);
+    if (naad_is_finite(sk_v) == 0) { sk_all_finite = 0; }
+    vec_push(sk_buf, sk_v);
+    sk_i = sk_i + 1;
+}
+assert(sk_all_finite, "all B-spline samples finite");
+var sk_max = 0;
+sk_i = 1;
+while (sk_i < sk_n) {
+    var sk_d = f64_abs(f64_sub(vec_get(sk_buf, sk_i), vec_get(sk_buf, sk_i - 1)));
+    if (f64_gt(sk_d, sk_max) == 1) { sk_max = sk_d; }
+    sk_i = sk_i + 1;
+}
+assert(f64_lt(sk_max, T_0_05), "B-spline max sample-to-sample delta < 0.05");
+
+# ================================================================
+test_group("bspline_eval_1d rejects invalid");
+var rj_a = vec_new();
+vec_push(rj_a, F64_ONE);
+vec_push(rj_a, F64_TWO);
+# degree 0 invalid.
+assert_eq(naad_is_finite(bspline_eval_1d(0, rj_a, T_0_5)), 0, "degree 0 -> None");
+# too few control points (need >= degree+1 = 4).
+assert_eq(naad_is_finite(bspline_eval_1d(3, rj_a, T_0_5)), 0, "too few control points -> None");
+var rj_b = vec_new();
+vec_push(rj_b, 0);
+vec_push(rj_b, F64_ONE);
+vec_push(rj_b, 0);
+vec_push(rj_b, F64_ONE);
+assert_eq(naad_is_finite(bspline_eval_1d(3, rj_b, T_N0_1)), 0, "t < 0 -> None");
+assert_eq(naad_is_finite(bspline_eval_1d(3, rj_b, T_1_1)), 0, "t > 1 -> None");
+
+# ================================================================
+test_group("fit_polynomial recovers a known quadratic");
+# y = 1 + 2x + 3x^2 over xs = -2 + i*0.2, i in 0..20.
+var fq_xs = vec_new();
+var fq_ys = vec_new();
+var fq_i = 0;
+while (fq_i < 20) {
+    var fq_x = f64_add(T_N2_0, f64_mul(f64_from(fq_i), T_0_2));
+    vec_push(fq_xs, fq_x);
+    var fq_y = f64_add(f64_add(F64_ONE, f64_mul(F64_TWO, fq_x)), f64_mul(f64_from(3), f64_mul(fq_x, fq_x)));
+    vec_push(fq_ys, fq_y);
+    fq_i = fq_i + 1;
+}
+var fq_c = fit_polynomial(fq_xs, fq_ys, 2);
+assert_eq(vec_len(fq_c), 3, "quadratic fit returns 3 coefficients");
+assert(approx(vec_get(fq_c, 0), F64_ONE, T_1E9), "c0 ~ 1");
+assert(approx(vec_get(fq_c, 1), F64_TWO, T_1E9), "c1 ~ 2");
+assert(approx(vec_get(fq_c, 2), f64_from(3), T_1E9), "c2 ~ 3");
+
+# ================================================================
+test_group("fit_polynomial approximates tanh");
+# xs = -2 + i*0.02, i in 0..201; degree-5 odd fit of tanh.
+var ft_xs = vec_new();
+var ft_ys = vec_new();
+var ft_i = 0;
+while (ft_i < 201) {
+    var ft_x = f64_add(T_N2_0, f64_mul(f64_from(ft_i), T_0_02));
+    vec_push(ft_xs, ft_x);
+    vec_push(ft_ys, f64_tanh(ft_x));
+    ft_i = ft_i + 1;
+}
+var ft_c = fit_polynomial(ft_xs, ft_ys, 5);
+assert_eq(vec_len(ft_c), 6, "degree-5 fit returns 6 coefficients");
+var ft_ok = 1;
+var ft_k = 0;
+while (ft_k <= 30) {
+    var ft_ex = f64_add(T_N1_5, f64_mul(f64_from(ft_k), T_0_1));
+    var ft_exact = f64_tanh(ft_ex);
+    var ft_approx = eval_polynomial(ft_c, ft_ex);
+    if (f64_ge(f64_abs(f64_sub(ft_exact, ft_approx)), T_0_015) == 1) { ft_ok = 0; }
+    ft_k = ft_k + 1;
+}
+assert(ft_ok, "tanh fit within 0.015 over [-1.5, 1.5]");
+
+# ================================================================
+test_group("fit_polynomial rejects invalid");
+var fr_x2 = vec_new();
+vec_push(fr_x2, F64_ONE);
+vec_push(fr_x2, F64_TWO);
+var fr_y1 = vec_new();
+vec_push(fr_y1, F64_ONE);
+# mismatched lengths -> empty.
+assert_eq(vec_len(fit_polynomial(fr_x2, fr_y1, 1)), 0, "length mismatch -> empty");
+# too few points for degree 5 -> empty.
+assert_eq(vec_len(fit_polynomial(fr_x2, fr_x2, 5)), 0, "too few points -> empty");
+
+# ================================================================
+test_group("stft dimensions match spec");
+var sd_sig = vec_new();
+var sd_i = 0;
+while (sd_i < 4096) {
+    vec_push(sd_sig, T_0_5);
+    sd_i = sd_i + 1;
+}
+var sd_frames = stft_magnitudes(sd_sig, 1024, 256, WINDOW_HANN);
+assert_eq(vec_len(sd_frames), 13, "13 frames for 4096/1024/256");
+var sd_ok = 1;
+var sd_f = 0;
+while (sd_f < vec_len(sd_frames)) {
+    if (vec_len(vec_get(sd_frames, sd_f)) != 513) { sd_ok = 0; }
+    sd_f = sd_f + 1;
+}
+assert(sd_ok, "each frame has window/2+1 bins");
+
+# ================================================================
+test_group("stft locates sine peak");
+var sl_sig = synth_sine(f64_from(1000), f64_from(44100), 8192);
+var sl_frames = stft_magnitudes(sl_sig, 2048, 512, WINDOW_HANN);
+assert(vec_len(sl_frames) > 0, "stft produced frames");
+var sl_bin_hz = f64_div(f64_from(44100), f64_from(2048));
+var sl_tol = f64_mul(sl_bin_hz, F64_ONE_HALF);
+var sl_ok = 1;
+var sl_f = 0;
+while (sl_f < vec_len(sl_frames)) {
+    var sl_frame = vec_get(sl_frames, sl_f);
+    var sl_pb = argmax_from(sl_frame, 1);
+    var sl_pf = f64_mul(f64_from(sl_pb), sl_bin_hz);
+    if (f64_ge(f64_abs(f64_sub(sl_pf, f64_from(1000))), sl_tol) == 1) { sl_ok = 0; }
+    sl_f = sl_f + 1;
+}
+assert(sl_ok, "every frame peak within 1.5 bins of 1000 Hz");
+
+# ================================================================
+test_group("stft rejects invalid inputs");
+var si_z = vec_new();
+var si_i = 0;
+while (si_i < 4096) {
+    vec_push(si_z, 0);
+    si_i = si_i + 1;
+}
+assert_eq(vec_len(stft_magnitudes(si_z, 1000, 256, WINDOW_HANN)), 0, "non-pow2 window -> empty");
+assert_eq(vec_len(stft_magnitudes(si_z, 1024, 0, WINDOW_HANN)), 0, "hop 0 -> empty");
+var si_short = vec_new();
+si_i = 0;
+while (si_i < 100) {
+    vec_push(si_short, 0);
+    si_i = si_i + 1;
+}
+assert_eq(vec_len(stft_magnitudes(si_short, 1024, 256, WINDOW_HANN)), 0, "signal < window -> empty");
+
+# ================================================================
+test_group("chromagram concentrates on pitch class A (9)");
+var ch_sig = synth_sine(f64_from(440), f64_from(44100), 16384);
+var ch_stft = stft_magnitudes(ch_sig, 4096, 1024, WINDOW_HANN);
+var ch_chroma = chromagram(ch_stft, 4096, f64_from(44100));
+assert(vec_len(ch_chroma) > 0, "chromagram produced frames");
+var ch_ok = 1;
+var ch_f = 0;
+while (ch_f < vec_len(ch_chroma)) {
+    if (argmax_from(vec_get(ch_chroma, ch_f), 0) != 9) { ch_ok = 0; }
+    ch_f = ch_f + 1;
+}
+assert(ch_ok, "440 Hz peaks at pitch class A (index 9)");
+
+# ================================================================
+test_group("detect_onsets finds bursts");
+var on_sr = f64_from(44100);
+var on_n = 44100;
+var on_sig = vec_new();
+var on_i = 0;
+while (on_i < on_n) {
+    vec_push(on_sig, 0);
+    on_i = on_i + 1;
+}
+var on_burst = f64_to(f64_mul(on_sr, T_0_05));
+fill_burst(on_sig, on_n, f64_to(f64_mul(T_0_25, on_sr)), on_burst, on_sr);
+fill_burst(on_sig, on_n, f64_to(f64_mul(T_0_6, on_sr)), on_burst, on_sr);
+var on_stft = stft_magnitudes(on_sig, 1024, 256, WINDOW_HANN);
+var on_onsets = detect_onsets(on_stft, 256, on_sr, F64_ONE_HALF);
+assert(vec_len(on_onsets) > 0, "at least one onset detected");
+assert(approx(vec_get(on_onsets, 0), T_0_25, T_0_05), "first onset near 0.25 s");
+
+# ================================================================
+test_group("detect_pitch 440 Hz sine");
+var p4_buf = synth_sine(f64_from(440), f64_from(44100), 4096);
+var p4_pitch = detect_pitch_autocorr(p4_buf, f64_from(44100), f64_from(30), f64_from(2000));
+assert(f64_gt(p4_pitch, 0), "440 Hz sine -> a pitch");
+assert(f64_lt(f64_abs(cents_off(p4_pitch, f64_from(440))), f64_from(5)), "440 Hz within 5 cents");
+
+# ================================================================
+test_group("detect_pitch 220 / 880 / 1100 Hz");
+var pm_freqs = vec_new();
+vec_push(pm_freqs, f64_from(220));
+vec_push(pm_freqs, f64_from(880));
+vec_push(pm_freqs, f64_from(1100));
+var pm_ok = 1;
+var pm_i = 0;
+while (pm_i < 3) {
+    var pm_freq = vec_get(pm_freqs, pm_i);
+    var pm_buf = synth_sine(pm_freq, f64_from(44100), 4096);
+    var pm_pitch = detect_pitch_autocorr(pm_buf, f64_from(44100), f64_from(30), f64_from(2000));
+    if (f64_gt(pm_pitch, 0) == 0) { pm_ok = 0; }
+    if (f64_ge(f64_abs(cents_off(pm_pitch, pm_freq)), f64_from(5)) == 1) { pm_ok = 0; }
+    pm_i = pm_i + 1;
+}
+assert(pm_ok, "each of 220/880/1100 Hz within 5 cents");
+
+# ================================================================
+test_group("detect_pitch sub-sample accuracy (437.3 Hz)");
+var pss_buf = synth_sine(T_437_3, f64_from(44100), 4096);
+var pss_pitch = detect_pitch_autocorr(pss_buf, f64_from(44100), f64_from(30), f64_from(2000));
+assert(f64_gt(pss_pitch, 0), "437.3 Hz sine -> a pitch");
+assert(f64_lt(f64_abs(cents_off(pss_pitch, T_437_3)), f64_from(5)), "non-integer period within 5 cents");
+
+# ================================================================
+test_group("detect_pitch rejects noise gracefully");
+var pn_st = alloc(8);
+store64(pn_st, 12345);
+var pn_noise = vec_new();
+var pn_i = 0;
+while (pn_i < 4096) {
+    vec_push(pn_noise, xorshift32_signed_f32(pn_st));
+    pn_i = pn_i + 1;
+}
+var pn_pitch = detect_pitch_autocorr(pn_noise, f64_from(44100), f64_from(30), f64_from(2000));
+# Either None (-1.0) or a finite pitch -- both are finite; must never be NaN/inf.
+assert(naad_is_finite(pn_pitch), "noise pitch is finite (None sentinel or a value)");
+
+# ================================================================
+test_group("detect_pitch short buffer -> None");
+var psb = vec_new();
+var psb_i = 0;
+while (psb_i < 16) {
+    vec_push(psb, 0);
+    psb_i = psb_i + 1;
+}
+assert(f64_lt(detect_pitch_autocorr(psb, f64_from(44100), f64_from(30), f64_from(2000)), 0), "16-sample buffer -> None (-1)");
+
+# ================================================================
+test_group("detect_pitch invalid range -> None");
+var pir_buf = synth_sine(f64_from(440), f64_from(44100), 1024);
+assert(f64_lt(detect_pitch_autocorr(pir_buf, f64_from(44100), f64_from(2000), f64_from(30)), 0), "min > max -> None");
+assert(f64_lt(detect_pitch_autocorr(pir_buf, f64_neg(F64_ONE), f64_from(30), f64_from(2000)), 0), "negative sample rate -> None");
+
+var rc = assert_summary();
+syscall(60, rc);

@@ -1,0 +1,551 @@
+# dsp_spectral.cyr -- DSP spectral / analysis block (the `synthesis`-gated,
+# hisab-interop half of rust-old/src/dsp_util.rs). Kept OUT of dsp_util.cyr
+# because these functions need hisab (num_fft / calc_bspline / QR least
+# squares) while most dsp_util consumers don't pull hisab. f32 -> f64 as
+# usual; buffers are stdlib `vec` handles (one f64 per slot). `SpectralWindow`
+# reuses the WINDOW_* constants already defined in dsp_util.cyr.
+#
+# Requires (from the build/test unit): lib/hisab.cyr (num_fft / calc_bspline /
+# hvec3_new / HVec3_x), auto-stdlib math+ganita (F64_* / f64_clamp / ganita_mat_*)
+# and src/error.cyr (naad_is_finite, EPSILON tolerances). No `include` lines.
+#
+# Public API (names match the frozen Rust oracle): fft_magnitudes,
+# power_spectrum, stft_magnitudes, chromagram, detect_onsets,
+# detect_pitch_autocorr, bspline_eval_1d, fit_polynomial. Internal helpers
+# carry a `_dsp_` prefix. `eval_polynomial` already lives in dsp_util.cyr.
+
+# ================================================================
+# Extra IEEE-754 literals (non-integers only; integers via f64_from).
+# ================================================================
+var SPEC_NAN   = 0x7FF8000000000000;   # canonical quiet NaN (bspline None)
+var SPEC_C054  = 0x3FE147AE147AE148;   # 0.54  (Hamming a0)
+var SPEC_C046  = 0x3FDD70A3D70A3D71;   # 0.46  (Hamming a1)
+var SPEC_C042  = 0x3FDAE147AE147AE1;   # 0.42  (Blackman a0)
+var SPEC_C008  = 0x3FB47AE147AE147B;   # 0.08  (Blackman a2)
+var SPEC_C27_5 = 0x403B800000000000;   # 27.5  (A0, chroma lower bound)
+var SPEC_C030  = 0x3FD3333333333333;   # 0.30  (autocorr peak threshold)
+var SPEC_C1E6  = 0x3EB0C6F7A0B5ED8D;   # 1e-6  (onset flux floor)
+var SPEC_C1E9  = 0x3E112E0BE826D695;   # 1e-9  (Newton convergence tol)
+var SPEC_C1E12 = 0x3D719799812DEA11;   # 1e-12 (parabolic denom / deriv guard)
+
+# ================================================================
+# _dsp_is_pow2 -- 1 if n is a positive power of two, else 0.
+# ================================================================
+#must_use
+fn _dsp_is_pow2(n) {
+    if (n <= 0) { return 0; }
+    var m = n & (n - 1);
+    if (m == 0) { return 1; }
+    return 0;
+}
+
+# ================================================================
+# _dsp_sort_f64 -- ascending insertion sort of a vec of f64 in place.
+# Used for the running-median onset threshold (Rust `sort_by` on partial_cmp).
+# ================================================================
+fn _dsp_sort_f64(v) {
+    var n = vec_len(v);
+    var i = 1;
+    while (i < n) {
+        var key = vec_get(v, i);
+        var j = i - 1;
+        var go = 1;
+        while (go == 1) {
+            if (j < 0) { go = 0; }
+            if (go == 1) {
+                if (f64_gt(vec_get(v, j), key) == 1) {
+                    vec_set(v, j + 1, vec_get(v, j));
+                    j = j - 1;
+                } else {
+                    go = 0;
+                }
+            }
+        }
+        vec_set(v, j + 1, key);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# _dsp_rem_euclid_12 -- Euclidean remainder x mod 12 in [0, 12). For the
+# chromagram MIDI-to-pitch-class fold. Matches Rust f64::rem_euclid(12.0)
+# over the positive MIDI range this is called on.
+# ================================================================
+#must_use
+fn _dsp_rem_euclid_12(x) {
+    var twelve = f64_from(12);
+    var q = f64_floor(f64_div(x, twelve));
+    return f64_sub(x, f64_mul(twelve, q));
+}
+
+# ================================================================
+# fft_magnitudes -- real-valued FFT magnitude spectrum, bins 0..N/2 (DC to
+# Nyquist), each scaled by 1/N. Input length must be a power of two. On FFT
+# failure returns an empty vec. Ports fft_magnitudes.
+# ================================================================
+#must_use
+fn fft_magnitudes(input) {
+    var n = vec_len(input);
+    var data = alloc(n * 16);
+    var i = 0;
+    while (i < n) {
+        store64(data + i * 16, vec_get(input, i));
+        store64(data + i * 16 + 8, 0);
+        i = i + 1;
+    }
+    var out = vec_new();
+    if (num_fft(data, n) != 0) { return out; }
+    var half = n / 2 + 1;
+    var inv_n = f64_div(F64_ONE, f64_from(n));
+    var b = 0;
+    while (b < half) {
+        var re = load64(data + b * 16);
+        var im = load64(data + b * 16 + 8);
+        var mag = f64_sqrt(f64_add(f64_mul(re, re), f64_mul(im, im)));
+        vec_push(out, f64_mul(mag, inv_n));
+        b = b + 1;
+    }
+    return out;
+}
+
+# ================================================================
+# power_spectrum -- power (|X|^2) for bins 0..N/2, scaled by 1/N^2. Input
+# length must be a power of two. Empty vec on FFT failure. Ports power_spectrum.
+# ================================================================
+#must_use
+fn power_spectrum(input) {
+    var n = vec_len(input);
+    var data = alloc(n * 16);
+    var i = 0;
+    while (i < n) {
+        store64(data + i * 16, vec_get(input, i));
+        store64(data + i * 16 + 8, 0);
+        i = i + 1;
+    }
+    var out = vec_new();
+    if (num_fft(data, n) != 0) { return out; }
+    var half = n / 2 + 1;
+    var inv_n_sq = f64_div(F64_ONE, f64_mul(f64_from(n), f64_from(n)));
+    var b = 0;
+    while (b < half) {
+        var re = load64(data + b * 16);
+        var im = load64(data + b * 16 + 8);
+        var p = f64_add(f64_mul(re, re), f64_mul(im, im));
+        vec_push(out, f64_mul(p, inv_n_sq));
+        b = b + 1;
+    }
+    return out;
+}
+
+# ================================================================
+# _dsp_apply_spectral_window -- apply a WINDOW_* window to a vec in place.
+# Rectangular is a no-op; Hann/Hamming/Blackman use the raised-cosine forms.
+# Ports SpectralWindow::apply.
+# ================================================================
+fn _dsp_apply_spectral_window(buf, window) {
+    var len = vec_len(buf);
+    if (len == 0) { return 0; }
+    if (window == WINDOW_RECTANGULAR) { return 0; }
+    var inv = f64_div(F64_ONE, f64_from(len));
+    var i = 0;
+    while (i < len) {
+        # phase = TAU * i / len == TAU * t
+        var phase = f64_mul(f64_mul(F64_TAU, f64_from(i)), inv);
+        var w = F64_ONE;
+        if (window == WINDOW_HANN) {
+            w = f64_mul(F64_HALF, f64_sub(F64_ONE, f64_cos(phase)));
+        }
+        if (window == WINDOW_HAMMING) {
+            w = f64_sub(SPEC_C054, f64_mul(SPEC_C046, f64_cos(phase)));
+        }
+        if (window == WINDOW_BLACKMAN) {
+            var c1 = f64_mul(F64_HALF, f64_cos(phase));
+            var c2 = f64_mul(SPEC_C008, f64_cos(f64_mul(F64_TWO, phase)));
+            w = f64_add(f64_sub(SPEC_C042, c1), c2);
+        }
+        vec_set(buf, i, f64_mul(vec_get(buf, i), w));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# stft_magnitudes -- windowed-FFT magnitude spectrogram. Slides an FFT of
+# length window_size across `signal` by hop_size, windowing each frame. Returns
+# a vec of frames, each a vec of window_size/2+1 magnitudes. Empty (vec of
+# vecs) if signal shorter than window_size, hop_size == 0, or window_size is
+# not a power of two. Ports stft_magnitudes.
+# ================================================================
+#must_use
+fn stft_magnitudes(signal, window_size, hop_size, window) {
+    var sig_len = vec_len(signal);
+    if (sig_len < window_size) { return vec_new(); }
+    if (hop_size == 0) { return vec_new(); }
+    if (_dsp_is_pow2(window_size) == 0) { return vec_new(); }
+    if (window_size == 0) { return vec_new(); }
+
+    var num_frames = (sig_len - window_size) / hop_size + 1;
+    var half = window_size / 2 + 1;
+    var frames = vec_new();
+
+    var f = 0;
+    while (f < num_frames) {
+        var start = f * hop_size;
+        var frame = vec_new();
+        var k = 0;
+        while (k < window_size) {
+            vec_push(frame, vec_get(signal, start + k));
+            k = k + 1;
+        }
+        _dsp_apply_spectral_window(frame, window);
+        var mag = fft_magnitudes(frame);
+        if (vec_len(mag) < half) {
+            # FFT failure -- bail out cleanly.
+            return vec_new();
+        }
+        vec_push(frames, mag);
+        f = f + 1;
+    }
+    return frames;
+}
+
+# ================================================================
+# chromagram -- 12-bin pitch-class profile per STFT frame. Folds each bin's
+# centre frequency (piano range 27.5..4186 Hz only) into a chromatic pitch
+# class via its fractional MIDI number. Returns a vec of 12-slot vecs (bin 0
+# = C .. bin 11 = B). Ports chromagram.
+# ================================================================
+#must_use
+fn chromagram(magnitudes, window_size, sample_rate) {
+    var chroma_frames = vec_new();
+    if (window_size == 0) { return chroma_frames; }
+    if (f64_le(sample_rate, 0) == 1) { return chroma_frames; }
+    var bin_hz = f64_div(sample_rate, f64_from(window_size));
+    var upper = f64_from(4186);
+
+    var nf = vec_len(magnitudes);
+    var fi = 0;
+    while (fi < nf) {
+        var frame = vec_get(magnitudes, fi);
+        var chroma = vec_new();
+        var z = 0;
+        while (z < 12) {
+            vec_push(chroma, 0);
+            z = z + 1;
+        }
+        var flen = vec_len(frame);
+        var bin = 1;
+        while (bin < flen) {
+            var m = vec_get(frame, bin);
+            var freq = f64_mul(f64_from(bin), bin_hz);
+            if (f64_ge(freq, SPEC_C27_5) == 1 && f64_le(freq, upper) == 1) {
+                # MIDI note (fractional): 69 + 12 * log2(freq / 440).
+                var ratio = f64_div(freq, f64_from(440));
+                var log2 = f64_div(f64_ln(ratio), F64_LN2);
+                var midi = f64_add(f64_from(69), f64_mul(f64_from(12), log2));
+                var pc = _dsp_rem_euclid_12(midi);
+                var pci = f64_to(f64_floor(pc));
+                var pc_idx = pci % 12;
+                vec_set(chroma, pc_idx, f64_add(vec_get(chroma, pc_idx), m));
+            }
+            bin = bin + 1;
+        }
+        vec_push(chroma_frames, chroma);
+        fi = fi + 1;
+    }
+    return chroma_frames;
+}
+
+# ================================================================
+# detect_onsets -- onset times (seconds) via spectral flux over an STFT
+# magnitude spectrogram. Flux = L2 norm of the half-wave-rectified frame-to-
+# frame magnitude increase; onsets are local flux maxima above an adaptive
+# running-median threshold. Returns a (possibly empty) vec of f64 times.
+# Ports detect_onsets.
+# ================================================================
+#must_use
+fn detect_onsets(magnitudes, hop_size, sample_rate, threshold_factor) {
+    var nf = vec_len(magnitudes);
+    if (nf < 3) { return vec_new(); }
+    if (hop_size == 0) { return vec_new(); }
+    if (f64_le(sample_rate, 0) == 1) { return vec_new(); }
+
+    # Spectral flux per frame (frame 0 has no flux).
+    var flux = vec_new();
+    vec_push(flux, 0);
+    var i = 1;
+    while (i < nf) {
+        var prev = vec_get(magnitudes, i - 1);
+        var cur = vec_get(magnitudes, i);
+        var lc = vec_len(cur);
+        var lp = vec_len(prev);
+        var len = lc;
+        if (lp < len) { len = lp; }
+        var sum = 0;
+        var k = 0;
+        while (k < len) {
+            var diff = f64_sub(vec_get(cur, k), vec_get(prev, k));
+            if (f64_gt(diff, 0) == 1) {
+                sum = f64_add(sum, f64_mul(diff, diff));
+            }
+            k = k + 1;
+        }
+        vec_push(flux, f64_sqrt(sum));
+        i = i + 1;
+    }
+
+    # Running-median threshold over a +/-5-frame window.
+    var window = 5;
+    var flux_len = vec_len(flux);
+    var onsets = vec_new();
+    var j = 1;
+    while (j < flux_len - 1) {
+        var fj = vec_get(flux, j);
+        var is_peak = 1;
+        if (f64_le(fj, vec_get(flux, j - 1)) == 1) { is_peak = 0; }
+        if (f64_le(fj, vec_get(flux, j + 1)) == 1) { is_peak = 0; }
+        if (is_peak == 1) {
+            var lo = 0;
+            if (j >= window) { lo = j - window; }
+            var hi = j + window + 1;
+            if (hi > flux_len) { hi = flux_len; }
+            var local = vec_new();
+            var p = lo;
+            while (p < hi) {
+                vec_push(local, vec_get(flux, p));
+                p = p + 1;
+            }
+            _dsp_sort_f64(local);
+            var median = vec_get(local, vec_len(local) / 2);
+            if (f64_gt(fj, f64_mul(median, threshold_factor)) == 1 && f64_gt(fj, SPEC_C1E6) == 1) {
+                var frame_idx = j * hop_size;
+                var time = f64_div(f64_from(frame_idx), sample_rate);
+                vec_push(onsets, time);
+            }
+        }
+        j = j + 1;
+    }
+    return onsets;
+}
+
+# ================================================================
+# detect_pitch_autocorr -- fundamental pitch (Hz) via autocorrelation with
+# Catmull-Rom cubic + Newton-Raphson sub-sample peak refinement. Returns the
+# pitch on success or -1.0 (impossible pitch) for the Rust `None`: buffer < 32
+# samples, degenerate search range, or a peak below 30% of the zero-lag energy.
+# Ports detect_pitch_autocorr; the closure-based newton_raphson is inlined
+# (16 iters, tol 1e-9, derivative guard 1e-12).
+# ================================================================
+#must_use
+fn detect_pitch_autocorr(buffer, sample_rate, min_hz, max_hz) {
+    var none = f64_neg(F64_ONE);
+    var n = vec_len(buffer);
+    if (n < 32) { return none; }
+    if (f64_le(sample_rate, 0) == 1) { return none; }
+    if (f64_le(min_hz, 0) == 1) { return none; }
+    if (f64_le(max_hz, min_hz) == 1) { return none; }
+
+    var max_lag = f64_to(f64_div(sample_rate, min_hz));
+    if (max_lag > n - 1) { max_lag = n - 1; }
+    var min_lag = f64_to(f64_div(sample_rate, max_hz));
+    if (min_lag < 2) { min_lag = 2; }
+    if (min_lag + 2 >= max_lag) { return none; }
+
+    # Direct autocorrelation, lags 0..max_lag+1.
+    var autocorr = vec_new();
+    var alen = max_lag + 2;
+    var lag = 0;
+    while (lag < alen) {
+        var sum = 0;
+        var upper = n - lag;
+        var i = 0;
+        while (i < upper) {
+            sum = f64_add(sum, f64_mul(vec_get(buffer, i), vec_get(buffer, i + lag)));
+            i = i + 1;
+        }
+        vec_push(autocorr, sum);
+        lag = lag + 1;
+    }
+
+    var r0 = vec_get(autocorr, 0);
+    if (f64_le(r0, 0) == 1) { return none; }
+
+    # Largest peak in [min_lag, max_lag-1].
+    var peak_lag = min_lag;
+    var peak_val = vec_get(autocorr, min_lag);
+    var l = min_lag + 1;
+    while (l < max_lag) {
+        var al = vec_get(autocorr, l);
+        if (f64_gt(al, peak_val) == 1
+        && f64_gt(al, vec_get(autocorr, l - 1)) == 1
+        && f64_gt(al, vec_get(autocorr, l + 1)) == 1) {
+            peak_val = al;
+            peak_lag = l;
+        }
+        l = l + 1;
+    }
+
+    # Reject noise-dominated buffers (peak too weak relative to r(0)).
+    if (f64_lt(peak_val, f64_mul(SPEC_C030, r0)) == 1) { return none; }
+
+    var y0 = vec_get(autocorr, peak_lag - 1);
+    var y1 = vec_get(autocorr, peak_lag);
+    var y2 = vec_get(autocorr, peak_lag + 1);
+    var y3 = vec_get(autocorr, peak_lag + 2);
+
+    # Cubic through the four samples: P'(t) = 0.5*(3a t^2 + 2b t + c),
+    # P''(t) = 0.5*(6a t + 2b).
+    var three = f64_from(3);
+    var a = f64_add(f64_sub(f64_add(f64_neg(y0), f64_mul(three, y1)), f64_mul(three, y2)), y3);
+    var b = f64_sub(f64_add(f64_sub(f64_mul(F64_TWO, y0), f64_mul(f64_from(5), y1)), f64_mul(f64_from(4), y2)), y3);
+    var c = f64_add(f64_neg(y0), y2);
+
+    # Parabolic-interpolation initial guess.
+    var denom = f64_mul(F64_TWO, f64_add(f64_sub(y0, f64_mul(F64_TWO, y1)), y2));
+    var parabolic_t = 0;
+    if (f64_lt(f64_abs(denom), SPEC_C1E12) == 0) {
+        parabolic_t = f64_clamp(f64_div(f64_sub(y0, y2), denom), f64_neg(F64_ONE), F64_ONE);
+    }
+
+    # Newton-Raphson on P'(t) = 0 (inlined; matches num_newton semantics).
+    var t = parabolic_t;
+    var converged = 0;
+    var stop = 0;
+    var it = 0;
+    while (it < 16) {
+        if (stop == 0) {
+            var t2 = f64_mul(t, t);
+            var fx = f64_mul(F64_HALF,
+            f64_add(f64_add(f64_mul(f64_mul(three, a), t2), f64_mul(f64_mul(F64_TWO, b), t)), c));
+            if (f64_lt(f64_abs(fx), SPEC_C1E9) == 1) {
+                converged = 1;
+                stop = 1;
+            } else {
+                var dfx = f64_mul(F64_HALF, f64_add(f64_mul(f64_mul(f64_from(6), a), t), f64_mul(F64_TWO, b)));
+                if (f64_lt(f64_abs(dfx), SPEC_C1E12) == 1) {
+                    stop = 1;
+                } else {
+                    t = f64_sub(t, f64_div(fx, dfx));
+                }
+            }
+        }
+        it = it + 1;
+    }
+    var refined_t = parabolic_t;
+    if (converged == 1) { refined_t = t; }
+    refined_t = f64_clamp(refined_t, f64_neg(F64_ONE), F64_ONE);
+
+    var refined_lag = f64_add(f64_from(peak_lag), refined_t);
+    if (f64_le(refined_lag, 0) == 1) { return none; }
+    var pitch = f64_div(sample_rate, refined_lag);
+    if (naad_is_finite(pitch) == 0) { return none; }
+    if (f64_lt(pitch, f64_mul(min_hz, F64_HALF)) == 1) { return none; }
+    if (f64_gt(pitch, f64_mul(max_hz, F64_TWO)) == 1) { return none; }
+    return pitch;
+}
+
+# ================================================================
+# bspline_eval_1d -- evaluate a 1-D clamped open-uniform B-spline of `degree`
+# through `control_points` (a vec of f64) at t in [0, 1]. Lifts each scalar
+# control point into HVec3.x for hisab's calc_bspline, builds the clamped knot
+# vector, and returns the .x component. Returns NaN bits for the Rust `None`:
+# degree == 0, control_points.len() <= degree, or t outside [0, 1]. Ports
+# bspline_eval_1d.
+# ================================================================
+#must_use
+fn bspline_eval_1d(degree, control_points, t) {
+    var n = vec_len(control_points);
+    if (degree == 0) { return SPEC_NAN; }
+    if (n <= degree) { return SPEC_NAN; }
+    if (f64_lt(t, 0) == 1) { return SPEC_NAN; }
+    if (f64_gt(t, F64_ONE) == 1) { return SPEC_NAN; }
+
+    # Clamped open-uniform knots: (degree+1) zeros, uniform interior,
+    # (degree+1) ones. Total length n + degree + 1.
+    var interior_count = n - degree - 1;
+    var n_knots = n + degree + 1;
+    var knots = alloc(n_knots * 8);
+    var idx = 0;
+    var z = 0;
+    while (z <= degree) {
+        store64(knots + idx * 8, 0);
+        idx = idx + 1;
+        z = z + 1;
+    }
+    var ii = 1;
+    while (ii <= interior_count) {
+        var kv = f64_div(f64_from(ii), f64_from(interior_count + 1));
+        store64(knots + idx * 8, kv);
+        idx = idx + 1;
+        ii = ii + 1;
+    }
+    z = 0;
+    while (z <= degree) {
+        store64(knots + idx * 8, F64_ONE);
+        idx = idx + 1;
+        z = z + 1;
+    }
+
+    # Lift scalar control points into HVec3.x (as the Rust oracle does).
+    var cps = alloc(n * 8);
+    var i = 0;
+    while (i < n) {
+        store64(cps + i * 8, hvec3_new(vec_get(control_points, i), 0, 0));
+        i = i + 1;
+    }
+
+    var result = calc_bspline(degree, cps, n, knots, n_knots, t);
+    if (result == 0) { return SPEC_NAN; }
+    return HVec3_x(result);
+}
+
+# ================================================================
+# fit_polynomial -- least-squares polynomial fit of `degree` to (xs, ys), both
+# vecs of f64. Returns the ascending-order coefficients [c0..c_degree] as a
+# vec, or an empty vec for the Rust `None`: len(xs) != len(ys) or fewer than
+# degree+1 samples. Builds the Vandermonde by incremental multiplication
+# (robust for negative/zero xs, unlike exp/ln pow) and solves via ganita's QR
+# least squares. Ports fit_polynomial.
+# ================================================================
+#must_use
+fn fit_polynomial(xs, ys, degree) {
+    var out = vec_new();
+    var nx = vec_len(xs);
+    var ny = vec_len(ys);
+    if (nx != ny) { return out; }
+    if (nx <= degree) { return out; }
+
+    var cols = degree + 1;
+    # Vandermonde A: nx x cols, A[i][j] = xs[i]^j (built incrementally).
+    var a = ganita_mat_new(nx, cols);
+    var i = 0;
+    while (i < nx) {
+        var xi = vec_get(xs, i);
+        var p = F64_ONE;
+        var j = 0;
+        while (j < cols) {
+            ganita_mat_set(a, i, j, p);
+            p = f64_mul(p, xi);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    # b = ys as a flat f64 array (length nx); out_x = flat f64 array (length cols).
+    var bvec = alloc(nx * 8);
+    i = 0;
+    while (i < nx) {
+        store64(bvec + i * 8, vec_get(ys, i));
+        i = i + 1;
+    }
+    var xarr = alloc(cols * 8);
+    ganita_mat_least_squares(a, bvec, xarr);
+
+    var j = 0;
+    while (j < cols) {
+        vec_push(out, load64(xarr + j * 8));
+        j = j + 1;
+    }
+    return out;
+}

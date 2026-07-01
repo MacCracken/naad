@@ -1,0 +1,399 @@
+# granular.cyr -- Granular synthesis engine.
+#
+# Ports rust-old/src/synth/granular.rs. f32 -> f64 throughout. The
+# `GrainWindow` enum becomes integer constants; the fixed `[Grain; 64]`
+# pool becomes a stdlib `vec` of Grain struct pointers; the `&mut u32`
+# spray PRNG state becomes a pointer to a 64-bit slot (load64/store64)
+# driven by dsp_util's xorshift32. Methods become free `granular_*`
+# functions taking the engine pointer. serde derives/tests are dropped.
+#
+# Requires (from the build/test unit): stdlib alloc/vec + math/ganita
+# (F64_* constants, f64_*), and dsp_util.cyr (hermite_interpolate,
+# xorshift32_unit_f32). The module file itself has no `include` lines.
+
+# ================================================================
+# GrainWindow enum -> integer constants. Window applied to each grain.
+# ================================================================
+var GRAIN_WINDOW_HANN        = 0;
+var GRAIN_WINDOW_GAUSSIAN    = 1;
+var GRAIN_WINDOW_TUKEY       = 2;
+var GRAIN_WINDOW_RECTANGULAR = 3;
+
+# Maximum number of simultaneous grains.
+var GRAIN_MAX_GRAINS = 64;
+
+# Non-integer float literals (IEEE-754 bit patterns).
+var GRAIN_C0_4  = 0x3FD999999999999A;   # 0.4  (Gaussian sigma)
+var GRAIN_C0_25 = 0x3FD0000000000000;   # 0.25 (Tukey half_alpha)
+var GRAIN_C0_1  = 0x3FB999999999999A;   # 0.1  (grain-rate floor)
+var GRAIN_C0_01 = 0x3F847AE147AE147B;   # 0.01 (pitch-shift floor)
+
+# ================================================================
+# granular_window_value -- window value at position t (0.0..1.0).
+# Ports GrainWindow::value.
+# ================================================================
+#must_use
+fn granular_window_value(win, t) {
+    var tc = f64_clamp(t, 0, F64_ONE);
+    if (win == GRAIN_WINDOW_HANN) {
+        # 0.5 * (1 - cos(TAU * t))
+        return f64_mul(F64_HALF, f64_sub(F64_ONE, f64_cos(f64_mul(F64_TAU, tc))));
+    }
+    if (win == GRAIN_WINDOW_GAUSSIAN) {
+        # sigma = 0.4, centred at 0.5; exp(-0.5 * x * x)
+        var x = f64_div(f64_sub(tc, F64_HALF), GRAIN_C0_4);
+        return f64_exp(f64_mul(f64_neg(F64_HALF), f64_mul(x, x)));
+    }
+    if (win == GRAIN_WINDOW_TUKEY) {
+        # Tukey window, alpha = 0.5 -> half_alpha = 0.25.
+        var half_alpha = GRAIN_C0_25;
+        if (f64_lt(tc, half_alpha) == 1) {
+            # Leading taper: 0 -> 1
+            var a = f64_div(f64_mul(F64_PI, tc), half_alpha);
+            return f64_mul(F64_HALF, f64_sub(F64_ONE, f64_cos(a)));
+        }
+        if (f64_gt(tc, f64_sub(F64_ONE, half_alpha)) == 1) {
+            # Trailing taper: 1 -> 0
+            var b = f64_div(f64_mul(F64_PI, f64_add(f64_sub(tc, F64_ONE), half_alpha)), half_alpha);
+            return f64_mul(F64_HALF, f64_add(F64_ONE, f64_cos(b)));
+        }
+        return F64_ONE;
+    }
+    # Rectangular.
+    return F64_ONE;
+}
+
+# ================================================================
+# Grain -- one windowed slice of the source buffer.
+#   source_position  : f64 fractional sample start in the source
+#   playback_rate    : f64 (1.0 = normal, 2.0 = octave up)
+#   window           : GRAIN_WINDOW_* constant
+#   duration_samples : u32 grain lifetime in samples
+#   current_sample   : u32 current sample within the grain
+#   amplitude        : f64 amplitude scaling
+#   active           : 1 if this slot is active, else 0
+# ================================================================
+#derive(accessors)
+struct Grain {
+    source_position;
+    playback_rate;
+    window;
+    duration_samples;
+    current_sample;
+    amplitude;
+    active;
+}
+
+# Default grain (Grain::default): inactive, unity rate/amplitude, Hann.
+#must_use
+fn granular_grain_default() {
+    var g = alloc(sizeof(Grain));
+    Grain_set_source_position(g, 0);
+    Grain_set_playback_rate(g, F64_ONE);
+    Grain_set_window(g, GRAIN_WINDOW_HANN);
+    Grain_set_duration_samples(g, 0);
+    Grain_set_current_sample(g, 0);
+    Grain_set_amplitude(g, F64_ONE);
+    Grain_set_active(g, 0);
+    return g;
+}
+
+# ================================================================
+# GranularEngine -- reads grains from a source buffer with windowing,
+# pitch shift (playback rate), time jitter (spray), and grain density.
+#   source            : vec<f64> source audio buffer
+#   grains            : vec of Grain pointers (fixed pool, GRAIN_MAX_GRAINS)
+#   grain_rate        : f64 grains spawned per second
+#   grain_duration_ms : f64 grain duration in milliseconds
+#   pitch_shift       : f64 pitch shift via playback rate
+#   time_position     : f64 current read position (fractional sample)
+#   spray             : f64 time jitter amount (in source samples)
+#   window            : GRAIN_WINDOW_* for new grains
+#   sample_rate       : f64 Hz
+#   spawn_accumulator : f64 accumulator for grain spawning
+#   rng_state         : pointer to a 64-bit slot holding the u32 PRNG state
+# ================================================================
+#derive(accessors)
+struct GranularEngine {
+    source;
+    grains;
+    grain_rate;
+    grain_duration_ms;
+    pitch_shift;
+    time_position;
+    spray;
+    window;
+    sample_rate;
+    spawn_accumulator;
+    rng_state;
+}
+
+# ================================================================
+# granular_new -- new engine with no source loaded. Ports new().
+# ================================================================
+#must_use
+fn granular_new(sample_rate) {
+    var e = alloc(sizeof(GranularEngine));
+    GranularEngine_set_source(e, vec_new());
+
+    var grains = vec_new();
+    var i = 0;
+    while (i < GRAIN_MAX_GRAINS) {
+        vec_push(grains, granular_grain_default());
+        i = i + 1;
+    }
+    GranularEngine_set_grains(e, grains);
+
+    GranularEngine_set_grain_rate(e, f64_from(20));
+    GranularEngine_set_grain_duration_ms(e, f64_from(50));
+    GranularEngine_set_pitch_shift(e, F64_ONE);
+    GranularEngine_set_time_position(e, 0);
+    GranularEngine_set_spray(e, 0);
+    GranularEngine_set_window(e, GRAIN_WINDOW_HANN);
+    GranularEngine_set_sample_rate(e, sample_rate);
+    GranularEngine_set_spawn_accumulator(e, 0);
+
+    var rng = alloc(8);
+    store64(rng, 42);
+    GranularEngine_set_rng_state(e, rng);
+    return e;
+}
+
+# ================================================================
+# Parameter setters. Ports set_source/set_grain_rate/.../set_window.
+# ================================================================
+
+# Load a source audio buffer (vec<f64>); resets the read position.
+fn granular_set_source(e, buffer) {
+    GranularEngine_set_source(e, buffer);
+    GranularEngine_set_time_position(e, 0);
+    return 0;
+}
+
+# Grain spawn rate (grains/sec), floored at 0.1.
+fn granular_set_grain_rate(e, rate) {
+    GranularEngine_set_grain_rate(e, f64_max(rate, GRAIN_C0_1));
+    return 0;
+}
+
+# Grain duration in milliseconds, floored at 1.0.
+fn granular_set_grain_duration(e, ms) {
+    GranularEngine_set_grain_duration_ms(e, f64_max(ms, F64_ONE));
+    return 0;
+}
+
+# Playback pitch shift (1.0 = normal), floored at 0.01.
+fn granular_set_pitch_shift(e, shift) {
+    GranularEngine_set_pitch_shift(e, f64_max(shift, GRAIN_C0_01));
+    return 0;
+}
+
+# Read position in the source (0.0..1.0 normalised); no-op if source empty.
+fn granular_set_position(e, pos) {
+    var src = GranularEngine_source(e);
+    var n = vec_len(src);
+    if (n != 0) {
+        var clamped = f64_clamp(pos, 0, F64_ONE);
+        GranularEngine_set_time_position(e, f64_mul(clamped, f64_from(n - 1)));
+    }
+    return 0;
+}
+
+# Time jitter (spray) in milliseconds -> stored as source samples.
+fn granular_set_spray(e, ms) {
+    var spray = f64_mul(f64_div(ms, f64_from(1000)), GranularEngine_sample_rate(e));
+    GranularEngine_set_spray(e, spray);
+    return 0;
+}
+
+# Window function for new grains.
+fn granular_set_window(e, win) {
+    GranularEngine_set_window(e, win);
+    return 0;
+}
+
+# ================================================================
+# granular_rem_euclid -- Rust f32::rem_euclid for a positive divisor b.
+# r = a - trunc(a/b)*b; if r < 0 then r += |b|. Result in [0, b).
+# ================================================================
+#must_use
+fn granular_rem_euclid(a, b) {
+    var q = f64_div(a, b);
+    var tq = 0;
+    if (f64_lt(q, 0) == 1) {
+        tq = f64_ceil(q);
+    } else {
+        tq = f64_floor(q);
+    }
+    var r = f64_sub(a, f64_mul(tq, b));
+    if (f64_lt(r, 0) == 1) {
+        r = f64_add(r, f64_abs(b));
+    }
+    return r;
+}
+
+# ================================================================
+# granular_next_rng_f32 -- random f64 in [0,1) from the spray PRNG.
+# Ports next_rng_f32.
+# ================================================================
+#must_use
+fn granular_next_rng_f32(e) {
+    return xorshift32_unit_f32(GranularEngine_rng_state(e));
+}
+
+# ================================================================
+# granular_spawn_grain -- spawn a new grain in the next free slot.
+# Ports spawn_grain. Drops the grain if the pool is full.
+# ================================================================
+fn granular_spawn_grain(e) {
+    var dur_f = f64_mul(f64_div(GranularEngine_grain_duration_ms(e), f64_from(1000)), GranularEngine_sample_rate(e));
+    var duration_samples = f64_to(dur_f);
+
+    var grains = GranularEngine_grains(e);
+    var ng = vec_len(grains);
+    var slot_idx = 0 - 1;
+    var i = 0;
+    while (i < ng) {
+        if (Grain_active(vec_get(grains, i)) == 0) {
+            slot_idx = i;
+            i = ng;
+        } else {
+            i = i + 1;
+        }
+    }
+    if (slot_idx < 0) {
+        return 0;
+    }
+
+    var spray = GranularEngine_spray(e);
+    var jitter = 0;
+    if (f64_gt(spray, 0) == 1) {
+        var r = granular_next_rng_f32(e);
+        jitter = f64_mul(f64_mul(f64_sub(r, F64_HALF), F64_TWO), spray);
+    }
+
+    var src = GranularEngine_source(e);
+    var src_len = f64_from(vec_len(src));
+    var pos = granular_rem_euclid(f64_add(GranularEngine_time_position(e), jitter), src_len);
+
+    var g = vec_get(grains, slot_idx);
+    Grain_set_source_position(g, pos);
+    Grain_set_playback_rate(g, GranularEngine_pitch_shift(e));
+    Grain_set_window(g, GranularEngine_window(e));
+    Grain_set_duration_samples(g, duration_samples);
+    Grain_set_current_sample(g, 0);
+    Grain_set_amplitude(g, F64_ONE);
+    Grain_set_active(g, 1);
+    return 0;
+}
+
+# ================================================================
+# granular_next_sample -- generate the next output sample.
+# Ports next_sample. Spawns grains at the configured rate, then sums
+# all active grains (windowed, hermite-interpolated from the source).
+# ================================================================
+#must_use
+fn granular_next_sample(e) {
+    var src = GranularEngine_source(e);
+    var src_len = vec_len(src);
+    if (src_len == 0) {
+        return 0;
+    }
+
+    # Spawn new grains at the configured rate.
+    var acc = GranularEngine_spawn_accumulator(e);
+    acc = f64_add(acc, f64_div(GranularEngine_grain_rate(e), GranularEngine_sample_rate(e)));
+    while (f64_ge(acc, F64_ONE) == 1) {
+        acc = f64_sub(acc, F64_ONE);
+        granular_spawn_grain(e);
+    }
+    GranularEngine_set_spawn_accumulator(e, acc);
+
+    # Sum active grains.
+    var sum = 0;
+    var src_len_f = f64_from(src_len);
+    var grains = GranularEngine_grains(e);
+    var ng = vec_len(grains);
+    var i = 0;
+    while (i < ng) {
+        var grain = vec_get(grains, i);
+        if (Grain_active(grain) == 1) {
+            var dur = Grain_duration_samples(grain);
+            var cur = Grain_current_sample(grain);
+
+            # Window position (0..1).
+            var t = 0;
+            if (dur > 0) {
+                t = f64_div(f64_from(cur), f64_from(dur));
+            }
+            var window_val = granular_window_value(Grain_window(grain), t);
+
+            # Read from source with cubic hermite interpolation.
+            var read_pos = f64_add(Grain_source_position(grain), f64_mul(f64_from(cur), Grain_playback_rate(grain)));
+            read_pos = granular_rem_euclid(read_pos, src_len_f);
+            var floor_pos = f64_floor(read_pos);
+            var floor_i = f64_to(floor_pos);
+            var idx1 = floor_i % src_len;
+            var idx0 = 0;
+            if (idx1 == 0) {
+                idx0 = src_len - 1;
+            } else {
+                idx0 = idx1 - 1;
+            }
+            var idx2 = (idx1 + 1) % src_len;
+            var idx3 = (idx1 + 2) % src_len;
+            var frac = f64_sub(read_pos, floor_pos);
+            var s0 = vec_get(src, idx0);
+            var s1 = vec_get(src, idx1);
+            var s2 = vec_get(src, idx2);
+            var s3 = vec_get(src, idx3);
+            var sample = hermite_interpolate(s0, s1, s2, s3, frac);
+
+            sum = f64_add(sum, f64_mul(f64_mul(sample, window_val), Grain_amplitude(grain)));
+
+            cur = cur + 1;
+            Grain_set_current_sample(grain, cur);
+            if (cur >= dur) {
+                Grain_set_active(grain, 0);
+            }
+        }
+        i = i + 1;
+    }
+    return sum;
+}
+
+# ================================================================
+# granular_fill_buffer -- fill a vec<f64> with successive samples.
+# Ports fill_buffer.
+# ================================================================
+fn granular_fill_buffer(e, buffer) {
+    var n = vec_len(buffer);
+    var i = 0;
+    while (i < n) {
+        vec_set(buffer, i, granular_next_sample(e));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# granular_is_active -- 1 if the source is loaded AND any grain is
+# active, else 0. Ports is_active.
+# ================================================================
+#must_use
+fn granular_is_active(e) {
+    var src = GranularEngine_source(e);
+    if (vec_len(src) == 0) {
+        return 0;
+    }
+    var grains = GranularEngine_grains(e);
+    var n = vec_len(grains);
+    var i = 0;
+    while (i < n) {
+        if (Grain_active(vec_get(grains, i)) == 1) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}

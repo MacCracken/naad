@@ -1,0 +1,62 @@
+# acoustics_room.tcyr -- parity test for src/acoustics_room.cyr.
+# Ports the #[test] blocks from rust-old/src/acoustics/room.rs one-for-one.
+# The serde-roundtrip test is dropped (Cyrius has no serde). Rust's `.unwrap()`
+# / Result becomes: success is a positive struct pointer (naad_is_err == 0),
+# failure is a negative ERR_* code (naad_is_err == 1).
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "src/error.cyr"
+include "src/acoustics.cyr"
+include "src/acoustics_room.cyr"
+
+# 1.5 metres (ear height in the fixtures) = 1.0 + 0.5.
+fn ear_height() { return f64_add(F64_ONE, F64_HALF); }
+
+# The oracle's test_config(): an 8 x 6 x 3 m concrete shoebox at 48 kHz,
+# source [2, 1.5, 3], listener [6, 1.5, 3]. Parameterized on `length` and
+# `material` so the invalid-dimension / unknown-material variants reuse it.
+fn make_config(length, material) {
+    var source = hvec3_new(F64_TWO, ear_height(), f64_from(3));
+    var listener = hvec3_new(f64_from(6), ear_height(), f64_from(3));
+    return naad_room_reverb_config_new(length, f64_from(6), f64_from(3),
+    material, source, listener, 48000);
+}
+
+fn test_config() { return make_config(f64_from(8), "concrete"); }
+
+alloc_init();
+
+# ================================================================
+test_group("room_reverb_creates");
+var reverb = naad_room_reverb_new(test_config());
+assert_eq(naad_is_err(reverb), 0, "should create room reverb");
+
+# ================================================================
+test_group("room_reverb_produces_finite_output");
+var fin = naad_room_reverb_new(test_config());
+# Feed an impulse.
+var out = naad_room_reverb_process_sample(fin, F64_ONE);
+assert_eq(naad_is_finite(out), 1, "output should be finite");
+# Feed silence; the tail must stay finite.
+var fin_i = 0;
+var tail_ok = 1;
+while (fin_i < 1000) {
+    var s = naad_room_reverb_process_sample(fin, 0);
+    if (naad_is_finite(s) == 0) { tail_ok = 0; }
+    fin_i = fin_i + 1;
+}
+assert_eq(tail_ok, 1, "tail should be finite");
+
+# ================================================================
+test_group("unknown_material_errors");
+var bad_mat = naad_room_reverb_new(make_config(f64_from(8), "unobtanium"));
+assert_eq(naad_is_err(bad_mat), 1, "unknown material -> error");
+
+# ================================================================
+test_group("invalid_dimensions_error");
+var bad_dim = naad_room_reverb_new(make_config(f64_neg(F64_ONE), "concrete"));
+assert_eq(naad_is_err(bad_dim), 1, "negative dimension -> error");
+
+var rc = assert_summary();
+syscall(60, rc);

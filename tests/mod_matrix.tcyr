@@ -1,0 +1,66 @@
+# mod_matrix.tcyr -- parity tests for src/mod_matrix.cyr.
+# Ported one-for-one from the #[test] blocks in rust-old/src/mod_matrix.rs,
+# minus test_serde_roundtrip (no serde in the Cyrius port). f32 -> f64.
+
+include "src/error.cyr"
+include "src/mod_matrix.cyr"
+
+alloc_init();
+
+var C0_5   = 0x3FE0000000000000;   # 0.5
+var C0_8   = 0x3FE999999999999A;   # 0.8
+var C0_4   = 0x3FD999999999999A;   # 0.4
+var C0_001 = 0x3F50624DD2F1A9FC;   # 0.001
+var C0_6   = 0x3FE3333333333333;   # 0.6
+var C0_7   = 0x3FE6666666666666;   # 0.7
+var C0_1   = 0x3FB999999999999A;   # 0.1
+
+# ================================================================
+test_group("basic routing");
+var m = mod_matrix_new();
+mod_matrix_add_routing(m, mod_matrix_routing_new(MOD_SOURCE_LFO1, MOD_DEST_PITCH, C0_5));
+mod_matrix_set_source(m, MOD_SOURCE_LFO1, C0_8);
+mod_matrix_compute(m);
+var val = mod_matrix_get_destination(m, MOD_DEST_PITCH);
+assert(f64_lt(f64_abs(f64_sub(val, C0_4)), C0_001), "0.8 * 0.5 = 0.4");
+
+# ================================================================
+test_group("multiple sources same dest");
+var m2 = mod_matrix_new();
+mod_matrix_add_routing(m2, mod_matrix_routing_new(MOD_SOURCE_LFO1, MOD_DEST_FILTER_CUTOFF, C0_5));
+mod_matrix_add_routing(m2, mod_matrix_routing_new(MOD_SOURCE_FILTER_ENVELOPE, MOD_DEST_FILTER_CUTOFF, F64_ONE));
+mod_matrix_set_source(m2, MOD_SOURCE_LFO1, C0_6);
+mod_matrix_set_source(m2, MOD_SOURCE_FILTER_ENVELOPE, C0_4);
+mod_matrix_compute(m2);
+# 0.6*0.5 + 0.4*1.0 = 0.3 + 0.4 = 0.7
+var val2 = mod_matrix_get_destination(m2, MOD_DEST_FILTER_CUTOFF);
+assert(f64_lt(f64_abs(f64_sub(val2, C0_7)), C0_001), "expected 0.7");
+
+# ================================================================
+test_group("disabled routing");
+var m3 = mod_matrix_new();
+var r3 = mod_matrix_routing_new(MOD_SOURCE_LFO1, MOD_DEST_PITCH, F64_ONE);
+ModRouting_set_enabled(r3, 0);
+mod_matrix_add_routing(m3, r3);
+mod_matrix_set_source(m3, MOD_SOURCE_LFO1, F64_ONE);
+mod_matrix_compute(m3);
+assert(f64_lt(f64_abs(mod_matrix_get_destination(m3, MOD_DEST_PITCH)), NAAD_EPSILON),
+"disabled routing should not contribute");
+
+# ================================================================
+test_group("max routings");
+var m4 = mod_matrix_new();
+var added_all = 1;
+var i4 = 0;
+while (i4 < MOD_MATRIX_MAX_ROUTINGS) {
+    var ok = mod_matrix_add_routing(m4, mod_matrix_routing_new(MOD_SOURCE_LFO1, MOD_DEST_PITCH, C0_1));
+    if (ok != 1) { added_all = 0; }
+    i4 = i4 + 1;
+}
+assert(added_all, "all MAX_ROUTINGS routings added");
+# 17th should fail
+assert_eq(mod_matrix_add_routing(m4, mod_matrix_routing_new(MOD_SOURCE_LFO1, MOD_DEST_PITCH, C0_1)), 0,
+"17th routing fails");
+
+var rc = assert_summary();
+syscall(60, rc);

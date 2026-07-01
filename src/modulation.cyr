@@ -1,0 +1,356 @@
+# modulation.cyr -- modulation sources: LFO, 2-op FM, and ring modulation.
+#
+# Ports rust-old/src/modulation.rs. f32 -> f64 throughout. The `LfoShape`
+# and `LfoMode` enums become integer constants; serde/Display derives and
+# their round-trip test are dropped. Constructors return the struct pointer
+# on success or a negative ERR_* on invalid frequency/sample_rate.
+#
+# The `ModulationSource` trait collapses to a free function
+# (modulation_lfo_next_modulation_value) that just calls next_value.
+#
+# The LFO's private xorshift32 state (Rust `rng_state: u32`) is folded into a
+# `rng` field holding an alloc(8) pointer whose 64-bit slot carries the u32
+# PRNG state, stepped via dsp_util's xorshift32_signed_f32. This matches the
+# oracle bit-for-bit: seed 42 -> one step for the initial S&H value, one step
+# per cycle wrap thereafter (xorshift never yields 0 from a nonzero seed, so
+# dsp_util's zero-state guard never fires -> identical output).
+#
+# Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE/TWO/
+# HALF/TAU, f64_add/sub/mul/div/neg/abs/clamp/sin/lt/gt/ge/le/from), error.cyr
+# (validate_sample_rate, naad_is_err, naad_is_finite, ERR_*), dsp_util.cyr
+# (xorshift32_signed_f32), and osc_core.cyr (osc_new/osc_next_sample/
+# osc_frequency/osc_sample_rate/osc_advance_phase_sine, WAVEFORM_*). No
+# `include` lines -- the entry orders the deps.
+
+# ================================================================
+# LfoShape (enum) -> integer constants. Exact oracle variant order.
+# ================================================================
+var MODULATION_LFO_SINE            = 0;
+var MODULATION_LFO_TRIANGLE        = 1;
+var MODULATION_LFO_SQUARE          = 2;
+var MODULATION_LFO_SAW_UP          = 3;
+var MODULATION_LFO_SAW_DOWN        = 4;
+var MODULATION_LFO_SAMPLE_AND_HOLD = 5;
+
+# ================================================================
+# LfoMode (enum) -> integer constants.
+# ================================================================
+var MODULATION_LFO_BIPOLAR  = 0;
+var MODULATION_LFO_UNIPOLAR = 1;
+
+# ================================================================
+# Non-integer float literals (IEEE-754 bit patterns).
+# ================================================================
+var MODULATION_C0_25 = 0x3FD0000000000000;   # 0.25 (triangle lower knee)
+var MODULATION_C0_75 = 0x3FE8000000000000;   # 0.75 (triangle upper knee)
+var MODULATION_C0_1  = 0x3FB999999999999A;   # 0.1  (FM instantaneous-freq floor)
+
+# PRNG seed for the LFO sample-and-hold (matches Rust `let mut rng = 42u32`).
+var MODULATION_SH_SEED = 42;
+
+# ================================================================
+# Lfo -- low-frequency oscillator for modulation.
+#   shape       : MODULATION_LFO_* shape constant
+#   frequency   : Hz
+#   sample_rate : Hz
+#   phase       : 0..1 accumulator
+#   mode        : MODULATION_LFO_BIPOLAR / _UNIPOLAR
+#   depth       : amplitude scaling (0..1); Rust `pub depth`
+#   sh_value    : current sample-and-hold value
+#   rng         : pointer to an 8-byte slot holding the u32 PRNG state
+# ================================================================
+#derive(accessors)
+struct Lfo { shape; frequency; sample_rate; phase; mode; depth; sh_value; rng; }
+
+# ================================================================
+# modulation_lfo_new -- construct. Returns the struct pointer on success, or a
+# negative ERR_* (ERR_INVALID_SAMPLE_RATE / ERR_INVALID_PARAMETER) on failure.
+# The oracle seeds rng=42, advances it once, and derives the initial S&H value
+# from that first step so the first cycle isn't silent.
+# ================================================================
+#must_use
+fn modulation_lfo_new(shape, frequency, sample_rate) {
+    var e = validate_sample_rate(sample_rate);
+    if (naad_is_err(e) == 1) { return e; }
+    if (f64_lt(frequency, 0) == 1) { return ERR_INVALID_PARAMETER; }
+    if (naad_is_finite(frequency) == 0) { return ERR_INVALID_PARAMETER; }
+
+    # Seed the PRNG and take the first step for the initial S&H value.
+    var rng = alloc(8);
+    store64(rng, MODULATION_SH_SEED);
+    var initial_sh = xorshift32_signed_f32(rng);
+
+    var self = alloc(sizeof(Lfo));
+    Lfo_set_shape(self, shape);
+    Lfo_set_frequency(self, frequency);
+    Lfo_set_sample_rate(self, sample_rate);
+    Lfo_set_phase(self, 0);
+    Lfo_set_mode(self, MODULATION_LFO_BIPOLAR);
+    Lfo_set_depth(self, F64_ONE);
+    Lfo_set_sh_value(self, initial_sh);
+    Lfo_set_rng(self, rng);
+    return self;
+}
+
+# ================================================================
+# modulation_lfo_from_waveform -- build an LFO from a legacy Waveform const.
+# Maps Sine->Sine, Triangle->Triangle, Square->Square, Saw->SawDown, else Sine.
+# ================================================================
+#must_use
+fn modulation_lfo_from_waveform(waveform, frequency, sample_rate) {
+    var shape = MODULATION_LFO_SINE;
+    if (waveform == WAVEFORM_TRIANGLE) { shape = MODULATION_LFO_TRIANGLE; }
+    if (waveform == WAVEFORM_SQUARE) { shape = MODULATION_LFO_SQUARE; }
+    if (waveform == WAVEFORM_SAW) { shape = MODULATION_LFO_SAW_DOWN; }
+    return modulation_lfo_new(shape, frequency, sample_rate);
+}
+
+# ================================================================
+# modulation_lfo_raw_sample -- raw bipolar sample for the current phase.
+# ================================================================
+#inline
+#must_use
+fn modulation_lfo_raw_sample(self) {
+    var t = Lfo_phase(self);
+    var shape = Lfo_shape(self);
+    if (shape == MODULATION_LFO_SINE) {
+        return f64_sin(f64_mul(t, F64_TAU));
+    } elif (shape == MODULATION_LFO_TRIANGLE) {
+        if (f64_lt(t, MODULATION_C0_25) == 1) {
+            return f64_mul(f64_from(4), t);
+        } elif (f64_lt(t, MODULATION_C0_75) == 1) {
+            return f64_sub(F64_TWO, f64_mul(f64_from(4), t));
+        }
+        return f64_sub(f64_mul(f64_from(4), t), f64_from(4));
+    } elif (shape == MODULATION_LFO_SQUARE) {
+        if (f64_lt(t, F64_HALF) == 1) { return F64_ONE; }
+        return f64_neg(F64_ONE);
+    } elif (shape == MODULATION_LFO_SAW_UP) {
+        return f64_sub(f64_mul(F64_TWO, t), F64_ONE);
+    } elif (shape == MODULATION_LFO_SAW_DOWN) {
+        return f64_sub(F64_ONE, f64_mul(F64_TWO, t));
+    }
+    # MODULATION_LFO_SAMPLE_AND_HOLD.
+    return Lfo_sh_value(self);
+}
+
+# ================================================================
+# modulation_lfo_next_value -- next modulation value (scaled by depth).
+# Advances phase, re-rolls the S&H value on a cycle wrap, then applies the
+# bipolar/unipolar mode and the depth scaling.
+# ================================================================
+#inline
+#must_use
+fn modulation_lfo_next_value(self) {
+    var raw = modulation_lfo_raw_sample(self);
+
+    # Advance phase.
+    var dt = f64_div(Lfo_frequency(self), Lfo_sample_rate(self));
+    var prev_phase = Lfo_phase(self);
+    var phase = f64_add(prev_phase, dt);
+    if (f64_ge(phase, F64_ONE) == 1) { phase = f64_sub(phase, F64_ONE); }
+    Lfo_set_phase(self, phase);
+
+    # Update S&H on cycle wrap.
+    if (Lfo_shape(self) == MODULATION_LFO_SAMPLE_AND_HOLD) {
+        if (f64_lt(phase, prev_phase) == 1) {
+            Lfo_set_sh_value(self, xorshift32_signed_f32(Lfo_rng(self)));
+        }
+    }
+
+    var output = raw;
+    if (Lfo_mode(self) == MODULATION_LFO_UNIPOLAR) {
+        output = f64_mul(f64_add(raw, F64_ONE), F64_HALF);
+    }
+
+    return f64_mul(output, Lfo_depth(self));
+}
+
+# ================================================================
+# modulation_lfo_next_modulation_value -- ModulationSource trait impl; just
+# forwards to next_value.
+# ================================================================
+#inline
+#must_use
+fn modulation_lfo_next_modulation_value(self) {
+    return modulation_lfo_next_value(self);
+}
+
+# ================================================================
+# modulation_lfo_set_frequency -- validate then set. Rust's predicate is
+# `freq < 0.0 || !freq.is_finite()`. Returns ERR_NONE or ERR_INVALID_PARAMETER.
+# ================================================================
+fn modulation_lfo_set_frequency(self, freq) {
+    if (f64_lt(freq, 0) == 1) { return ERR_INVALID_PARAMETER; }
+    if (naad_is_finite(freq) == 0) { return ERR_INVALID_PARAMETER; }
+    Lfo_set_frequency(self, freq);
+    return ERR_NONE;
+}
+
+# ================================================================
+# modulation_lfo_set_shape / _set_mode -- setters.
+# ================================================================
+fn modulation_lfo_set_shape(self, shape) {
+    Lfo_set_shape(self, shape);
+    return 0;
+}
+
+fn modulation_lfo_set_mode(self, mode) {
+    Lfo_set_mode(self, mode);
+    return 0;
+}
+
+# ================================================================
+# modulation_lfo_shape / _mode -- read-only getters.
+# ================================================================
+#inline
+#must_use
+fn modulation_lfo_shape(self) {
+    return Lfo_shape(self);
+}
+
+#inline
+#must_use
+fn modulation_lfo_mode(self) {
+    return Lfo_mode(self);
+}
+
+# ================================================================
+# FmModulator -- two-operator FM (frequency modulation) primitive.
+#   carrier          : carrier Oscillator (always sine output)
+#   modulator        : modulator Oscillator
+#   mod_index        : modulation index (Rust `pub mod_index`)
+#   carrier_base_freq: base carrier frequency for the FM calculation
+# ================================================================
+#derive(accessors)
+struct FmModulator { carrier; modulator; mod_index; carrier_base_freq; }
+
+# ================================================================
+# modulation_fm_new -- construct. Both operators are sine oscillators. Returns
+# the struct pointer on success or a negative ERR_* on invalid sr/frequency.
+# ================================================================
+#must_use
+fn modulation_fm_new(carrier_freq, mod_freq, mod_index, sample_rate) {
+    var e = validate_sample_rate(sample_rate);
+    if (naad_is_err(e) == 1) { return e; }
+    var carrier = osc_new(WAVEFORM_SINE, carrier_freq, sample_rate);
+    if (naad_is_err(carrier) == 1) { return carrier; }
+    var modulator = osc_new(WAVEFORM_SINE, mod_freq, sample_rate);
+    if (naad_is_err(modulator) == 1) { return modulator; }
+
+    var self = alloc(sizeof(FmModulator));
+    FmModulator_set_carrier(self, carrier);
+    FmModulator_set_modulator(self, modulator);
+    FmModulator_set_mod_index(self, mod_index);
+    FmModulator_set_carrier_base_freq(self, carrier_freq);
+    return self;
+}
+
+# ================================================================
+# modulation_fm_carrier / _modulator -- inner oscillator pointers.
+# ================================================================
+#inline
+#must_use
+fn modulation_fm_carrier(self) {
+    return FmModulator_carrier(self);
+}
+
+#inline
+#must_use
+fn modulation_fm_modulator(self) {
+    return FmModulator_modulator(self);
+}
+
+# ================================================================
+# modulation_fm_next_sample -- next FM synthesis sample. The carrier frequency
+# is modulated by the modulator output scaled by mod_index * mod_frequency,
+# clamped to [0.1, nyquist-1], and the carrier is phase-modulated directly as
+# a sine regardless of its waveform setting.
+# ================================================================
+#inline
+#must_use
+fn modulation_fm_next_sample(self) {
+    var modulator = FmModulator_modulator(self);
+    var carrier = FmModulator_carrier(self);
+
+    var mod_out = osc_next_sample(modulator);
+
+    # Instantaneous carrier frequency.
+    var freq_deviation = f64_mul(f64_mul(mod_out, FmModulator_mod_index(self)), osc_frequency(modulator));
+    var inst_freq = f64_add(FmModulator_carrier_base_freq(self), freq_deviation);
+
+    # Clamp to a valid range.
+    var nyquist = f64_div(osc_sample_rate(carrier), F64_TWO);
+    var clamped_freq = f64_clamp(inst_freq, MODULATION_C0_1, f64_sub(nyquist, F64_ONE));
+
+    # Phase-modulate the carrier directly (always sine).
+    var dt = f64_div(clamped_freq, osc_sample_rate(carrier));
+    return osc_advance_phase_sine(carrier, dt);
+}
+
+# ================================================================
+# modulation_fm_fill_buffer -- fill a vec buffer in place with FM samples.
+# ================================================================
+#inline
+fn modulation_fm_fill_buffer(self, buffer) {
+    var n = vec_len(buffer);
+    var i = 0;
+    while (i < n) {
+        vec_set(buffer, i, modulation_fm_next_sample(self));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# RingModulator -- multiplies an input signal by a modulator oscillator.
+#   modulator : the modulator Oscillator
+# ================================================================
+#derive(accessors)
+struct RingModulator { modulator; }
+
+# ================================================================
+# modulation_ring_new -- construct. Returns the struct pointer on success or a
+# negative ERR_* on invalid frequency/sample_rate.
+# ================================================================
+#must_use
+fn modulation_ring_new(waveform, mod_freq, sample_rate) {
+    var modulator = osc_new(waveform, mod_freq, sample_rate);
+    if (naad_is_err(modulator) == 1) { return modulator; }
+
+    var self = alloc(sizeof(RingModulator));
+    RingModulator_set_modulator(self, modulator);
+    return self;
+}
+
+# ================================================================
+# modulation_ring_modulator -- inner modulator oscillator pointer.
+# ================================================================
+#inline
+#must_use
+fn modulation_ring_modulator(self) {
+    return RingModulator_modulator(self);
+}
+
+# ================================================================
+# modulation_ring_process_sample -- input * modulator output.
+# ================================================================
+#inline
+#must_use
+fn modulation_ring_process_sample(self, input) {
+    return f64_mul(input, osc_next_sample(RingModulator_modulator(self)));
+}
+
+# ================================================================
+# modulation_ring_process_buffer -- process a vec buffer in place.
+# ================================================================
+#inline
+fn modulation_ring_process_buffer(self, buffer) {
+    var n = vec_len(buffer);
+    var i = 0;
+    while (i < n) {
+        vec_set(buffer, i, modulation_ring_process_sample(self, vec_get(buffer, i)));
+        i = i + 1;
+    }
+    return 0;
+}

@@ -1,0 +1,201 @@
+# acoustics_analysis.cyr -- naad acoustic-analysis metrics (thin goonj wrapper).
+#
+# Ports rust-old/src/acoustics/analysis.rs. Wraps goonj's ISO 3382-1 analysis
+# functions to compute room acoustic metrics from an impulse response: clarity
+# (C50, C80), definition (D50), speech transmission index (STI), and a quick
+# Sabine-style reverberation-time (RT60) estimate. Also wraps goonj's
+# absorption-placement advisor to recommend which walls to treat. f32 -> f64
+# throughout. Rust's serde derives and the serde round-trip tests are dropped.
+#
+# Cross-crate goonj mapping (discovered from lib/goonj.cyr + goonj src/tests):
+#   goonj::impulse::ImpulseResponse{..}       -> impulse_response_new(samples,
+#                                                            sample_rate, rt60)
+#   goonj::analysis::clarity_c50              -> clarity_c50(ir)
+#   goonj::analysis::clarity_c80              -> clarity_c80(ir)
+#   goonj::analysis::definition_d50           -> definition_d50(ir)
+#   goonj::analysis::sti_estimate             -> sti_estimate(ir)
+#   goonj::room::AcousticRoom::shoebox        -> acoustic_room_shoebox(l,w,h,mat)
+#   goonj::analysis::suggest_absorption_placement
+#                                             -> suggest_absorption_placement(
+#                                                            room, target_rt60)
+#   AbsorptionSuggestion.{wall_index,rt60_sensitivity,current_absorption}
+#                                             -> AbsorptionSuggestion_* accessors
+# The wall material name resolves through naad_acoustics_material_by_name
+# (src/acoustics.cyr) and the RoomReverbConfig struct + accessors come from
+# src/acoustics_room.cyr (reused, not redefined). Rust's Result<T> maps to:
+# a positive struct/vec pointer on success, or a negative ERR_COMPUTATION on
+# empty IR / zero sample rate / unknown material / non-positive dimensions.
+#
+# Requires (from the build/test unit): stdlib alloc/vec + math/ganita (F64_TWO,
+# f64_add/sub/mul/div/neg/exp, f64_from/to, f64_lt/le/ge), the goonj bundle
+# (impulse_response_new, clarity_c50/c80, definition_d50, sti_estimate,
+# acoustic_room_shoebox, suggest_absorption_placement, AbsorptionSuggestion_*),
+# and the naad L0 modules error.cyr (ERR_COMPUTATION, NAAD_EPSILON) +
+# acoustics.cyr (naad_acoustics_material_by_name) + acoustics_room.cyr
+# (RoomReverbConfig accessors). This file has no `include` lines.
+
+# 0.001 -- energy-decay threshold ratio for the RT60 estimate (-30 dB point).
+var NAAD_RT60_THRESHOLD = 0x3F50624DD2F1A9FC;
+
+# ================================================================
+# RoomMetrics -- room acoustic metrics computed from an impulse response.
+#   c50  : clarity C50 in dB -- early (0-50 ms) to late energy ratio
+#   c80  : clarity C80 in dB -- early (0-80 ms) to late energy ratio
+#   d50  : definition D50 -- fraction of energy in first 50 ms (0..1)
+#   sti  : speech transmission index (0..1)
+#   rt60 : reverberation time RT60 in seconds
+# ================================================================
+#derive(accessors)
+struct RoomMetrics {
+    c50;
+    c80;
+    d50;
+    sti;
+    rt60;
+}
+
+# Build a RoomMetrics. Ports the Rust struct literal.
+#must_use
+fn naad_analysis_room_metrics_new(c50, c80, d50, sti, rt60) {
+    var m = alloc(sizeof(RoomMetrics));
+    RoomMetrics_set_c50(m, c50);
+    RoomMetrics_set_c80(m, c80);
+    RoomMetrics_set_d50(m, d50);
+    RoomMetrics_set_sti(m, sti);
+    RoomMetrics_set_rt60(m, rt60);
+    return m;
+}
+
+# ================================================================
+# naad_analysis_estimate_rt60 -- quick RT60 estimate from an impulse response
+# via its energy-decay curve. Finds the time at which cumulative energy is
+# within 0.001 of the total (the -30 dB point) and doubles it for the RT60
+# estimate; falls back to the full IR length. Empty IR or zero sample rate ->
+# 0.0; near-silent IR (< f32::EPSILON total energy) -> 0.0. `ir` is a vec of
+# f64 samples, `sample_rate` an integer in Hz. Ports estimate_rt60.
+# ================================================================
+#inline
+#must_use
+fn naad_analysis_estimate_rt60(ir, sample_rate) {
+    var n = vec_len(ir);
+    if (n == 0) { return 0; }
+    if (sample_rate == 0) { return 0; }
+
+    # Total energy of the impulse response.
+    var total_energy = 0;
+    var j = 0;
+    while (j < n) {
+        var s = vec_get(ir, j);
+        total_energy = f64_add(total_energy, f64_mul(s, s));
+        j = j + 1;
+    }
+    if (f64_lt(total_energy, NAAD_EPSILON) == 1) { return 0; }
+
+    var cumulative = 0;
+    var threshold = f64_mul(total_energy, NAAD_RT60_THRESHOLD);
+    var i = 0;
+    while (i < n) {
+        var s = vec_get(ir, i);
+        cumulative = f64_add(cumulative, f64_mul(s, s));
+        if (f64_ge(cumulative, f64_sub(total_energy, threshold)) == 1) {
+            # Time to reach -30 dB, doubled for the RT60 estimate.
+            var t30 = f64_div(f64_from(i), f64_from(sample_rate));
+            return f64_mul(t30, F64_TWO);
+        }
+        i = i + 1;
+    }
+
+    # Fallback: use the full IR length as an upper bound.
+    return f64_div(f64_from(n), f64_from(sample_rate));
+}
+
+# ================================================================
+# naad_analysis_analyze_impulse_response -- analyze an impulse response and
+# compute the full RoomMetrics set (C50/C80/D50/STI/RT60). Builds a goonj
+# ImpulseResponse from the sample vec then feeds each goonj analysis metric;
+# RT60 uses naad's own energy-decay estimate. Returns the RoomMetrics pointer
+# on success, or a negative ERR_COMPUTATION if the IR is empty or the sample
+# rate is zero. `ir` is a vec of f64 samples, `sample_rate` an integer in Hz.
+# Ports analyze_impulse_response.
+# ================================================================
+#must_use
+fn naad_analysis_analyze_impulse_response(ir, sample_rate) {
+    if (vec_len(ir) == 0) { return ERR_COMPUTATION; }
+    if (sample_rate == 0) { return ERR_COMPUTATION; }
+
+    # rt60 field is 0.0 here -- the analysis metrics do not read it.
+    var goonj_ir = impulse_response_new(ir, sample_rate, 0);
+
+    var c50 = clarity_c50(goonj_ir);
+    var c80 = clarity_c80(goonj_ir);
+    var d50 = definition_d50(goonj_ir);
+    var sti = sti_estimate(goonj_ir);
+    var rt60 = naad_analysis_estimate_rt60(ir, sample_rate);
+
+    return naad_analysis_room_metrics_new(c50, c80, d50, sti, rt60);
+}
+
+# ================================================================
+# WallAbsorptionAdvice -- one wall's contribution to RT60 if its absorption is
+# increased.
+#   wall_index         : wall index in the shoebox geometry (0 = floor,
+#                        1 = ceiling, 2-5 = side walls)
+#   rt60_sensitivity   : change in RT60 (seconds) per unit absorption bump on
+#                        this wall (negative shortens reverb -- the desirable
+#                        case for taming a live room)
+#   current_absorption : current average absorption of this wall (0 = perfectly
+#                        reflective, 1 = perfectly absorptive)
+# ================================================================
+#derive(accessors)
+struct WallAbsorptionAdvice {
+    wall_index;
+    rt60_sensitivity;
+    current_absorption;
+}
+
+# Build a WallAbsorptionAdvice. Ports the Rust struct literal.
+#must_use
+fn naad_analysis_wall_absorption_advice_new(wall_index, rt60_sensitivity, current_absorption) {
+    var a = alloc(sizeof(WallAbsorptionAdvice));
+    WallAbsorptionAdvice_set_wall_index(a, wall_index);
+    WallAbsorptionAdvice_set_rt60_sensitivity(a, rt60_sensitivity);
+    WallAbsorptionAdvice_set_current_absorption(a, current_absorption);
+    return a;
+}
+
+# ================================================================
+# naad_analysis_suggest_absorption -- recommend acoustic treatment placement to
+# bring a virtual room toward a target RT60. Builds a goonj shoebox AcousticRoom
+# from `config`, asks goonj which walls most affect reverb time if their
+# absorption is increased, then maps the goonj AbsorptionSuggestions into naad
+# WallAbsorptionAdvice records. Returns the advice vec (sorted most-impactful
+# first, matching goonj) on success, or a negative ERR_COMPUTATION if the wall
+# material name is unknown or the room dimensions are non-positive.
+# Ports suggest_absorption.
+# ================================================================
+#must_use
+fn naad_analysis_suggest_absorption(config, target_rt60) {
+    var material = naad_acoustics_material_by_name(RoomReverbConfig_wall_material_name(config));
+    if (material == 0) { return ERR_COMPUTATION; }
+
+    if (f64_le(RoomReverbConfig_length(config), 0) == 1) { return ERR_COMPUTATION; }
+    if (f64_le(RoomReverbConfig_width(config), 0) == 1) { return ERR_COMPUTATION; }
+    if (f64_le(RoomReverbConfig_height(config), 0) == 1) { return ERR_COMPUTATION; }
+
+    var room = acoustic_room_shoebox(RoomReverbConfig_length(config),
+    RoomReverbConfig_width(config), RoomReverbConfig_height(config), material);
+    var suggestions = suggest_absorption_placement(room, target_rt60);
+
+    var advice = vec_new();
+    var n = vec_len(suggestions);
+    var i = 0;
+    while (i < n) {
+        var s = vec_get(suggestions, i);
+        vec_push(advice, naad_analysis_wall_absorption_advice_new(
+        AbsorptionSuggestion_wall_index(s),
+        AbsorptionSuggestion_rt60_sensitivity(s),
+        AbsorptionSuggestion_current_absorption(s)));
+        i = i + 1;
+    }
+    return advice;
+}

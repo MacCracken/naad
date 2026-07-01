@@ -1,0 +1,106 @@
+[package]
+name = "naad"
+version = "${file:VERSION}"
+description = "naad — audio synthesis primitives (oscillators, filters, envelopes, modulation, wavetables, effects, dynamics, synthesis, acoustics). Cyrius port of a 13,465-line Rust library."
+license = "GPL-3.0-only"
+repository = "https://github.com/MacCracken/naad"
+language = "cyrius"
+cyrius = "6.3.19"
+
+[build]
+entry = "src/main.cyr"
+output = "build/naad"
+
+# `[lib]` declares the distlib bundle `cyrius distlib` writes into
+# `dist/naad.cyr` — all 39 modules concatenated in dependency order (deps
+# before dependents; the oscillator cluster is mutually referential, fine in
+# the flat namespace). Every module is self-contained (no `include` lines).
+# The bundle resolves stdlib + hisab (HVec3/HComplex/num_fft/calc_bspline/
+# ganita) + goonj (acoustics engine, which itself pulls sakshi) from the
+# CONSUMER's manifest. Cross-module symbol collisions audited to zero (443
+# top-level fns share one flat namespace once concatenated).
+[lib]
+modules = [
+    "src/error.cyr",
+    "src/dsp_util.cyr",
+    "src/dsp_spectral.cyr",
+    "src/noise.cyr",
+    "src/panning.cyr",
+    "src/mod_matrix.cyr",
+    "src/tuning.cyr",
+    "src/voice.cyr",
+    "src/smoothing.cyr",
+    "src/delay.cyr",
+    "src/filter.cyr",
+    "src/granular.cyr",
+    "src/wavetable.cyr",
+    "src/envelope.cyr",
+    "src/additive.cyr",
+    "src/reverb.cyr",
+    "src/eq.cyr",
+    "src/formant.cyr",
+    "src/vocoder.cyr",
+    "src/drum.cyr",
+    "src/dynamics.cyr",
+    "src/fm.cyr",
+    "src/physical.cyr",
+    "src/osc_core.cyr",
+    "src/osc_unison.cyr",
+    "src/osc_sub.cyr",
+    "src/osc_sync.cyr",
+    "src/modulation.cyr",
+    "src/effects.cyr",
+    "src/subtractive.cyr",
+    "src/acoustics.cyr",
+    "src/acoustics_room.cyr",
+    "src/acoustics_directivity.cyr",
+    "src/acoustics_ambisonics.cyr",
+    "src/acoustics_fdn.cyr",
+    "src/acoustics_binaural.cyr",
+    "src/acoustics_analysis.cyr",
+    "src/acoustics_convolution.cyr",
+    "src/acoustics_coupled.cyr",
+]
+
+# stdlib: the math-heavy port set hisab/goonj use. `math` gives
+# clamp/min/max/lerp/sign + F64_* constants; `ganita` gives the
+# transcendentals naad's DSP leans on (sin/cos/tan/exp/ln/pow/sqrt/…).
+# `bench` for .bcyr harnesses, `fnptr`/`callback` for the closure→fn-ptr
+# port pattern, `tagged` for the few Option-shaped returns.
+[deps]
+stdlib = [
+    "syscalls",
+    "string",
+    "alloc",
+    "str",
+    "fmt",
+    "vec",
+    "io",
+    "args",
+    "assert",
+    "math",
+    "ganita",
+    "tagged",
+    "fnptr",
+    "callback",
+    "bench",
+]
+
+# hisab — math/geometry. naad consumes HVec3 (envelope, additive,
+# physical, wavetable) and HComplex + num_fft/calc_bspline/ganita
+# least-squares (dsp_spectral) from the single distlib bundle, same
+# pattern goonj uses. Pinned to the released tag for reproducible builds.
+[deps.hisab]
+git = "https://github.com/MacCracken/hisab.git"
+tag = "2.6.7"
+modules = ["dist/hisab.cyr"]
+
+# goonj — acoustics engine. Consumed by the `acoustics/*` wrapper modules
+# (room, impulse, binaural, material, analysis, coupled, portal, fdn,
+# directivity, ambisonics). Its bundle references sakshi (goonj's logging)
+# + hisab; both resolve from naad's own deps (sakshi arrives transitively
+# via hisab). Pinned to the released tag.
+[deps.goonj]
+git = "https://github.com/MacCracken/goonj.git"
+tag = "2.0.0"
+modules = ["dist/goonj.cyr"]

@@ -1,0 +1,22 @@
+# acoustics.tcyr -- parity test for src/acoustics.cyr (material_by_name helper).
+# Ports the intent of acoustics/mod.rs: known names resolve, unknown → None(0).
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "src/error.cyr"
+include "src/acoustics.cyr"
+
+alloc_init();
+
+test_group("material_by_name");
+assert(naad_acoustics_material_by_name("concrete") != 0, "concrete resolves");
+assert(naad_acoustics_material_by_name("carpet") != 0, "carpet resolves");
+assert(naad_acoustics_material_by_name("glass") != 0, "glass resolves");
+assert(naad_acoustics_material_by_name("wood") != 0, "wood resolves");
+assert(naad_acoustics_material_by_name("curtain") != 0, "curtain resolves");
+assert(naad_acoustics_material_by_name("drywall") != 0, "drywall resolves");
+assert(naad_acoustics_material_by_name("tile") != 0, "tile resolves");
+assert_eq(naad_acoustics_material_by_name("unobtainium"), 0, "unknown name -> None(0)");
+
+var rc = assert_summary();
+syscall(60, rc);

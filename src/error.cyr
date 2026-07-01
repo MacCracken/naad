@@ -1,0 +1,96 @@
+# error.cyr -- naad error codes + shared DSP tolerances and base helpers.
+# Usage: included by every build/test entry FIRST; the L0 base module.
+# Module files do not `include` each other -- the entry orders them.
+#
+# Ports rust-old/src/error.rs (NaadError enum + validate_frequency/
+# validate_sample_rate) AND the two crate-root helpers from lib.rs that
+# the whole crate leans on: flush_denormal + the finite/epsilon tolerances.
+# Rust carried a String/f32 payload per error variant; Cyrius uses integer
+# codes -- validators return ERR_NONE (0) on success or a negative code on
+# failure. Diagnostic strings come from naad_err_name().
+
+# ================================================================
+# Error codes (was `enum NaadError`). One per Rust variant.
+# ================================================================
+var ERR_NONE                = 0;
+var ERR_INVALID_FREQUENCY   = (0 - 1);   # frequency out of (0, Nyquist)
+var ERR_INVALID_SAMPLE_RATE = (0 - 2);   # sample rate <= 0 or non-finite
+var ERR_INVALID_PARAMETER   = (0 - 3);   # a named parameter out of range
+var ERR_BUFFER_OVERFLOW     = (0 - 4);   # buffer op exceeded capacity
+var ERR_COMPUTATION         = (0 - 5);   # computation produced invalid result
+
+# ================================================================
+# Shared f64 tolerances / sentinels (IEEE-754 bit patterns).
+# naad's Rust source was f32; the Cyrius port is f64 throughout (hisab's
+# HVec3/HComplex are f64-only). NAAD_EPSILON preserves the f32::EPSILON
+# (2^-23) guard thresholds the Rust code used, promoted cleanly to f64.
+# ================================================================
+var NAAD_EPSILON        = 0x3E80000000000000;   # f32::EPSILON = 2^-23 ~ 1.192e-7
+var NAAD_POS_INF        = 0x7FF0000000000000;   # +inf
+var NAAD_NEG_INF        = 0xFFF0000000000000;   # -inf (amplitude_to_db(<=0))
+var NAAD_F32_MIN_POS    = 0x3810000000000000;   # f32::MIN_POSITIVE ~ 1.175e-38
+
+# 1 if `code` is an error (negative), 0 otherwise.
+#must_use
+fn naad_is_err(code) {
+    if (code < 0) { return 1; }
+    return 0;
+}
+
+# Static name for an error code (for diagnostics / logging).
+#must_use
+fn naad_err_name(code) {
+    if (code == ERR_NONE) { return "none"; }
+    if (code == ERR_INVALID_FREQUENCY) { return "invalid frequency"; }
+    if (code == ERR_INVALID_SAMPLE_RATE) { return "invalid sample rate"; }
+    if (code == ERR_INVALID_PARAMETER) { return "invalid parameter"; }
+    if (code == ERR_BUFFER_OVERFLOW) { return "buffer overflow"; }
+    if (code == ERR_COMPUTATION) { return "computation error"; }
+    return "unknown error";
+}
+
+# Finite test: 1 iff x is neither +/-inf nor NaN. abs(x) < +inf holds for
+# finite x, fails for infinities (inf < inf is false) and NaN (any NaN
+# compare is false). Mirrors Rust `f32::is_finite`.
+#must_use
+fn naad_is_finite(x) {
+    return f64_lt(f64_abs(x), NAAD_POS_INF);
+}
+
+# ================================================================
+# validate_frequency -- ERR_NONE if in (0, Nyquist) and finite, else
+# ERR_INVALID_FREQUENCY. Ports validate_frequency (returns Option<Error>);
+# the Rust `warn!` diagnostic is dropped (logging is a separate module).
+# ================================================================
+#must_use
+fn validate_frequency(frequency, sample_rate) {
+    var nyquist = f64_mul(sample_rate, F64_HALF);
+    if (f64_le(frequency, 0) == 1) { return ERR_INVALID_FREQUENCY; }
+    if (f64_ge(frequency, nyquist) == 1) { return ERR_INVALID_FREQUENCY; }
+    if (naad_is_finite(frequency) == 0) { return ERR_INVALID_FREQUENCY; }
+    return ERR_NONE;
+}
+
+# ================================================================
+# validate_sample_rate -- ERR_NONE if positive and finite, else
+# ERR_INVALID_SAMPLE_RATE. Ports validate_sample_rate.
+# ================================================================
+#must_use
+fn validate_sample_rate(sample_rate) {
+    if (f64_le(sample_rate, 0) == 1) { return ERR_INVALID_SAMPLE_RATE; }
+    if (naad_is_finite(sample_rate) == 0) { return ERR_INVALID_SAMPLE_RATE; }
+    return ERR_NONE;
+}
+
+# ================================================================
+# flush_denormal -- flush subnormal floats to zero (crate-root helper in
+# Rust lib.rs). Denormals cause 10-100x slowdowns on x86; filters and
+# feedback paths call this when signals decay to near-zero. Returns +0.0
+# if |x| < f32::MIN_POSITIVE, else x unchanged.
+# ================================================================
+#inline
+#must_use
+fn flush_denormal(x) {
+    if (f64_lt(f64_abs(x), NAAD_F32_MIN_POS) == 1) { return 0; }
+    return x;
+}

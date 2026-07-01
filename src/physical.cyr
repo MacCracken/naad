@@ -1,0 +1,427 @@
+# physical.cyr -- Physical modeling synthesis (Karplus-Strong / waveguide /
+# RK4 Moog ladder). Ports rust-old/src/synth/physical.rs. f32 -> f64 throughout.
+#
+# Serde derives + Display are dropped. Constructors return the struct pointer on
+# success or a negative ERR_* on invalid frequency/sample_rate (mirroring the
+# Rust `Result` error paths). Methods become free `physical_*` functions taking
+# the struct pointer. `&mut u32` PRNG state -> a pointer to an 8-byte slot
+# stepped via dsp_util's xorshift32_signed_f32. `&mut [f32]` buffers -> vec.
+#
+# DIVERGENCE (noted, not silent): the Rust MoogLadder integrates a coupled
+# 4-state ODE with `hisab::num::rk4(derivative, 0.0, &state, dt, 1)` -- a VECTOR
+# RK4. The ported hisab exposes only a SCALAR `num_rk4(f, t, y, dt)` (single
+# f64 state via fncall2), which cannot integrate a coupled system correctly.
+# We therefore hand-roll the identical classic 4th-order Runge-Kutta step over
+# the 4-vector (same k1..k4 / (1,2,2,1)/6 weights hisab's Rust rk4 uses),
+# calling physical_moog_deriv for the derivative. This reproduces the oracle's
+# numerics exactly; it is a faithful reimplementation, not an approximation.
+#
+# Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE/TWO/
+# HALF/PI/TAU, f64_clamp), ganita (f64_tanh), error.cyr (validate_frequency/
+# validate_sample_rate, flush_denormal, naad_is_err, ERR_*), dsp_util
+# (xorshift32_signed_f32), delay.cyr (delay_line_*). The module has no includes.
+
+# ================================================================
+# Float literals (IEEE-754 bit patterns).
+# ================================================================
+var PHYS_KS_FB_BASE    = 0x3feccccccccccccd;   # 0.9   feedback base
+var PHYS_KS_FB_SCALE   = 0x3fb95810624dd2f2;   # 0.099 feedback decay scale
+var PHYS_ACTIVE_THRESH = 0x3eb0c6f7a0b5ed8d;   # 1e-6  is_active threshold
+var PHYS_WG_JUNCTION   = 0x3fefae147ae147ae;   # 0.99  default junction coeff
+
+# ================================================================
+# KarplusStrong -- plucked string. A noise burst excites a delay line whose
+# length sets the pitch; each loop pass applies a one-pole lowpass (damping)
+# and feedback attenuation for a naturally decaying, pitched tone.
+#   delay_line    : DelayLine pointer (period = sample_rate / frequency)
+#   feedback      : feedback coefficient (decay control)
+#   damping_prev  : one-pole lowpass state
+#   brightness    : damping coefficient in [0,1] (higher = brighter)
+#   delay_samples : fractional delay in samples (tuning)
+#   sample_rate   : Hz
+#   frequency     : fundamental Hz
+#   rng           : pointer to an 8-byte slot holding the u32 PRNG state
+# ================================================================
+#derive(accessors)
+struct KarplusStrong { delay_line; feedback; damping_prev; brightness; delay_samples;
+    sample_rate; frequency; rng; }
+
+# Create a Karplus-Strong string model. Returns the struct pointer on success,
+# or a negative ERR_* on invalid sample_rate/frequency.
+#must_use
+fn physical_ks_new(frequency, decay, brightness, sample_rate) {
+    var e = validate_sample_rate(sample_rate);
+    if (naad_is_err(e) == 1) { return e; }
+    e = validate_frequency(frequency, sample_rate);
+    if (naad_is_err(e) == 1) { return e; }
+
+    var delay_samples = f64_div(sample_rate, frequency);
+    var max_delay = f64_to(f64_ceil(delay_samples)) + 2;
+    var dl = delay_line_new(max_delay);
+
+    # Feedback derived from decay: higher decay = closer to 1.0 (~0.9..0.999).
+    var feedback = f64_add(PHYS_KS_FB_BASE, f64_mul(f64_clamp(decay, 0, F64_ONE), PHYS_KS_FB_SCALE));
+
+    var rng = alloc(8);
+    store64(rng, 54321);
+
+    var self = alloc(sizeof(KarplusStrong));
+    KarplusStrong_set_delay_line(self, dl);
+    KarplusStrong_set_feedback(self, feedback);
+    KarplusStrong_set_damping_prev(self, 0);
+    KarplusStrong_set_brightness(self, f64_clamp(brightness, 0, F64_ONE));
+    KarplusStrong_set_delay_samples(self, delay_samples);
+    KarplusStrong_set_sample_rate(self, sample_rate);
+    KarplusStrong_set_frequency(self, frequency);
+    KarplusStrong_set_rng(self, rng);
+    return self;
+}
+
+# Signed noise sample for the exciter (xorshift32 pointer-state step).
+#inline
+fn physical_ks_next_noise(self) {
+    return xorshift32_signed_f32(KarplusStrong_rng(self));
+}
+
+# Excite the string with a noise burst (pluck).
+fn physical_ks_pluck(self) {
+    delay_line_clear(KarplusStrong_delay_line(self));
+    KarplusStrong_set_damping_prev(self, 0);
+    var n = f64_to(f64_ceil(KarplusStrong_delay_samples(self)));
+    var i = 0;
+    while (i < n) {
+        var noise = physical_ks_next_noise(self);
+        delay_line_write(KarplusStrong_delay_line(self), noise);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Set the fundamental frequency. Returns ERR_NONE on success, negative ERR_* if
+# the frequency is out of (0, Nyquist) or non-finite.
+fn physical_ks_set_frequency(self, frequency) {
+    var e = validate_frequency(frequency, KarplusStrong_sample_rate(self));
+    if (naad_is_err(e) == 1) { return e; }
+    KarplusStrong_set_frequency(self, frequency);
+    KarplusStrong_set_delay_samples(self, f64_div(KarplusStrong_sample_rate(self), frequency));
+    return ERR_NONE;
+}
+
+# Generate the next sample.
+#inline
+#must_use
+fn physical_ks_next_sample(self) {
+    var dl = KarplusStrong_delay_line(self);
+    var delayed = delay_line_read(dl, KarplusStrong_delay_samples(self));
+
+    # One-pole lowpass for damping:
+    # y[n] = brightness * x[n] + (1 - brightness) * y[n-1]
+    var brightness = KarplusStrong_brightness(self);
+    var damping_prev = KarplusStrong_damping_prev(self);
+    var filtered = f64_add(f64_mul(brightness, delayed),
+    f64_mul(f64_sub(F64_ONE, brightness), damping_prev));
+    KarplusStrong_set_damping_prev(self, flush_denormal(filtered));
+
+    # Write back with feedback.
+    var feedback_sample = f64_mul(filtered, KarplusStrong_feedback(self));
+    delay_line_write(dl, flush_denormal(feedback_sample));
+    return delayed;
+}
+
+# Fill a vec buffer with samples (in place).
+#inline
+fn physical_ks_fill_buffer(self, buffer) {
+    var n = vec_len(buffer);
+    var i = 0;
+    while (i < n) {
+        vec_set(buffer, i, physical_ks_next_sample(self));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 1 if the string is still vibrating (|damping_prev| > 1e-6), else 0.
+#must_use
+fn physical_ks_is_active(self) {
+    if (f64_gt(f64_abs(KarplusStrong_damping_prev(self)), PHYS_ACTIVE_THRESH) == 1) { return 1; }
+    return 0;
+}
+
+# Returns the fundamental frequency.
+#must_use
+fn physical_ks_frequency(self) {
+    return KarplusStrong_frequency(self);
+}
+
+# ================================================================
+# Waveguide -- simple bidirectional tube/string model. Two delay lines carry
+# waves in opposite directions with boundary reflection (sign inversion) and
+# damping.
+#   forward_delay   : forward-travelling DelayLine pointer
+#   backward_delay  : backward-travelling DelayLine pointer
+#   delay_samples   : delay length in samples (half the period)
+#   damping         : energy loss per round trip in [0,1]
+#   junction_coeff  : junction reflection coefficient
+#   sample_rate     : Hz
+# ================================================================
+#derive(accessors)
+struct Waveguide { forward_delay; backward_delay; delay_samples; damping; junction_coeff;
+    sample_rate; }
+
+# Create a bidirectional waveguide. Returns the struct pointer on success, or a
+# negative ERR_* on invalid sample_rate/frequency.
+#must_use
+fn physical_wg_new(frequency, damping, sample_rate) {
+    var e = validate_sample_rate(sample_rate);
+    if (naad_is_err(e) == 1) { return e; }
+    e = validate_frequency(frequency, sample_rate);
+    if (naad_is_err(e) == 1) { return e; }
+
+    # Each delay line is half the period (wave travels in both directions).
+    var half_period = f64_div(f64_div(sample_rate, frequency), F64_TWO);
+    var max_delay = f64_to(f64_ceil(half_period)) + 2;
+
+    var self = alloc(sizeof(Waveguide));
+    Waveguide_set_forward_delay(self, delay_line_new(max_delay));
+    Waveguide_set_backward_delay(self, delay_line_new(max_delay));
+    Waveguide_set_delay_samples(self, half_period);
+    Waveguide_set_damping(self, f64_clamp(damping, 0, F64_ONE));
+    Waveguide_set_junction_coeff(self, PHYS_WG_JUNCTION);
+    Waveguide_set_sample_rate(self, sample_rate);
+    return self;
+}
+
+# Inject energy into the waveguide (excitation): split equally into both dirs.
+fn physical_wg_excite(self, sample) {
+    var half = f64_mul(sample, F64_HALF);
+    delay_line_write(Waveguide_forward_delay(self), half);
+    delay_line_write(Waveguide_backward_delay(self), half);
+    return 0;
+}
+
+# Generate the next sample (advance both lines with boundary reflection).
+#inline
+#must_use
+fn physical_wg_next_sample(self) {
+    var fwd_dl = Waveguide_forward_delay(self);
+    var bwd_dl = Waveguide_backward_delay(self);
+    var ds = Waveguide_delay_samples(self);
+
+    var fwd = delay_line_read(fwd_dl, ds);
+    var bwd = delay_line_read(bwd_dl, ds);
+
+    # Reflection at boundaries: invert and apply damping + junction.
+    var attenuation = f64_sub(F64_ONE, Waveguide_damping(self));
+    var jc = Waveguide_junction_coeff(self);
+    var fwd_reflected = f64_mul(f64_mul(f64_neg(bwd), attenuation), jc);
+    var bwd_reflected = f64_mul(f64_mul(f64_neg(fwd), attenuation), jc);
+
+    delay_line_write(fwd_dl, flush_denormal(fwd_reflected));
+    delay_line_write(bwd_dl, flush_denormal(bwd_reflected));
+
+    # Output is the sum at the observation point.
+    return f64_add(fwd, bwd);
+}
+
+# Fill a vec buffer with samples (in place).
+#inline
+fn physical_wg_fill_buffer(self, buffer) {
+    var n = vec_len(buffer);
+    var i = 0;
+    while (i < n) {
+        vec_set(buffer, i, physical_wg_next_sample(self));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Set the junction reflection coefficient (clamped to [0,1]).
+fn physical_wg_set_junction_coeff(self, coeff) {
+    Waveguide_set_junction_coeff(self, f64_clamp(coeff, 0, F64_ONE));
+    return 0;
+}
+
+# 1 if the waveguide still has energy above threshold, else 0.
+#must_use
+fn physical_wg_is_active(self) {
+    var ds = Waveguide_delay_samples(self);
+    var fwd = delay_line_read(Waveguide_forward_delay(self), ds);
+    var bwd = delay_line_read(Waveguide_backward_delay(self), ds);
+    if (f64_gt(f64_abs(f64_add(fwd, bwd)), PHYS_ACTIVE_THRESH) == 1) { return 1; }
+    return 0;
+}
+
+# ================================================================
+# MoogLadder -- 4-pole lowpass integrated via classic RK4 (see DIVERGENCE note
+# at the top of this file). Four cascaded one-pole stages with global feedback
+# `k` for resonance and a tanh saturator per stage. State equations:
+#   dy[0]/dt = omega * (tanh(input - k*y[3]) - tanh(y[0]))
+#   dy[1]/dt = omega * (tanh(y[0]) - tanh(y[1]))
+#   dy[2]/dt = omega * (tanh(y[1]) - tanh(y[2]))
+#   dy[3]/dt = omega * (tanh(y[2]) - tanh(y[3]))
+# where omega = 2*pi*cutoff_hz and k in [0, 4] (k ~ 4 -> self-oscillation).
+#   cutoff_hz   : cutoff frequency Hz
+#   resonance   : feedback amount, clamped to [0, 4]
+#   sample_rate : Hz
+#   state       : vec of 4 f64 ladder-stage states
+#   scratch     : 128-byte scratch (4 x 32B RK4 stage buffers k1..k4)
+# ================================================================
+#derive(accessors)
+struct MoogLadder { cutoff_hz; resonance; sample_rate; state; scratch; }
+
+# Create a Moog-ladder filter. Returns the struct pointer on success, or a
+# negative ERR_* on invalid sample_rate/cutoff.
+#must_use
+fn physical_moog_new(cutoff_hz, resonance, sample_rate) {
+    var e = validate_sample_rate(sample_rate);
+    if (naad_is_err(e) == 1) { return e; }
+    e = validate_frequency(cutoff_hz, sample_rate);
+    if (naad_is_err(e) == 1) { return e; }
+
+    var state = vec_new();
+    vec_push(state, 0);
+    vec_push(state, 0);
+    vec_push(state, 0);
+    vec_push(state, 0);
+
+    var self = alloc(sizeof(MoogLadder));
+    MoogLadder_set_cutoff_hz(self, cutoff_hz);
+    MoogLadder_set_resonance(self, f64_clamp(resonance, 0, f64_from(4)));
+    MoogLadder_set_sample_rate(self, sample_rate);
+    MoogLadder_set_state(self, state);
+    MoogLadder_set_scratch(self, alloc(128));
+    return self;
+}
+
+# Set the cutoff frequency. Returns ERR_NONE on success, negative ERR_* if out
+# of the valid (0, Nyquist) range.
+fn physical_moog_set_cutoff(self, cutoff_hz) {
+    var e = validate_frequency(cutoff_hz, MoogLadder_sample_rate(self));
+    if (naad_is_err(e) == 1) { return e; }
+    MoogLadder_set_cutoff_hz(self, cutoff_hz);
+    return ERR_NONE;
+}
+
+# Set the resonance amount (clamped to [0, 4]).
+fn physical_moog_set_resonance(self, resonance) {
+    MoogLadder_set_resonance(self, f64_clamp(resonance, 0, f64_from(4)));
+    return 0;
+}
+
+# Returns the current cutoff in Hz.
+#inline
+#must_use
+fn physical_moog_cutoff_hz(self) {
+    return MoogLadder_cutoff_hz(self);
+}
+
+# Returns the current resonance amount.
+#inline
+#must_use
+fn physical_moog_resonance(self) {
+    return MoogLadder_resonance(self);
+}
+
+# Reset internal state to zero.
+fn physical_moog_reset(self) {
+    var state = MoogLadder_state(self);
+    vec_set(state, 0, 0);
+    vec_set(state, 1, 0);
+    vec_set(state, 2, 0);
+    vec_set(state, 3, 0);
+    return 0;
+}
+
+# Evaluate the 4-state Moog derivative at (y0..y3) into the 4-slot buffer `out`
+# (32 bytes: components at offsets 0/8/16/24).
+fn physical_moog_deriv(omega, k, input, y0, y1, y2, y3, out) {
+    var stage_in = f64_tanh(f64_sub(input, f64_mul(k, y3)));
+    var t0 = f64_tanh(y0);
+    var t1 = f64_tanh(y1);
+    var t2 = f64_tanh(y2);
+    var t3 = f64_tanh(y3);
+    store64(out, f64_mul(omega, f64_sub(stage_in, t0)));
+    store64(out + 8, f64_mul(omega, f64_sub(t0, t1)));
+    store64(out + 16, f64_mul(omega, f64_sub(t1, t2)));
+    store64(out + 24, f64_mul(omega, f64_sub(t2, t3)));
+    return 0;
+}
+
+# One classic RK4 step of the 4-state Moog system over `dt`, updating `state`
+# (vec of 4 f64) in place. `scratch` is 128 bytes: k1..k4 at 0/32/64/96.
+fn physical_moog_rk4_step(omega, k, input, state, dt, scratch) {
+    var h2 = f64_mul(dt, F64_HALF);
+    var k1 = scratch;
+    var k2 = scratch + 32;
+    var k3 = scratch + 64;
+    var k4 = scratch + 96;
+
+    var y0 = vec_get(state, 0);
+    var y1 = vec_get(state, 1);
+    var y2 = vec_get(state, 2);
+    var y3 = vec_get(state, 3);
+
+    physical_moog_deriv(omega, k, input, y0, y1, y2, y3, k1);
+    physical_moog_deriv(omega, k, input,
+    f64_add(y0, f64_mul(h2, load64(k1))),
+    f64_add(y1, f64_mul(h2, load64(k1 + 8))),
+    f64_add(y2, f64_mul(h2, load64(k1 + 16))),
+    f64_add(y3, f64_mul(h2, load64(k1 + 24))), k2);
+    physical_moog_deriv(omega, k, input,
+    f64_add(y0, f64_mul(h2, load64(k2))),
+    f64_add(y1, f64_mul(h2, load64(k2 + 8))),
+    f64_add(y2, f64_mul(h2, load64(k2 + 16))),
+    f64_add(y3, f64_mul(h2, load64(k2 + 24))), k3);
+    physical_moog_deriv(omega, k, input,
+    f64_add(y0, f64_mul(dt, load64(k3))),
+    f64_add(y1, f64_mul(dt, load64(k3 + 8))),
+    f64_add(y2, f64_mul(dt, load64(k3 + 16))),
+    f64_add(y3, f64_mul(dt, load64(k3 + 24))), k4);
+
+    # y_new = y + (dt/6) * (k1 + 2*k2 + 2*k3 + k4), per component.
+    var over6 = f64_div(dt, f64_from(6));
+    var i = 0;
+    while (i < 4) {
+        var off = i * 8;
+        var sum = f64_add(load64(k1 + off),
+        f64_add(f64_mul(F64_TWO, load64(k2 + off)),
+        f64_add(f64_mul(F64_TWO, load64(k3 + off)), load64(k4 + off))));
+        vec_set(state, i, f64_add(vec_get(state, i), f64_mul(over6, sum)));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Process a single sample through the Moog ladder (one RK4 step over
+# 1/sample_rate seconds), returning the lowpass-most stage y[3] clamped to
+# [-2, 2] as a divergence guard.
+#inline
+#must_use
+fn physical_moog_process_sample(self, input) {
+    var omega = f64_mul(F64_TAU, MoogLadder_cutoff_hz(self));
+    var k = MoogLadder_resonance(self);
+    var dt = f64_div(F64_ONE, MoogLadder_sample_rate(self));
+    var state = MoogLadder_state(self);
+
+    physical_moog_rk4_step(omega, k, input, state, dt, MoogLadder_scratch(self));
+
+    # Denormal-flush each stage (matches Rust's per-component flush).
+    var i = 0;
+    while (i < 4) {
+        vec_set(state, i, flush_denormal(vec_get(state, i)));
+        i = i + 1;
+    }
+    return f64_clamp(vec_get(state, 3), f64_neg(F64_TWO), F64_TWO);
+}
+
+# Process a vec buffer through the Moog ladder in place.
+#inline
+fn physical_moog_process_buffer(self, buffer) {
+    var n = vec_len(buffer);
+    var i = 0;
+    while (i < n) {
+        vec_set(buffer, i, physical_moog_process_sample(self, vec_get(buffer, i)));
+        i = i + 1;
+    }
+    return 0;
+}

@@ -1,0 +1,93 @@
+# acoustics_coupled.tcyr -- parity test for src/acoustics_coupled.cyr.
+# Ports the #[test] blocks from rust-old/src/acoustics/coupled.rs one-for-one.
+# The serde-roundtrip test is dropped (Cyrius has no serde). Rust's `.unwrap()`
+# / Result becomes: success is a positive struct pointer (naad_is_err == 0),
+# failure is a negative ERR_* code (naad_is_err == 1). f32 tolerances loosen
+# to f64.
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "src/error.cyr"
+include "src/acoustics.cyr"
+include "src/acoustics_room.cyr"
+include "src/acoustics_coupled.cyr"
+
+# 1.5 metres = 1.0 + 0.5 (ear / portal centre height in the fixtures).
+fn one_and_half() { return f64_add(F64_ONE, F64_HALF); }
+
+# Oracle small_room(): 5 x 4 x 3 m carpet room at 48 kHz, source
+# [1, 1.5, 1], listener [4, 1.5, 3].
+fn small_room() {
+    var source = hvec3_new(F64_ONE, one_and_half(), F64_ONE);
+    var listener = hvec3_new(f64_from(4), one_and_half(), f64_from(3));
+    return naad_room_reverb_config_new(f64_from(5), f64_from(4), f64_from(3),
+    "carpet", source, listener, 48000);
+}
+
+# Oracle large_room(): 20 x 15 x 8 m concrete room at 48 kHz, source
+# [10, 4, 7], listener [5, 4, 7].
+fn large_room() {
+    var source = hvec3_new(f64_from(10), f64_from(4), f64_from(7));
+    var listener = hvec3_new(f64_from(5), f64_from(4), f64_from(7));
+    return naad_room_reverb_config_new(f64_from(20), f64_from(15), f64_from(8),
+    "concrete", source, listener, 48000);
+}
+
+# Oracle small_room() with a caller-supplied wall material (for the
+# unknown-material variant).
+fn small_room_mat(material) {
+    var source = hvec3_new(F64_ONE, one_and_half(), F64_ONE);
+    var listener = hvec3_new(f64_from(4), one_and_half(), f64_from(3));
+    return naad_room_reverb_config_new(f64_from(5), f64_from(4), f64_from(3),
+    material, source, listener, 48000);
+}
+
+# Oracle portal(): position [5, 1.5, 2], +X normal, 1 x 2 m opening.
+fn portal() {
+    var pos = hvec3_new(f64_from(5), one_and_half(), F64_TWO);
+    var normal = hvec3_new(F64_ONE, 0, 0);
+    return naad_coupled_portal_new(pos, normal, F64_ONE, F64_TWO);
+}
+
+# 0.0 <= x <= 1.0 ?
+fn in_unit_range(x) {
+    if (f64_lt(x, 0) == 1) { return 0; }
+    if (f64_gt(x, F64_ONE) == 1) { return 0; }
+    return 1;
+}
+
+alloc_init();
+
+# ================================================================
+# test_coupled_decay_two_rooms: both RT60s finite and positive, both
+# early_amplitude and coupling_strength within [0, 1].
+test_group("coupled_decay_two_rooms");
+var cfg = naad_coupled_room_config_new(small_room(), large_room(), portal());
+var decay = naad_coupled_analyze_decay(cfg);
+assert_eq(naad_is_err(decay), 0, "analysis should succeed");
+assert_eq(naad_is_finite(CoupledDecayResult_rt60_early(decay)), 1, "rt60_early finite");
+assert(f64_gt(CoupledDecayResult_rt60_early(decay), 0), "rt60_early > 0");
+assert_eq(naad_is_finite(CoupledDecayResult_rt60_late(decay)), 1, "rt60_late finite");
+assert(f64_gt(CoupledDecayResult_rt60_late(decay), 0), "rt60_late > 0");
+assert_eq(in_unit_range(CoupledDecayResult_early_amplitude(decay)), 1, "early_amplitude in [0,1]");
+assert_eq(in_unit_range(CoupledDecayResult_coupling_strength(decay)), 1, "coupling_strength in [0,1]");
+
+# ================================================================
+# test_coupled_decay_late_is_longer_for_reverberant_room_b: carpeted room A
+# coupled to concrete room B -- the late (slow) decay should be at least as
+# long as the early (fast) decay (energy sustained by the live room).
+test_group("coupled_decay_late_is_longer");
+var cfg2 = naad_coupled_room_config_new(small_room(), large_room(), portal());
+var d2 = naad_coupled_analyze_decay(cfg2);
+assert(f64_ge(CoupledDecayResult_rt60_late(d2), CoupledDecayResult_rt60_early(d2)),
+"concrete coupled room should sustain late decay");
+
+# ================================================================
+# test_invalid_material_errors: an unknown wall material on room A makes the
+# analysis fail.
+test_group("invalid_material_errors");
+var bad_cfg = naad_coupled_room_config_new(small_room_mat("kryptonite"), large_room(), portal());
+assert_eq(naad_is_err(naad_coupled_analyze_decay(bad_cfg)), 1, "unknown material -> error");
+
+var rc = assert_summary();
+syscall(60, rc);

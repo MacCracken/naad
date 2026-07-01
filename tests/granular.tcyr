@@ -1,0 +1,209 @@
+# granular.tcyr -- parity tests for src/granular.cyr (granular engine).
+# Ported from the non-serde #[test] blocks in rust-old/src/synth/granular.rs.
+# The two serde tests (test_serde_roundtrip, test_serde_functional_reload)
+# are dropped -- no serde in Cyrius, and the reload test's non-serde core is
+# already covered by test_empty_source / test_loaded_source.
+
+include "src/error.cyr"
+include "src/dsp_util.cyr"
+include "src/granular.cyr"
+
+var C0_01 = 0x3F847AE147AE147B;   # 0.01
+var C0_5  = 0x3FE0000000000000;   # 0.5
+var C0_3  = 0x3FD3333333333333;   # 0.3
+
+# A vec of `n` zeros (an output buffer).
+fn granular_test_zeros(n) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) {
+        vec_push(v, 0);
+        i = i + 1;
+    }
+    return v;
+}
+
+# A sine source: sin(i / sr * freq * TAU), i in [0, n).
+fn granular_test_sine(n, freq) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) {
+        var phase = f64_mul(f64_mul(f64_div(f64_from(i), f64_from(n)), freq), F64_TAU);
+        vec_push(v, f64_sin(phase));
+        i = i + 1;
+    }
+    return v;
+}
+
+# A unit ramp source: i / n, i in [0, n).
+fn granular_test_ramp(n) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) {
+        vec_push(v, f64_div(f64_from(i), f64_from(n)));
+        i = i + 1;
+    }
+    return v;
+}
+
+# Rust f32::signum for the zero-crossing test: +1 for positive/+0.0,
+# -1 for negative/-0.0. (+0.0 has integer bit pattern 0; -0.0 does not.)
+fn granular_test_signum(x) {
+    if (f64_gt(x, 0) == 1) {
+        return 1;
+    }
+    if (f64_lt(x, 0) == 1) {
+        return 0 - 1;
+    }
+    if (x == 0) {
+        return 1;
+    }
+    return 0 - 1;
+}
+
+# Zero-crossing count over buf[0..n]: pairs where the first is nonzero and
+# the two signums differ. Mirrors the Rust windows(2) filter.
+fn granular_test_zc(buf, n) {
+    var count = 0;
+    var j = 0;
+    while (j < n - 1) {
+        var a = vec_get(buf, j);
+        var b = vec_get(buf, j + 1);
+        if (f64_gt(f64_abs(a), 0) == 1) {
+            if (granular_test_signum(a) != granular_test_signum(b)) {
+                count = count + 1;
+            }
+        }
+        j = j + 1;
+    }
+    return count;
+}
+
+alloc_init();
+
+# ================================================================
+test_group("empty source produces silence");
+var eng_empty = granular_new(f64_from(44100));
+var buf_empty = granular_test_zeros(256);
+granular_fill_buffer(eng_empty, buf_empty);
+var empty_silent = 1;
+var ei = 0;
+while (ei < 256) {
+    if (vec_get(buf_empty, ei) != 0) {
+        empty_silent = 0;
+    }
+    ei = ei + 1;
+}
+assert(empty_silent, "empty source should produce silence");
+
+# ================================================================
+test_group("loaded source produces output");
+var eng_loaded = granular_new(f64_from(44100));
+granular_set_source(eng_loaded, granular_test_sine(44100, f64_from(440)));
+granular_set_grain_rate(eng_loaded, f64_from(50));
+granular_set_grain_duration(eng_loaded, f64_from(30));
+var buf_loaded = granular_test_zeros(4096);
+granular_fill_buffer(eng_loaded, buf_loaded);
+var loaded_audible = 0;
+var loaded_finite = 1;
+var li = 0;
+while (li < 4096) {
+    var ls = vec_get(buf_loaded, li);
+    if (f64_gt(f64_abs(ls), C0_01) == 1) {
+        loaded_audible = 1;
+    }
+    if (naad_is_finite(ls) == 0) {
+        loaded_finite = 0;
+    }
+    li = li + 1;
+}
+assert(loaded_audible, "loaded source should produce output");
+assert(loaded_finite, "loaded output all finite");
+
+# ================================================================
+test_group("window functions");
+# Hann: 0 at endpoints, 1 at centre.
+assert(f64_lt(f64_abs(granular_window_value(GRAIN_WINDOW_HANN, 0)), C0_01), "hann(0) ~ 0");
+assert(f64_lt(f64_abs(f64_sub(granular_window_value(GRAIN_WINDOW_HANN, C0_5), F64_ONE)), C0_01), "hann(0.5) ~ 1");
+assert(f64_lt(f64_abs(granular_window_value(GRAIN_WINDOW_HANN, F64_ONE)), C0_01), "hann(1) ~ 0");
+# Gaussian: peak at 0.5.
+assert(f64_gt(granular_window_value(GRAIN_WINDOW_GAUSSIAN, C0_5),
+granular_window_value(GRAIN_WINDOW_GAUSSIAN, 0)), "gaussian(0.5) > gaussian(0)");
+# Rectangular: always 1.
+assert(f64_lt(f64_abs(f64_sub(granular_window_value(GRAIN_WINDOW_RECTANGULAR, C0_3), F64_ONE)), NAAD_EPSILON),
+"rectangular(0.3) = 1");
+
+# ================================================================
+test_group("spray jitter stays finite");
+var eng_spray = granular_new(f64_from(44100));
+granular_set_source(eng_spray, granular_test_ramp(44100));
+granular_set_spray(eng_spray, f64_from(10));
+granular_set_grain_rate(eng_spray, f64_from(100));
+var buf_spray = granular_test_zeros(1024);
+granular_fill_buffer(eng_spray, buf_spray);
+var spray_finite = 1;
+var si = 0;
+while (si < 1024) {
+    if (naad_is_finite(vec_get(buf_spray, si)) == 0) {
+        spray_finite = 0;
+    }
+    si = si + 1;
+}
+assert(spray_finite, "sprayed output all finite");
+
+# ================================================================
+test_group("spray produces position variance");
+var ramp_src = granular_test_ramp(44100);
+
+var no_spray = granular_new(f64_from(44100));
+granular_set_source(no_spray, ramp_src);
+granular_set_grain_rate(no_spray, f64_from(100));
+granular_set_grain_duration(no_spray, f64_from(20));
+granular_set_spray(no_spray, 0);
+
+var sprayed = granular_new(f64_from(44100));
+granular_set_source(sprayed, ramp_src);
+granular_set_grain_rate(sprayed, f64_from(100));
+granular_set_grain_duration(sprayed, f64_from(20));
+granular_set_spray(sprayed, f64_from(50));
+
+var buf_a = granular_test_zeros(4096);
+var buf_b = granular_test_zeros(4096);
+granular_fill_buffer(no_spray, buf_a);
+granular_fill_buffer(sprayed, buf_b);
+
+var diff = 0;
+var di = 0;
+while (di < 4096) {
+    diff = f64_add(diff, f64_abs(f64_sub(vec_get(buf_a, di), vec_get(buf_b, di))));
+    di = di + 1;
+}
+assert(f64_gt(diff, F64_ONE), "spray > 0 must change grain positions vs. spray=0");
+
+# ================================================================
+test_group("pitch shift changes output frequency");
+var pitch_src = granular_test_sine(44100, f64_from(200));
+
+var unity = granular_new(f64_from(44100));
+granular_set_source(unity, pitch_src);
+granular_set_grain_rate(unity, f64_from(10));
+granular_set_grain_duration(unity, f64_from(80));
+granular_set_pitch_shift(unity, F64_ONE);
+
+var up = granular_new(f64_from(44100));
+granular_set_source(up, pitch_src);
+granular_set_grain_rate(up, f64_from(10));
+granular_set_grain_duration(up, f64_from(80));
+granular_set_pitch_shift(up, F64_TWO);
+
+var buf_unity = granular_test_zeros(8192);
+var buf_up = granular_test_zeros(8192);
+granular_fill_buffer(unity, buf_unity);
+granular_fill_buffer(up, buf_up);
+
+var zc_unity = granular_test_zc(buf_unity, 8192);
+var zc_up = granular_test_zc(buf_up, 8192);
+assert(zc_up >= zc_unity * 3 / 2, "pitch_shift=2 must raise zero-crossing count meaningfully");
+
+var rc = assert_summary();
+syscall(60, rc);

@@ -1,0 +1,90 @@
+# acoustics_directivity.cyr -- source directivity patterns for monitor
+# placement and spatial synthesis.
+#
+# Ports rust-old/src/acoustics/directivity.rs. Thin wrapper over goonj's
+# analytical directivity patterns (omni / cardioid family / figure-8). Given
+# a source's front-axis vector and the direction toward a receiver,
+# naad_directivity_gain returns the linear attenuation factor to apply before
+# further propagation. Tabulated balloon data (CLF/CF2 measured directivity)
+# is intentionally excluded -- load that via goonj directly; this module
+# exposes only the closed-form analytical patterns that map cleanly onto
+# naad's no-IO contract.
+#
+# Rust `SourceDirectivity` (a #[non_exhaustive] enum) becomes an integer
+# `kind` tag; the naad_directivity_* helpers dispatch on it. Directions are
+# hisab HVec3 pointers (Rust `Vec3`). f32 -> f64 throughout. serde round-trip
+# test dropped (no serde in Cyrius).
+#
+# Requires (from the build/test unit): stdlib math (F64_ONE/F64_HALF/F64_PI,
+# f64_clamp/f64_max/f64_cos/f64_abs), hisab (hvec3_dot via goonj), and goonj
+# (directivity_* constructors + directivity_gain). No `include` lines.
+
+# ================================================================
+# SourceDirectivity variants (was `enum SourceDirectivity`).
+# ================================================================
+var NAAD_DIR_OMNIDIRECTIONAL = 0;   # equal radiation in all directions
+var NAAD_DIR_CARDIOID        = 1;   # 0.5·(1 + cos θ); front-firing, null behind
+var NAAD_DIR_SUBCARDIOID     = 2;   # 0.75 + 0.25·cos θ; mostly omni, forward bias
+var NAAD_DIR_SUPERCARDIOID   = 3;   # 0.37 + 0.63·cos θ; tighter, small rear lobe
+var NAAD_DIR_FIGURE8         = 4;   # |cos θ|; equal front + back, side nulls
+
+# ================================================================
+# Analytical pattern coefficients (IEEE-754 bit patterns; decimals noted).
+# ================================================================
+var NAAD_DIR_NEG_ONE = 0xbff0000000000000;   # -1.0  (clamp lower bound)
+var NAAD_DIR_0_75    = 0x3fe8000000000000;   # 0.75  subcardioid DC term
+var NAAD_DIR_0_25    = 0x3fd0000000000000;   # 0.25  subcardioid cos coeff
+var NAAD_DIR_0_37    = 0x3fd7ae147ae147ae;   # 0.37  supercardioid DC term
+var NAAD_DIR_0_63    = 0x3fe428f5c28f5c29;   # 0.63  supercardioid cos coeff
+
+# ================================================================
+# to_goonj -- map a SourceDirectivity kind to a freshly built goonj
+# DirectivityPattern pointer. Mirrors SourceDirectivity::to_goonj; the
+# Omnidirectional (and any future) variant is the default.
+# ================================================================
+#must_use
+fn naad_directivity_to_goonj(kind) {
+    if (kind == NAAD_DIR_CARDIOID) { return directivity_cardioid(); }
+    if (kind == NAAD_DIR_SUBCARDIOID) { return directivity_subcardioid(); }
+    if (kind == NAAD_DIR_SUPERCARDIOID) { return directivity_supercardioid(); }
+    if (kind == NAAD_DIR_FIGURE8) { return directivity_figure8(); }
+    return directivity_omnidirectional();
+}
+
+# ================================================================
+# gain -- linear directivity gain for a direction relative to the source's
+# front axis. `direction` and `front` are HVec3 pointers (unit vectors);
+# 1.0 is the on-axis reference. Ports SourceDirectivity::gain, delegating to
+# goonj's directivity_gain.
+# ================================================================
+#inline
+#must_use
+fn naad_directivity_gain(kind, direction, front) {
+    return directivity_gain(naad_directivity_to_goonj(kind), direction, front);
+}
+
+# ================================================================
+# gain_polar -- evaluate the directivity gain for a polar angle `theta`
+# (radians from the front axis; 0 = on-axis, π = directly behind). Convenience
+# for the 2D case with no full 3D vectors handy. Ports SourceDirectivity::
+# gain_polar's closed forms exactly.
+# ================================================================
+#inline
+#must_use
+fn naad_directivity_gain_polar(kind, theta) {
+    var cos_theta = f64_clamp(f64_cos(theta), NAAD_DIR_NEG_ONE, F64_ONE);
+    if (kind == NAAD_DIR_OMNIDIRECTIONAL) { return F64_ONE; }
+    if (kind == NAAD_DIR_CARDIOID) {
+        return f64_max(f64_mul(F64_HALF, f64_add(F64_ONE, cos_theta)), 0);
+    }
+    if (kind == NAAD_DIR_SUBCARDIOID) {
+        return f64_add(NAAD_DIR_0_75, f64_mul(NAAD_DIR_0_25, cos_theta));
+    }
+    if (kind == NAAD_DIR_SUPERCARDIOID) {
+        return f64_max(f64_add(NAAD_DIR_0_37, f64_mul(NAAD_DIR_0_63, cos_theta)), 0);
+    }
+    if (kind == NAAD_DIR_FIGURE8) {
+        return f64_abs(cos_theta);
+    }
+    return F64_ONE;
+}

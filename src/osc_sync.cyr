@@ -1,0 +1,95 @@
+# osc_sync.cyr -- hard sync: slave phase resets on master cycle wrap.
+#
+# Ports rust-old/src/oscillator/sync.rs. f32 -> f64 throughout. serde
+# derives/tests are dropped; the constructor returns the struct pointer or a
+# negative ERR_*. HardSync embeds two Oscillator pointers (master always a
+# Saw, slave the caller-chosen waveform), both built via osc_new.
+#
+# Requires (from the build/test unit): stdlib alloc/vec + math (f64_lt) and
+# error.cyr (naad_is_err) and osc_core.cyr (osc_new/osc_next_sample/
+# osc_phase/osc_reset_phase/osc_set_frequency, WAVEFORM_SAW). No `include`.
+
+# ================================================================
+# HardSync -- master (reset timing) + slave (audio output) oscillators.
+# ================================================================
+#derive(accessors)
+struct HardSync { master; slave; }
+
+# ================================================================
+# hardsync_new -- construct a master (Saw) / slave pair. Returns the struct
+# pointer on success, or a negative ERR_* if either oscillator failed.
+# ================================================================
+#must_use
+fn hardsync_new(master_freq, slave_freq, slave_waveform, sample_rate) {
+    var master = osc_new(WAVEFORM_SAW, master_freq, sample_rate);
+    if (naad_is_err(master) == 1) { return master; }
+    var slave = osc_new(slave_waveform, slave_freq, sample_rate);
+    if (naad_is_err(slave) == 1) { return slave; }
+
+    var self = alloc(sizeof(HardSync));
+    HardSync_set_master(self, master);
+    HardSync_set_slave(self, slave);
+    return self;
+}
+
+# ================================================================
+# hardsync_next_sample -- advance master; reset slave when master wraps
+# (phase decreased past 1.0); return the slave's sample.
+# ================================================================
+#inline
+#must_use
+fn hardsync_next_sample(self) {
+    var master = HardSync_master(self);
+    var slave = HardSync_slave(self);
+
+    var before = osc_phase(master);
+    var advanced = osc_next_sample(master);
+    var after = osc_phase(master);
+
+    # Detect master cycle wrap (phase decreased = wrapped past 1.0).
+    if (f64_lt(after, before) == 1) { osc_reset_phase(slave); }
+
+    # `advanced` is the master's sample; discarded, only its side effect
+    # (phase advance) matters -- mirrors Rust `let _ = master.next_sample()`.
+    advanced = advanced;
+    return osc_next_sample(slave);
+}
+
+# ================================================================
+# hardsync_fill_buffer -- fill a vec buffer in place.
+# ================================================================
+#inline
+fn hardsync_fill_buffer(self, buffer) {
+    var n = vec_len(buffer);
+    var i = 0;
+    while (i < n) {
+        vec_set(buffer, i, hardsync_next_sample(self));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# Accessors -- inner master/slave oscillator pointers.
+# ================================================================
+#must_use
+fn hardsync_master(self) {
+    return HardSync_master(self);
+}
+
+#must_use
+fn hardsync_slave(self) {
+    return HardSync_slave(self);
+}
+
+# ================================================================
+# hardsync_set_master_freq / hardsync_set_slave_freq -- delegate to the inner
+# oscillators. Return ERR_NONE or a negative ERR_*.
+# ================================================================
+fn hardsync_set_master_freq(self, freq) {
+    return osc_set_frequency(HardSync_master(self), freq);
+}
+
+fn hardsync_set_slave_freq(self, freq) {
+    return osc_set_frequency(HardSync_slave(self), freq);
+}

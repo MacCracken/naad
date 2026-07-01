@@ -1,0 +1,296 @@
+# voice.cyr -- Voice management for polyphonic synthesis.
+#
+# Ports rust-old/src/voice.rs. Provides voice allocation, stealing, and
+# per-voice state tracking for polyphonic instruments. f32 -> f64 for
+# velocity/amplitude/pitch_bend/pressure/brightness; bool -> i64 0/1;
+# u8 note / u64 age stored directly in i64 slots. The `SmallVec` voice pool
+# becomes a stdlib `vec` of `Voice` pointers. Rust's serde derives are
+# dropped (no serde in Cyrius). `PolyMode` / `StealMode` enums become integer
+# constants. `Option<usize>` returns use -1 as the None sentinel (valid voice
+# indices are always >= 0).
+#
+# Requires (from the build/test unit): stdlib alloc/vec + math (F64_HALF).
+# The module file itself has no `include` lines.
+
+# ================================================================
+# Enums -> integer constants.
+# ================================================================
+
+# PolyMode: polyphony mode.
+var POLY_MODE_POLY   = 0;   # each note gets its own voice
+var POLY_MODE_MONO   = 1;   # one note at a time, retrigger on new note
+var POLY_MODE_LEGATO = 2;   # monophonic, glide without retriggering
+
+# StealMode: voice stealing strategy when all voices are in use.
+var STEAL_MODE_OLDEST   = 0;   # steal the oldest active voice
+var STEAL_MODE_QUIETEST = 1;   # steal the quietest active voice
+var STEAL_MODE_LOWEST   = 2;   # steal the voice with the lowest note
+var STEAL_MODE_NONE     = 3;   # do not steal -- ignore new notes when full
+
+# None sentinel for Option<usize> returns (valid indices are >= 0).
+var VOICE_NONE = (0 - 1);
+
+# Default brightness (MIDI 2.0 CC74) = 0.5.
+var VOICE_DEFAULT_BRIGHTNESS = 0x3FE0000000000000;   # 0.5
+
+# u64::MAX sentinel for the saturating age counter.
+var VOICE_AGE_MAX = (0 - 1);
+
+# ================================================================
+# Voice -- state of a single voice.
+#   active     : whether the voice is producing sound (0/1)
+#   note       : MIDI note number 0-127
+#   velocity   : f64 in [0,1]
+#   age        : u64 sample counter (incremented while active)
+#   amplitude  : f64 current amplitude (quietest-steal heuristic)
+#   pitch_bend : f64 per-note pitch bend in semitones (MIDI 2.0)
+#   pressure   : f64 per-note aftertouch in [0,1]
+#   brightness : f64 per-note brightness in [0,1] (MIDI 2.0 CC74)
+# ================================================================
+#derive(accessors)
+struct Voice { active; note; velocity; age; amplitude; pitch_bend; pressure; brightness; }
+
+# Default voice: inactive, note 0, zeroed dynamics, brightness 0.5.
+#must_use
+fn voice_default() {
+    var v = alloc(sizeof(Voice));
+    Voice_set_active(v, 0);
+    Voice_set_note(v, 0);
+    Voice_set_velocity(v, 0);
+    Voice_set_age(v, 0);
+    Voice_set_amplitude(v, 0);
+    Voice_set_pitch_bend(v, 0);
+    Voice_set_pressure(v, 0);
+    Voice_set_brightness(v, VOICE_DEFAULT_BRIGHTNESS);
+    return v;
+}
+
+# Whether this voice is currently active (producing sound).
+#inline
+#must_use
+fn voice_is_active(v) {
+    return Voice_active(v);
+}
+
+# ================================================================
+# VoiceManager -- voice allocation and stealing.
+#   voices     : vec of Voice pointers (the pool)
+#   max_voices : usize maximum polyphony (clamped 1..128)
+#   poly_mode  : PolyMode constant
+#   steal_mode : StealMode constant
+# ================================================================
+#derive(accessors)
+struct VoiceManager { voices; max_voices; poly_mode; steal_mode; }
+
+# Create a new voice manager. `max_voices` is clamped to 1..128.
+#must_use
+fn voice_manager_new(max_voices, poly_mode, steal_mode) {
+    var n = max_voices;
+    if (n < 1) { n = 1; }
+    if (n > 128) { n = 128; }
+    var voices = vec_new();
+    var i = 0;
+    while (i < n) {
+        vec_push(voices, voice_default());
+        i = i + 1;
+    }
+    var vm = alloc(sizeof(VoiceManager));
+    VoiceManager_set_voices(vm, voices);
+    VoiceManager_set_max_voices(vm, n);
+    VoiceManager_set_poly_mode(vm, poly_mode);
+    VoiceManager_set_steal_mode(vm, steal_mode);
+    return vm;
+}
+
+# Allocate a voice for a new note. Returns the voice index, or VOICE_NONE.
+#
+# Poly mode: find a free voice or steal one. Mono/Legato: always voice 0.
+#must_use
+fn voice_manager_note_on(vm, note, velocity) {
+    var mode = VoiceManager_poly_mode(vm);
+    var voices = VoiceManager_voices(vm);
+    if (mode == POLY_MODE_MONO || mode == POLY_MODE_LEGATO) {
+        var v = vec_get(voices, 0);
+        Voice_set_active(v, 1);
+        Voice_set_note(v, note);
+        Voice_set_velocity(v, velocity);
+        Voice_set_age(v, 0);
+        return 0;
+    }
+
+    # Poly: first, find a free voice.
+    var n = vec_len(voices);
+    var i = 0;
+    while (i < n) {
+        var vf = vec_get(voices, i);
+        if (Voice_active(vf) == 0) {
+            Voice_set_active(vf, 1);
+            Voice_set_note(vf, note);
+            Voice_set_velocity(vf, velocity);
+            Voice_set_age(vf, 0);
+            return i;
+        }
+        i = i + 1;
+    }
+
+    # All voices busy -- steal.
+    var idx = voice_manager_find_steal_target(vm);
+    if (idx == VOICE_NONE) { return VOICE_NONE; }
+    var vs = vec_get(voices, idx);
+    Voice_set_active(vs, 1);
+    Voice_set_note(vs, note);
+    Voice_set_velocity(vs, velocity);
+    Voice_set_age(vs, 0);
+    return idx;
+}
+
+# Release a voice by note number. Returns the released index, or VOICE_NONE.
+fn voice_manager_note_off(vm, note) {
+    var voices = VoiceManager_voices(vm);
+    var n = vec_len(voices);
+    var i = 0;
+    while (i < n) {
+        var v = vec_get(voices, i);
+        if (Voice_active(v) == 1 && Voice_note(v) == note) {
+            Voice_set_active(v, 0);
+            return i;
+        }
+        i = i + 1;
+    }
+    return VOICE_NONE;
+}
+
+# Find a voice to steal based on the current steal mode.
+# Returns the target index, or VOICE_NONE when no target exists.
+#
+# Tie-breaking mirrors Rust's iterator adaptors exactly:
+#   Oldest   -> max_by_key(age): last element on ties.
+#   Quietest -> min_by(amplitude): first element on ties.
+#   Lowest   -> min_by_key(note): first element on ties.
+#must_use
+fn voice_manager_find_steal_target(vm) {
+    var mode = VoiceManager_steal_mode(vm);
+    var voices = VoiceManager_voices(vm);
+    var n = vec_len(voices);
+
+    if (mode == STEAL_MODE_NONE) { return VOICE_NONE; }
+
+    if (mode == STEAL_MODE_OLDEST) {
+        var best = VOICE_NONE;
+        var best_age = 0;
+        var i = 0;
+        while (i < n) {
+            var v = vec_get(voices, i);
+            if (Voice_active(v) == 1) {
+                var a = Voice_age(v);
+                # >= keeps updating on ties -> last maximum, per max_by_key.
+                if (best == VOICE_NONE || a >= best_age) {
+                    best = i;
+                    best_age = a;
+                }
+            }
+            i = i + 1;
+        }
+        return best;
+    }
+
+    if (mode == STEAL_MODE_QUIETEST) {
+        var best = VOICE_NONE;
+        var best_amp = 0;
+        var i = 0;
+        while (i < n) {
+            var v = vec_get(voices, i);
+            if (Voice_active(v) == 1) {
+                var amp = Voice_amplitude(v);
+                # strictly-less keeps the first minimum, per min_by.
+                if (best == VOICE_NONE || f64_lt(amp, best_amp) == 1) {
+                    best = i;
+                    best_amp = amp;
+                }
+            }
+            i = i + 1;
+        }
+        return best;
+    }
+
+    # STEAL_MODE_LOWEST: min_by_key(note), first minimum on ties.
+    var best = VOICE_NONE;
+    var best_note = 0;
+    var i = 0;
+    while (i < n) {
+        var v = vec_get(voices, i);
+        if (Voice_active(v) == 1) {
+            var note = Voice_note(v);
+            if (best == VOICE_NONE || note < best_note) {
+                best = i;
+                best_note = note;
+            }
+        }
+        i = i + 1;
+    }
+    return best;
+}
+
+# Advance age counters for all active voices (call once per sample/buffer).
+# age uses saturating_add(1) at u64::MAX, matching Rust.
+fn voice_manager_tick(vm) {
+    var voices = VoiceManager_voices(vm);
+    var n = vec_len(voices);
+    var i = 0;
+    while (i < n) {
+        var v = vec_get(voices, i);
+        if (Voice_active(v) == 1) {
+            var a = Voice_age(v);
+            if (a != VOICE_AGE_MAX) { Voice_set_age(v, a + 1); }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Number of currently active voices.
+#must_use
+fn voice_manager_active_count(vm) {
+    var voices = VoiceManager_voices(vm);
+    var n = vec_len(voices);
+    var count = 0;
+    var i = 0;
+    while (i < n) {
+        if (Voice_active(vec_get(voices, i)) == 1) { count = count + 1; }
+        i = i + 1;
+    }
+    return count;
+}
+
+# Shared reference to the voice pool (the underlying vec handle).
+#inline
+#must_use
+fn voice_manager_voices(vm) {
+    return VoiceManager_voices(vm);
+}
+
+# Mutable reference to a voice by index, or 0 (null) if out of bounds.
+#inline
+fn voice_manager_voice_mut(vm, index) {
+    var voices = VoiceManager_voices(vm);
+    if (index < 0 || index >= vec_len(voices)) { return 0; }
+    return vec_get(voices, index);
+}
+
+# Maximum polyphony.
+#must_use
+fn voice_manager_max_voices(vm) {
+    return VoiceManager_max_voices(vm);
+}
+
+# Release all voices.
+fn voice_manager_all_notes_off(vm) {
+    var voices = VoiceManager_voices(vm);
+    var n = vec_len(voices);
+    var i = 0;
+    while (i < n) {
+        Voice_set_active(vec_get(voices, i), 0);
+        i = i + 1;
+    }
+    return 0;
+}

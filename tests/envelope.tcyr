@@ -1,0 +1,174 @@
+# envelope.tcyr -- parity tests for src/envelope.cyr.
+# Ported from the non-serde #[test] blocks in rust-old/src/envelope.rs
+# (test_serde_roundtrip + test_catmull_rom_serde_roundtrip dropped -- no serde).
+# f32 tolerances widened to f64. hisab included first (calc_catmull_rom).
+
+include "lib/hisab.cyr"
+include "src/error.cyr"
+include "src/envelope.cyr"
+
+alloc_init();
+
+var C0_01  = 0x3f847ae147ae147b;   # 0.01
+var C0_5   = 0x3fe0000000000000;   # 0.5
+var C0_001 = 0x3f50624dd2f1a9fc;   # 0.001
+var C0_7   = 0x3fe6666666666666;   # 0.7
+var C1_5   = 0x3ff8000000000000;   # 1.5
+var C0_1   = 0x3fb999999999999a;   # 0.1
+var C0_25  = 0x3fd0000000000000;   # 0.25
+var C0_3   = 0x3fd3333333333333;   # 0.3
+var C0_05  = 0x3fa999999999999a;   # 0.05
+var C0_2   = 0x3fc999999999999a;   # 0.2
+var C1E_3  = 0x3f50624dd2f1a9fc;   # 1e-3 (== 0.001)
+
+var SR = 44100;
+var drop = 0;
+
+# ================================================================
+test_group("adsr basic");
+var eb = envelope_adsr_new(C0_01, C0_01, C0_5, C0_01);
+assert(envelope_adsr_is_active(eb) == 0, "adsr idle -> inactive");
+envelope_adsr_gate_on(eb);
+assert(envelope_adsr_is_active(eb) == 1, "adsr active after gate_on");
+
+# ================================================================
+test_group("adsr sustain holds");
+var es = envelope_adsr_new(C0_001, C0_001, C0_7, C0_01);
+envelope_adsr_gate_on(es);
+var i = 0;
+while (i < 1000) {
+    drop = envelope_adsr_next_value(es);
+    i = i + 1;
+}
+var sval = envelope_adsr_next_value(es);
+assert(f64_lt(f64_abs(f64_sub(sval, C0_7)), C0_01), "sustain holds at 0.7");
+
+# ================================================================
+test_group("adsr release to zero");
+var er = envelope_adsr_new(0, 0, F64_ONE, C0_01);
+envelope_adsr_gate_on(er);
+drop = envelope_adsr_next_value(er);
+envelope_adsr_gate_off(er);
+i = 0;
+while (i < 2000) {
+    drop = envelope_adsr_next_value(er);
+    i = i + 1;
+}
+assert(envelope_adsr_is_active(er) == 0, "adsr released to idle");
+
+# ================================================================
+test_group("adsr invalid params");
+assert(naad_is_err(envelope_adsr_new(f64_neg(F64_ONE), 0, C0_5, 0)), "neg attack err");
+assert(naad_is_err(envelope_adsr_new(0, 0, C1_5, 0)), "sustain > 1 err");
+assert(naad_is_err(envelope_adsr_new(0, 0, f64_neg(C0_1), 0)), "sustain < 0 err");
+
+# ================================================================
+test_group("multi stage");
+var segs = vec_new();
+vec_push(segs, envelope_segment_new(F64_ONE, C0_01));
+vec_push(segs, envelope_segment_new(C0_5, C0_01));
+vec_push(segs, envelope_segment_new(0, C0_01));
+var ems = envelope_multistage_new(segs);
+envelope_multistage_trigger(ems);
+assert(envelope_multistage_is_active(ems) == 1, "multistage active after trigger");
+i = 0;
+while (i < 5000) {
+    drop = envelope_multistage_next_value(ems);
+    i = i + 1;
+}
+assert(envelope_multistage_is_active(ems) == 0, "multistage done");
+
+# ================================================================
+test_group("catmull-rom passes through control points");
+var pts = vec_new();
+vec_push(pts, envelope_point_new(0, 0));
+vec_push(pts, envelope_point_new(C0_25, F64_ONE));
+vec_push(pts, envelope_point_new(C0_5, C0_3));
+vec_push(pts, envelope_point_new(F64_ONE, 0));
+var ecr = envelope_catmull_rom_new(pts, f64_from(SR));
+envelope_catmull_rom_trigger(ecr);
+
+var idxs = vec_new();
+vec_push(idxs, 0);
+vec_push(idxs, 11025);
+vec_push(idxs, 22050);
+vec_push(idxs, 44100);
+var tgts = vec_new();
+vec_push(tgts, 0);
+vec_push(tgts, F64_ONE);
+vec_push(tgts, C0_3);
+vec_push(tgts, 0);
+
+var last_idx = 0;
+var current = envelope_catmull_rom_next_value(ecr);
+var m = 0;
+while (m < 4) {
+    var idx = vec_get(idxs, m);
+    while (last_idx < idx) {
+        current = envelope_catmull_rom_next_value(ecr);
+        last_idx = last_idx + 1;
+    }
+    var tgt = vec_get(tgts, m);
+    assert(f64_lt(f64_abs(f64_sub(current, tgt)), C1E_3), "spline hits control point");
+    m = m + 1;
+}
+
+# ================================================================
+test_group("catmull-rom smooth (no kinks)");
+var pts2 = vec_new();
+vec_push(pts2, envelope_point_new(0, 0));
+vec_push(pts2, envelope_point_new(C0_1, F64_ONE));
+vec_push(pts2, envelope_point_new(C0_2, 0));
+vec_push(pts2, envelope_point_new(C0_3, C0_5));
+var ecr2 = envelope_catmull_rom_new(pts2, f64_from(SR));
+envelope_catmull_rom_trigger(ecr2);
+var n = f64_to(f64_mul(C0_3, f64_from(SR)));
+var maxdiff = 0;
+var prev = envelope_catmull_rom_next_value(ecr2);
+var j = 1;
+while (j < n) {
+    var cur = envelope_catmull_rom_next_value(ecr2);
+    var d = f64_abs(f64_sub(cur, prev));
+    if (f64_gt(d, maxdiff) == 1) { maxdiff = d; }
+    prev = cur;
+    j = j + 1;
+}
+assert(f64_lt(maxdiff, C0_01), "catmull-rom has no kinks");
+
+# ================================================================
+test_group("catmull-rom deactivates after last point");
+var pts3 = vec_new();
+vec_push(pts3, envelope_point_new(0, 0));
+vec_push(pts3, envelope_point_new(C0_05, C0_7));
+vec_push(pts3, envelope_point_new(C0_1, C0_3));
+var ecr3 = envelope_catmull_rom_new(pts3, f64_from(SR));
+envelope_catmull_rom_trigger(ecr3);
+var last3 = f64_to(f64_mul(C0_1, f64_from(SR)));
+var ii = 0;
+while (ii <= last3) {
+    var v = envelope_catmull_rom_next_value(ecr3);
+    if (ii == last3) {
+        assert(f64_lt(f64_abs(f64_sub(v, C0_3)), C1E_3), "last control point value");
+    }
+    ii = ii + 1;
+}
+assert(envelope_catmull_rom_is_active(ecr3) == 0, "envelope deactivates after last point");
+assert(f64_lt(f64_abs(envelope_catmull_rom_next_value(ecr3)), NAAD_EPSILON), "returns 0 when inactive");
+
+# ================================================================
+test_group("catmull-rom invalid inputs");
+var bad1 = vec_new();
+vec_push(bad1, envelope_point_new(0, 0));
+assert(naad_is_err(envelope_catmull_rom_new(bad1, f64_from(SR))), "< 2 points err");
+var bad2 = vec_new();
+vec_push(bad2, envelope_point_new(0, 0));
+vec_push(bad2, envelope_point_new(C0_5, F64_ONE));
+vec_push(bad2, envelope_point_new(C0_5, 0));
+assert(naad_is_err(envelope_catmull_rom_new(bad2, f64_from(SR))), "non-monotone times err");
+var bad3 = vec_new();
+vec_push(bad3, envelope_point_new(0, 0));
+vec_push(bad3, envelope_point_new(C0_1, F64_ONE));
+assert(naad_is_err(envelope_catmull_rom_new(bad3, f64_neg(F64_ONE))), "bad sample rate err");
+
+var rc = assert_summary();
+syscall(60, rc);

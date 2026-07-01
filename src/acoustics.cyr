@@ -1,0 +1,22 @@
+# acoustics.cyr -- naad acoustics base layer.
+#
+# Ports the shared helper from rust-old/src/acoustics/mod.rs: material_by_name,
+# used by the room / convolution / coupled / analysis wrappers. naad's acoustics
+# modules are thin wrappers over the goonj acoustics engine; this file holds the
+# one cross-cutting helper. Requires goonj (acoustic_material_* constructors) and
+# stdlib string (streq). No `include` lines.
+
+# Look up a built-in goonj AcousticMaterial by name. Returns the material
+# pointer, or 0 (Rust None) for an unknown name. Mirrors material_by_name's
+# exact 7-name set: concrete, carpet, glass, wood, curtain, drywall, tile.
+#must_use
+fn naad_acoustics_material_by_name(name) {
+    if (streq(name, "concrete") == 1) { return acoustic_material_concrete(); }
+    if (streq(name, "carpet") == 1) { return acoustic_material_carpet(); }
+    if (streq(name, "glass") == 1) { return acoustic_material_glass(); }
+    if (streq(name, "wood") == 1) { return acoustic_material_wood(); }
+    if (streq(name, "curtain") == 1) { return acoustic_material_curtain(); }
+    if (streq(name, "drywall") == 1) { return acoustic_material_drywall(); }
+    if (streq(name, "tile") == 1) { return acoustic_material_tile(); }
+    return 0;
+}

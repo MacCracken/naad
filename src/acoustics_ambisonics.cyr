@@ -1,0 +1,92 @@
+# acoustics_ambisonics.cyr -- Ambisonics B-format encoding (naad wrapper).
+#
+# Ports rust-old/src/acoustics/ambisonics.rs. Encodes a mono audio sample
+# into first-order Ambisonics (B-format: W, X, Y, Z) from a source
+# direction (azimuth, elevation) using SN3D/ACN direction cosines --
+# the same normalization goonj's `encode_bformat` applies to a unit
+# direction vector. NOTE: the Rust source is self-contained pure math; it
+# references goonj only in a doc comment and makes NO goonj:: / hisab::
+# call, so this port has no cross-crate symbols to bind.
+#
+# f32 -> f64 throughout. serde is dropped (no serde in Cyrius): the
+# deserialization-recovery branch in Rust's encode_sample (taken only when
+# the trig cache was zeroed by a deserializer) is unreachable here because
+# the cache is always populated by _new / set_position, so encode_sample
+# uses the cached values directly -- behaviorally identical for every
+# constructible encoder. Requires math (F64_*, f64_mul) + builtins
+# (f64_sin/cos). alloc_init() must have run.
+
+# ================================================================
+# A single B-format encoded sample: W (omni pressure), X (front/back),
+# Y (left/right), Z (up/down).
+# ================================================================
+#derive(accessors)
+struct BFormatSample { w; x; y; z; }
+
+# Ambisonics B-format encoder: source direction (azimuth/elevation, both
+# radians) plus a cached sin/cos of each for hot-path encoding.
+#derive(accessors)
+struct AmbisonicsEncoder { azimuth; elevation; cos_el; sin_el; cos_az; sin_az; }
+
+# Recompute the trig cache from the current azimuth / elevation.
+fn naad_ambisonics_update_cache(enc) {
+    AmbisonicsEncoder_set_cos_el(enc, f64_cos(AmbisonicsEncoder_elevation(enc)));
+    AmbisonicsEncoder_set_sin_el(enc, f64_sin(AmbisonicsEncoder_elevation(enc)));
+    AmbisonicsEncoder_set_cos_az(enc, f64_cos(AmbisonicsEncoder_azimuth(enc)));
+    AmbisonicsEncoder_set_sin_az(enc, f64_sin(AmbisonicsEncoder_azimuth(enc)));
+    return 0;
+}
+
+# Create a new encoder for the given source direction (radians).
+#must_use
+fn naad_ambisonics_encoder_new(azimuth, elevation) {
+    var enc = alloc(sizeof(AmbisonicsEncoder));
+    AmbisonicsEncoder_set_azimuth(enc, azimuth);
+    AmbisonicsEncoder_set_elevation(enc, elevation);
+    AmbisonicsEncoder_set_cos_el(enc, 0);
+    AmbisonicsEncoder_set_sin_el(enc, 0);
+    AmbisonicsEncoder_set_cos_az(enc, 0);
+    AmbisonicsEncoder_set_sin_az(enc, 0);
+    naad_ambisonics_update_cache(enc);
+    return enc;
+}
+
+# Update the source direction (radians) and refresh the trig cache.
+fn naad_ambisonics_set_position(enc, azimuth, elevation) {
+    AmbisonicsEncoder_set_azimuth(enc, azimuth);
+    AmbisonicsEncoder_set_elevation(enc, elevation);
+    naad_ambisonics_update_cache(enc);
+    return 0;
+}
+
+# Encode one mono input sample into a fresh B-format sample:
+#   W = input
+#   X = input * cos(az) * cos(el)
+#   Y = input * sin(az) * cos(el)
+#   Z = input * sin(el)
+#inline
+#must_use
+fn naad_ambisonics_encode_sample(enc, input) {
+    var cos_el = AmbisonicsEncoder_cos_el(enc);
+    var sin_el = AmbisonicsEncoder_sin_el(enc);
+    var cos_az = AmbisonicsEncoder_cos_az(enc);
+    var sin_az = AmbisonicsEncoder_sin_az(enc);
+    var s = alloc(sizeof(BFormatSample));
+    BFormatSample_set_w(s, input);
+    BFormatSample_set_x(s, f64_mul(f64_mul(input, cos_az), cos_el));
+    BFormatSample_set_y(s, f64_mul(f64_mul(input, sin_az), cos_el));
+    BFormatSample_set_z(s, f64_mul(input, sin_el));
+    return s;
+}
+
+# Current azimuth in radians.
+#must_use
+fn naad_ambisonics_azimuth(enc) {
+    return AmbisonicsEncoder_azimuth(enc);
+}
+
+# Current elevation in radians.
+#must_use
+fn naad_ambisonics_elevation(enc) {
+    return AmbisonicsEncoder_elevation(enc);
+}

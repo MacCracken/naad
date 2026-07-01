@@ -1,0 +1,54 @@
+# error.tcyr -- parity tests for src/error.cyr
+# Ported from the #[test] blocks in rust-old/src/error.rs. The Display-string
+# and serde round-trip tests are dropped (integer error codes, no serde);
+# the validate_* behavioural tests are the parity-meaningful ones. Adds direct
+# coverage of the lib.rs helpers folded in here (flush_denormal, naad_is_finite).
+
+include "src/error.cyr"
+
+alloc_init();
+
+var NAN_BITS      = 0x7FF8000000000000;   # canonical quiet NaN
+var DENORMAL_BITS = 0x37a16c262777579c;   # 1e-40 (< f32::MIN_POSITIVE)
+var NORMAL_SMALL  = 0x39b4484bfeebc2a0;   # 1e-30 (> f32::MIN_POSITIVE)
+
+# ================================================================
+test_group("validate_frequency");
+assert_eq(validate_frequency(f64_from(440), f64_from(44100)), ERR_NONE, "440 Hz @ 44100 is valid");
+assert_eq(validate_frequency(0, f64_from(44100)), ERR_INVALID_FREQUENCY, "0 Hz too low");
+assert_eq(validate_frequency(f64_neg(F64_ONE), f64_from(44100)), ERR_INVALID_FREQUENCY, "-1 Hz too low");
+assert_eq(validate_frequency(f64_from(23000), f64_from(44100)), ERR_INVALID_FREQUENCY, "23 kHz above Nyquist");
+assert_eq(validate_frequency(NAN_BITS, f64_from(44100)), ERR_INVALID_FREQUENCY, "NaN frequency invalid");
+assert_eq(validate_frequency(NAAD_POS_INF, f64_from(44100)), ERR_INVALID_FREQUENCY, "+inf frequency invalid");
+
+# ================================================================
+test_group("validate_sample_rate");
+assert_eq(validate_sample_rate(f64_from(44100)), ERR_NONE, "44100 valid");
+assert_eq(validate_sample_rate(0), ERR_INVALID_SAMPLE_RATE, "0 invalid");
+assert_eq(validate_sample_rate(f64_neg(F64_ONE)), ERR_INVALID_SAMPLE_RATE, "-1 invalid");
+assert_eq(validate_sample_rate(NAN_BITS), ERR_INVALID_SAMPLE_RATE, "NaN invalid");
+assert_eq(validate_sample_rate(NAAD_POS_INF), ERR_INVALID_SAMPLE_RATE, "+inf invalid");
+
+# ================================================================
+test_group("naad_is_finite");
+assert_eq(naad_is_finite(f64_from(440)), 1, "440 is finite");
+assert_eq(naad_is_finite(0), 1, "0 is finite");
+assert_eq(naad_is_finite(NAN_BITS), 0, "NaN not finite");
+assert_eq(naad_is_finite(NAAD_POS_INF), 0, "+inf not finite");
+assert_eq(naad_is_finite(NAAD_NEG_INF), 0, "-inf not finite");
+
+# ================================================================
+test_group("flush_denormal");
+assert_eq(flush_denormal(DENORMAL_BITS), 0, "denormal flushes to +0.0");
+assert_eq(flush_denormal(NORMAL_SMALL), NORMAL_SMALL, "1e-30 preserved (above threshold)");
+assert_eq(flush_denormal(F64_ONE), F64_ONE, "1.0 preserved");
+assert_eq(flush_denormal(0), 0, "0.0 preserved");
+
+# ================================================================
+test_group("error codes");
+assert_eq(naad_is_err(ERR_NONE), 0, "ERR_NONE is not an error");
+assert_eq(naad_is_err(ERR_INVALID_FREQUENCY), 1, "negative code is an error");
+assert_streq(naad_err_name(ERR_COMPUTATION), "computation error", "err name maps");
+
+var rc = assert_summary();
+syscall(60, rc);

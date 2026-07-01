@@ -1,0 +1,74 @@
+# reverb.tcyr -- parity tests for src/reverb.cyr.
+# Ported from the non-serde #[test] blocks in rust-old/src/reverb.rs
+# (test_serde_roundtrip dropped -- no serde). f32 tolerances widened to f64.
+
+include "src/error.cyr"
+include "src/dsp_util.cyr"
+include "src/delay.cyr"
+include "src/reverb.cyr"
+
+alloc_init();
+
+var C0_8   = 0x3fe999999999999a;   # 0.8
+var C0_3   = 0x3fd3333333333333;   # 0.3
+var C0_001 = 0x3f50624dd2f1a9fc;   # 0.001
+var C0_7   = 0x3fe6666666666666;   # 0.7
+var C0_01  = 0x3f847ae147ae147b;   # 0.01
+var C0_99  = 0x3fefae147ae147ae;   # 0.99
+
+var SR = 44100;
+
+# ================================================================
+test_group("reverb produces output");
+var rev = reverb_new(C0_8, C0_3, f64_from(10), F64_ONE, f64_from(SR));
+var res = reverb_process_sample(rev, F64_ONE);
+assert(naad_is_finite(ReverbStereo_left(res)), "impulse L finite");
+assert(naad_is_finite(ReverbStereo_right(res)), "impulse R finite");
+# After impulse, reverb tail should still produce output.
+var has_tail = 0;
+var i = 0;
+while (i < 10000) {
+    res = reverb_process_sample(rev, 0);
+    if (f64_gt(f64_abs(ReverbStereo_left(res)), C0_001) == 1) { has_tail = 1; }
+    i = i + 1;
+}
+assert(has_tail, "reverb should produce a tail after impulse");
+
+# ================================================================
+test_group("reverb stereo differs");
+var rev2 = reverb_new(C0_8, C0_3, f64_from(10), F64_ONE, f64_from(SR));
+Reverb_set_width(rev2, F64_ONE);
+res = reverb_process_sample(rev2, F64_ONE);
+var diff_found = 0;
+i = 0;
+while (i < 5000) {
+    res = reverb_process_sample(rev2, 0);
+    var d = f64_abs(f64_sub(ReverbStereo_left(res), ReverbStereo_right(res)));
+    if (f64_gt(d, C0_001) == 1) { diff_found = 1; }
+    i = i + 1;
+}
+assert(diff_found, "stereo reverb should have L/R differences");
+
+# ================================================================
+test_group("reverb dry passthrough");
+var rev3 = reverb_new(F64_HALF, F64_HALF, 0, 0, f64_from(SR));
+res = reverb_process_sample(rev3, C0_7);
+assert(f64_lt(f64_abs(f64_sub(ReverbStereo_left(res), C0_7)), C0_01), "mix=0 passes dry L");
+assert(f64_lt(f64_abs(f64_sub(ReverbStereo_right(res), C0_7)), C0_01), "mix=0 passes dry R");
+
+# ================================================================
+test_group("reverb no blow up");
+var rev4 = reverb_new(C0_99, 0, 0, F64_ONE, f64_from(SR));
+res = reverb_process_sample(rev4, F64_ONE);
+var no_blow = 1;
+i = 0;
+while (i < 100000) {
+    res = reverb_process_sample(rev4, 0);
+    if (f64_ge(f64_abs(ReverbStereo_left(res)), f64_from(10)) == 1) { no_blow = 0; }
+    if (f64_ge(f64_abs(ReverbStereo_right(res)), f64_from(10)) == 1) { no_blow = 0; }
+    i = i + 1;
+}
+assert(no_blow, "reverb should not blow up");
+
+var rc = assert_summary();
+syscall(60, rc);
