@@ -202,12 +202,14 @@ fn reverb_new(decay, damping, pre_delay_ms, mix, sample_rate) {
 }
 
 # ================================================================
-# reverb_process_sample -- process a mono input, returning stereo (left,
-# right) as a ReverbStereo. Ports Reverb::process_sample.
+# reverb_process_core -- compute one stereo sample and write it into the
+# caller-provided `res` (an existing ReverbStereo). Allocation-free so the
+# buffer loop can reuse a single scratch struct instead of allocating per
+# sample. All comb/allpass/predelay/stereo-width/wet-dry math and every delay-
+# line state update are identical to the struct-returning wrapper below.
 # ================================================================
 #inline
-#must_use
-fn reverb_process_sample(self, input) {
+fn reverb_process_core(self, input, res) {
     # Pre-delay.
     var pre = Reverb_pre_delay(self);
     delay_line_write(pre, input);
@@ -255,24 +257,37 @@ fn reverb_process_sample(self, input) {
     # Wet/dry mix.
     var mix = Reverb_mix(self);
     var dry = f64_sub(F64_ONE, mix);
-    var res = alloc(sizeof(ReverbStereo));
     ReverbStereo_set_left(res, f64_add(f64_mul(input, dry), f64_mul(out_l, mix)));
     ReverbStereo_set_right(res, f64_add(f64_mul(input, dry), f64_mul(out_r, mix)));
+    return 0;
+}
+
+# ================================================================
+# reverb_process_sample -- process a mono input, returning stereo (left,
+# right) as a ReverbStereo. Ports Reverb::process_sample.
+# ================================================================
+#inline
+#must_use
+fn reverb_process_sample(self, input) {
+    var res = alloc(sizeof(ReverbStereo));
+    reverb_process_core(self, input, res);
     return res;
 }
 
 # ================================================================
 # reverb_process_buffer -- process a mono `input` vec into stereo `left`/
 # `right` vecs (writing only where the output vec is long enough). Ports
-# Reverb::process_buffer.
+# Reverb::process_buffer. Reuses a single scratch ReverbStereo across all
+# samples so the hot loop performs no per-sample allocation.
 # ================================================================
 fn reverb_process_buffer(self, input, left, right) {
     var n = vec_len(input);
     var ll = vec_len(left);
     var rl = vec_len(right);
+    var res = alloc(sizeof(ReverbStereo));
     var i = 0;
     while (i < n) {
-        var res = reverb_process_sample(self, vec_get(input, i));
+        reverb_process_core(self, vec_get(input, i), res);
         if (i < ll) { vec_set(left, i, ReverbStereo_left(res)); }
         if (i < rl) { vec_set(right, i, ReverbStereo_right(res)); }
         i = i + 1;

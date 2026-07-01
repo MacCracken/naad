@@ -58,10 +58,24 @@ fn panning_pan_gains(pan, law) {
 #inline
 #must_use
 fn panning_pan_mono(sample, pan, law) {
-    var g = panning_pan_gains(pan, law);
+    # Gains computed into locals (no intermediate PanGains alloc — this is a
+    # per-sample path and Cyrius has no free). Only the PanPair result is
+    # allocated. Numerically identical to panning_pan_gains.
+    var p = f64_clamp(pan, f64_neg(F64_ONE), F64_ONE);
+    var t = f64_mul(f64_add(p, F64_ONE), F64_HALF);
+    var gl = 0;
+    var gr = 0;
+    if (law == PAN_LAW_EQUAL_POWER) {
+        var angle = f64_mul(t, F64_PI_2);
+        gl = f64_cos(angle);
+        gr = f64_sin(angle);
+    } else {
+        gl = f64_sub(F64_ONE, t);
+        gr = t;
+    }
     var out = alloc(sizeof(PanPair));
-    PanPair_set_left(out, f64_mul(sample, PanGains_left(g)));
-    PanPair_set_right(out, f64_mul(sample, PanGains_right(g)));
+    PanPair_set_left(out, f64_mul(sample, gl));
+    PanPair_set_right(out, f64_mul(sample, gr));
     return out;
 }
 

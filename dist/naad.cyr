@@ -505,6 +505,11 @@ fn fft_magnitudes(input) {
         i = i + 1;
     }
     var out = vec_new();
+    # Empty input: num_fft returns ERR_NONE for n<=1 without validating, so it
+    # would fall through to a half=1 read/scale loop over alloc(0) (OOB) with a
+    # 1/0=+inf scale. Rust panics on the length-0 slice; we return empty. (n>=1
+    # is in-bounds and agrees with the oracle.)
+    if (n == 0) { return out; }
     if (num_fft(data, n) != 0) { return out; }
     var half = n / 2 + 1;
     var inv_n = f64_div(F64_ONE, f64_from(n));
@@ -534,6 +539,11 @@ fn power_spectrum(input) {
         i = i + 1;
     }
     var out = vec_new();
+    # Empty input: num_fft returns ERR_NONE for n<=1 without validating, so it
+    # would fall through to a half=1 read/scale loop over alloc(0) (OOB) with a
+    # 1/0=+inf scale. Rust panics on the length-0 slice; we return empty. (n>=1
+    # is in-bounds and agrees with the oracle.)
+    if (n == 0) { return out; }
     if (num_fft(data, n) != 0) { return out; }
     var half = n / 2 + 1;
     var inv_n_sq = f64_div(F64_ONE, f64_mul(f64_from(n), f64_from(n)));
@@ -952,6 +962,16 @@ fn fit_polynomial(xs, ys, degree) {
     var xarr = alloc(cols * 8);
     ganita_mat_least_squares(a, bvec, xarr);
 
+    # Singular / rank-deficient design (e.g. duplicate x values) makes QR
+    # back-substitution divide by a ~0 R diagonal, yielding non-finite coeffs.
+    # Rust's least_squares_poly returns Err (mapped to None); mirror that with
+    # the empty vec instead of emitting poisoned NaN/inf coefficients.
+    var k = 0;
+    while (k < cols) {
+        if (naad_is_finite(load64(xarr + k * 8)) == 0) { return out; }
+        k = k + 1;
+    }
+
     var j = 0;
     while (j < cols) {
         vec_push(out, load64(xarr + j * 8));
@@ -1188,10 +1208,24 @@ fn panning_pan_gains(pan, law) {
 #inline
 #must_use
 fn panning_pan_mono(sample, pan, law) {
-    var g = panning_pan_gains(pan, law);
+    # Gains computed into locals (no intermediate PanGains alloc — this is a
+    # per-sample path and Cyrius has no free). Only the PanPair result is
+    # allocated. Numerically identical to panning_pan_gains.
+    var p = f64_clamp(pan, f64_neg(F64_ONE), F64_ONE);
+    var t = f64_mul(f64_add(p, F64_ONE), F64_HALF);
+    var gl = 0;
+    var gr = 0;
+    if (law == PAN_LAW_EQUAL_POWER) {
+        var angle = f64_mul(t, F64_PI_2);
+        gl = f64_cos(angle);
+        gr = f64_sin(angle);
+    } else {
+        gl = f64_sub(F64_ONE, t);
+        gr = t;
+    }
     var out = alloc(sizeof(PanPair));
-    PanPair_set_left(out, f64_mul(sample, PanGains_left(g)));
-    PanPair_set_right(out, f64_mul(sample, PanGains_right(g)));
+    PanPair_set_left(out, f64_mul(sample, gl));
+    PanPair_set_right(out, f64_mul(sample, gr));
     return out;
 }
 
@@ -2545,9 +2579,36 @@ fn filter_svf_set_params(self, frequency, q) {
 }
 
 # ================================================================
-# filter_svf_process_sample -- one sample -> all four outputs (SvfOutput
-# pointer). Integrator state is denormal-flushed.
+# _filter_svf_compute_lowpass -- value-returning SVF core. Advances the
+# integrator state (denormal-flushed) and returns only the low-pass output,
+# allocating nothing. Shared by the low-pass sample/buffer hot paths so the
+# bump allocator does not grow per sample. Numerics are bit-identical to
+# filter_svf_process_sample's low_pass field.
 # ================================================================
+#inline
+fn _filter_svf_compute_lowpass(self, input) {
+    var a1 = StateVariableFilter_a1(self);
+    var a2 = StateVariableFilter_a2(self);
+    var a3 = StateVariableFilter_a3(self);
+    var ic1eq = StateVariableFilter_ic1eq(self);
+    var ic2eq = StateVariableFilter_ic2eq(self);
+
+    var v3 = f64_sub(input, ic2eq);
+    var v1 = f64_add(f64_mul(a1, ic1eq), f64_mul(a2, v3));
+    var v2 = f64_add(f64_add(ic2eq, f64_mul(a2, ic1eq)), f64_mul(a3, v3));
+
+    StateVariableFilter_set_ic1eq(self, flush_denormal(f64_sub(f64_mul(F64_TWO, v1), ic1eq)));
+    StateVariableFilter_set_ic2eq(self, flush_denormal(f64_sub(f64_mul(F64_TWO, v2), ic2eq)));
+
+    return v2;
+}
+
+# ================================================================
+# filter_svf_process_sample -- one sample -> all four outputs (SvfOutput
+# pointer). Integrator state is denormal-flushed. This is a one-shot API;
+# the low-pass hot paths use _filter_svf_compute_lowpass to avoid the alloc.
+# ================================================================
+#inline
 #must_use
 fn filter_svf_process_sample(self, input) {
     var a1 = StateVariableFilter_a1(self);
@@ -2579,12 +2640,12 @@ fn filter_svf_process_sample(self, input) {
 
 # ================================================================
 # filter_svf_process_sample_lowpass -- convenience: low-pass output only.
+# Routes through the value-returning core; allocates nothing.
 # ================================================================
 #inline
 #must_use
 fn filter_svf_process_sample_lowpass(self, input) {
-    var out = filter_svf_process_sample(self, input);
-    return SvfOutput_low_pass(out);
+    return _filter_svf_compute_lowpass(self, input);
 }
 
 # ================================================================
@@ -4412,12 +4473,14 @@ fn reverb_new(decay, damping, pre_delay_ms, mix, sample_rate) {
 }
 
 # ================================================================
-# reverb_process_sample -- process a mono input, returning stereo (left,
-# right) as a ReverbStereo. Ports Reverb::process_sample.
+# reverb_process_core -- compute one stereo sample and write it into the
+# caller-provided `res` (an existing ReverbStereo). Allocation-free so the
+# buffer loop can reuse a single scratch struct instead of allocating per
+# sample. All comb/allpass/predelay/stereo-width/wet-dry math and every delay-
+# line state update are identical to the struct-returning wrapper below.
 # ================================================================
 #inline
-#must_use
-fn reverb_process_sample(self, input) {
+fn reverb_process_core(self, input, res) {
     # Pre-delay.
     var pre = Reverb_pre_delay(self);
     delay_line_write(pre, input);
@@ -4465,24 +4528,37 @@ fn reverb_process_sample(self, input) {
     # Wet/dry mix.
     var mix = Reverb_mix(self);
     var dry = f64_sub(F64_ONE, mix);
-    var res = alloc(sizeof(ReverbStereo));
     ReverbStereo_set_left(res, f64_add(f64_mul(input, dry), f64_mul(out_l, mix)));
     ReverbStereo_set_right(res, f64_add(f64_mul(input, dry), f64_mul(out_r, mix)));
+    return 0;
+}
+
+# ================================================================
+# reverb_process_sample -- process a mono input, returning stereo (left,
+# right) as a ReverbStereo. Ports Reverb::process_sample.
+# ================================================================
+#inline
+#must_use
+fn reverb_process_sample(self, input) {
+    var res = alloc(sizeof(ReverbStereo));
+    reverb_process_core(self, input, res);
     return res;
 }
 
 # ================================================================
 # reverb_process_buffer -- process a mono `input` vec into stereo `left`/
 # `right` vecs (writing only where the output vec is long enough). Ports
-# Reverb::process_buffer.
+# Reverb::process_buffer. Reuses a single scratch ReverbStereo across all
+# samples so the hot loop performs no per-sample allocation.
 # ================================================================
 fn reverb_process_buffer(self, input, left, right) {
     var n = vec_len(input);
     var ll = vec_len(left);
     var rl = vec_len(right);
+    var res = alloc(sizeof(ReverbStereo));
     var i = 0;
     while (i < n) {
-        var res = reverb_process_sample(self, vec_get(input, i));
+        reverb_process_core(self, vec_get(input, i), res);
         if (i < ll) { vec_set(left, i, ReverbStereo_left(res)); }
         if (i < rl) { vec_set(right, i, ReverbStereo_right(res)); }
         i = i + 1;
@@ -6419,8 +6495,12 @@ fn fm_engine_is_active(self) {
 # f64 state via fncall2), which cannot integrate a coupled system correctly.
 # We therefore hand-roll the identical classic 4th-order Runge-Kutta step over
 # the 4-vector (same k1..k4 / (1,2,2,1)/6 weights hisab's Rust rk4 uses),
-# calling physical_moog_deriv for the derivative. This reproduces the oracle's
-# numerics exactly; it is a faithful reimplementation, not an approximation.
+# calling physical_moog_deriv for the derivative — a faithful reimplementation,
+# not an approximation. One deliberate, port-wide difference: the oracle stores
+# each ladder state as `flush_denormal(new_state[i] as f32) as f64` (re-quantized
+# to f32 every sample, a Rust-native artifact); consistent with naad's f32->f64
+# widening policy this port keeps the state at f64 (a precision refinement, not
+# a divergence in intent). Both flush denormals.
 #
 # Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE/TWO/
 # HALF/PI/TAU, f64_clamp), ganita (f64_tanh), error.cyr (validate_frequency/
@@ -7300,11 +7380,13 @@ fn unison_next_sample(self) {
 }
 
 # ================================================================
-# unison_next_sample_stereo -- next stereo pair. Voices are equal-power
-# panned across the field per stereo_spread. Returns a UnisonStereo pointer.
+# unison_advance_stereo -- value-returning core: advance one stereo sample and
+# write the (left, right) pair into out_left/out_right at index idx. Allocates
+# nothing, so the buffer loop can call it per sample without leaking. Voices are
+# equal-power panned across the field per stereo_spread.
 # ================================================================
-#must_use
-fn unison_next_sample_stereo(self) {
+#inline
+fn unison_advance_stereo(self, out_left, out_right, idx) {
     if (UnisonOscillator_ratios_dirty(self) == 1) {
         unison_recompute_ratios(self);
     }
@@ -7341,9 +7423,26 @@ fn unison_next_sample_stereo(self) {
         i = i + 1;
     }
     var inv = f64_div(F64_ONE, f64_from(nv));
+    vec_set(out_left, idx, f64_mul(left, inv));
+    vec_set(out_right, idx, f64_mul(right, inv));
+    return 0;
+}
+
+# ================================================================
+# unison_next_sample_stereo -- next stereo pair. Voices are equal-power
+# panned across the field per stereo_spread. Returns a UnisonStereo pointer.
+# One-shot API; delegates to unison_advance_stereo for the identical math.
+# ================================================================
+#must_use
+fn unison_next_sample_stereo(self) {
+    var scratch_l = vec_new();
+    vec_push(scratch_l, 0);
+    var scratch_r = vec_new();
+    vec_push(scratch_r, 0);
+    unison_advance_stereo(self, scratch_l, scratch_r, 0);
     var out = alloc(sizeof(UnisonStereo));
-    UnisonStereo_set_left(out, f64_mul(left, inv));
-    UnisonStereo_set_right(out, f64_mul(right, inv));
+    UnisonStereo_set_left(out, vec_get(scratch_l, 0));
+    UnisonStereo_set_right(out, vec_get(scratch_r, 0));
     return out;
 }
 
@@ -7371,9 +7470,7 @@ fn unison_fill_buffer_stereo(self, left, right) {
     if (nr < n) { n = nr; }
     var i = 0;
     while (i < n) {
-        var pair = unison_next_sample_stereo(self);
-        vec_set(left, i, UnisonStereo_left(pair));
-        vec_set(right, i, UnisonStereo_right(pair));
+        unison_advance_stereo(self, left, right, i);
         i = i + 1;
     }
     return 0;
@@ -9074,9 +9171,14 @@ fn naad_fdn_reverb_reset(self) {
 #   Row 2: + + - - + + - -      Row 6: + + - - - - + +
 #   Row 3: + - - + + - - +      Row 7: + - - + - + + -
 # ================================================================
+# _naad_fdn_hadamard8_into -- Hadamard core that writes the 8 results into a
+# caller-owned 8-slot scratch vec (via vec_set, no allocation). The hot buffer
+# loop calls this against struct-owned scratch to avoid a per-sample alloc; the
+# public one-shot wrapper below allocates a fresh vec once and delegates here.
+# Numerics are bit-identical to the original (same op order, vec_set only
+# replaces vec_push).
 #inline
-#must_use
-fn naad_fdn_hadamard8(x) {
+fn _naad_fdn_hadamard8_into(x, out) {
     var x0 = vec_get(x, 0);
     var x1 = vec_get(x, 1);
     var x2 = vec_get(x, 2);
@@ -9097,15 +9199,27 @@ fn naad_fdn_hadamard8(x) {
     var c2 = f64_sub(f64_sub(f64_add(x4, x5), x6), x7);
     var d2 = f64_add(f64_sub(f64_sub(x4, x5), x6), x7);
 
+    vec_set(out, 0, f64_add(a, a2));
+    vec_set(out, 1, f64_add(b, b2));
+    vec_set(out, 2, f64_add(c, c2));
+    vec_set(out, 3, f64_add(d, d2));
+    vec_set(out, 4, f64_sub(a, a2));
+    vec_set(out, 5, f64_sub(b, b2));
+    vec_set(out, 6, f64_sub(c, c2));
+    vec_set(out, 7, f64_sub(d, d2));
+    return 0;
+}
+
+#inline
+#must_use
+fn naad_fdn_hadamard8(x) {
     var out = vec_new();
-    vec_push(out, f64_add(a, a2));
-    vec_push(out, f64_add(b, b2));
-    vec_push(out, f64_add(c, c2));
-    vec_push(out, f64_add(d, d2));
-    vec_push(out, f64_sub(a, a2));
-    vec_push(out, f64_sub(b, b2));
-    vec_push(out, f64_sub(c, c2));
-    vec_push(out, f64_sub(d, d2));
+    var i = 0;
+    while (i < MATRIX_FDN_N) {
+        vec_push(out, 0);
+        i = i + 1;
+    }
+    _naad_fdn_hadamard8_into(x, out);
     return out;
 }
 
@@ -9119,6 +9233,8 @@ fn naad_fdn_hadamard8(x) {
 #   target_rt60    : target RT60 in seconds
 #   sample_rate    : Hz
 #   mix            : wet/dry mix (0 = dry, 1 = wet)
+#   scratch_delay  : owned 8-slot scratch for per-line damped reads (no alloc)
+#   scratch_had    : owned 8-slot scratch for the Hadamard mix output (no alloc)
 # ================================================================
 #derive(accessors)
 struct MatrixFdn {
@@ -9130,6 +9246,8 @@ struct MatrixFdn {
     target_rt60;
     sample_rate;
     mix;
+    scratch_delay;
+    scratch_had;
 }
 
 # The eight delay lengths in milliseconds, in order.
@@ -9199,6 +9317,18 @@ fn naad_fdn_matrix_new(target_rt60, sample_rate, mix) {
         i = i + 1;
     }
 
+    # Per-instance scratch vecs (8 slots each), allocated ONCE here so the hot
+    # process_sample path can overwrite them in place instead of allocating a
+    # fresh result vec per sample (Cyrius bump allocator never frees).
+    var scratch_delay = vec_new();
+    var scratch_had = vec_new();
+    i = 0;
+    while (i < MATRIX_FDN_N) {
+        vec_push(scratch_delay, 0);
+        vec_push(scratch_had, 0);
+        i = i + 1;
+    }
+
     var self = alloc(sizeof(MatrixFdn));
     MatrixFdn_set_buffers(self, buffers);
     MatrixFdn_set_positions(self, positions);
@@ -9208,6 +9338,8 @@ fn naad_fdn_matrix_new(target_rt60, sample_rate, mix) {
     MatrixFdn_set_target_rt60(self, target_rt60);
     MatrixFdn_set_sample_rate(self, sample_rate);
     MatrixFdn_set_mix(self, f64_clamp(mix, 0, F64_ONE));
+    MatrixFdn_set_scratch_delay(self, scratch_delay);
+    MatrixFdn_set_scratch_had(self, scratch_had);
     return self;
 }
 
@@ -9229,7 +9361,9 @@ fn naad_fdn_matrix_process_sample(self, input) {
     var norm = f64_sqrt(f64_from(MATRIX_FDN_N));
 
     # Read delay-line outputs, apply per-line damping, accumulate the sum.
-    var delayed = vec_new();
+    # Reuse the struct-owned scratch (overwrite via vec_set) -- no per-sample
+    # allocation.
+    var delayed = MatrixFdn_scratch_delay(self);
     var wet_sum = 0;
     var i = 0;
     while (i < MATRIX_FDN_N) {
@@ -9238,7 +9372,7 @@ fn naad_fdn_matrix_process_sample(self, input) {
         var read_pos = (vec_get(positions, i) + 1) % len;
         var damped = f64_mul(vec_get(line, read_pos), vec_get(damping_gain, i));
         var slot = flush_denormal(damped);
-        vec_push(delayed, slot);
+        vec_set(delayed, i, slot);
         vec_set(damping_state, i, slot);
         wet_sum = f64_add(wet_sum, slot);
         i = i + 1;
@@ -9247,8 +9381,10 @@ fn naad_fdn_matrix_process_sample(self, input) {
     # Output sum before writing feedback: sum / sqrt(N).
     var wet = f64_div(wet_sum, norm);
 
-    # Apply the normalised Hadamard mix: y = (1/sqrt(N)) * H * x.
-    var h = naad_fdn_hadamard8(delayed);
+    # Apply the normalised Hadamard mix: y = (1/sqrt(N)) * H * x. Write into the
+    # struct-owned Hadamard scratch instead of allocating a result vec.
+    var h = MatrixFdn_scratch_had(self);
+    _naad_fdn_hadamard8_into(delayed, h);
     var scale = f64_div(F64_ONE, norm);
 
     # Write input + scaled feedback into each line.

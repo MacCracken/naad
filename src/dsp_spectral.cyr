@@ -95,6 +95,11 @@ fn fft_magnitudes(input) {
         i = i + 1;
     }
     var out = vec_new();
+    # Empty input: num_fft returns ERR_NONE for n<=1 without validating, so it
+    # would fall through to a half=1 read/scale loop over alloc(0) (OOB) with a
+    # 1/0=+inf scale. Rust panics on the length-0 slice; we return empty. (n>=1
+    # is in-bounds and agrees with the oracle.)
+    if (n == 0) { return out; }
     if (num_fft(data, n) != 0) { return out; }
     var half = n / 2 + 1;
     var inv_n = f64_div(F64_ONE, f64_from(n));
@@ -124,6 +129,11 @@ fn power_spectrum(input) {
         i = i + 1;
     }
     var out = vec_new();
+    # Empty input: num_fft returns ERR_NONE for n<=1 without validating, so it
+    # would fall through to a half=1 read/scale loop over alloc(0) (OOB) with a
+    # 1/0=+inf scale. Rust panics on the length-0 slice; we return empty. (n>=1
+    # is in-bounds and agrees with the oracle.)
+    if (n == 0) { return out; }
     if (num_fft(data, n) != 0) { return out; }
     var half = n / 2 + 1;
     var inv_n_sq = f64_div(F64_ONE, f64_mul(f64_from(n), f64_from(n)));
@@ -541,6 +551,16 @@ fn fit_polynomial(xs, ys, degree) {
     }
     var xarr = alloc(cols * 8);
     ganita_mat_least_squares(a, bvec, xarr);
+
+    # Singular / rank-deficient design (e.g. duplicate x values) makes QR
+    # back-substitution divide by a ~0 R diagonal, yielding non-finite coeffs.
+    # Rust's least_squares_poly returns Err (mapped to None); mirror that with
+    # the empty vec instead of emitting poisoned NaN/inf coefficients.
+    var k = 0;
+    while (k < cols) {
+        if (naad_is_finite(load64(xarr + k * 8)) == 0) { return out; }
+        k = k + 1;
+    }
 
     var j = 0;
     while (j < cols) {

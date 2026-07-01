@@ -5,10 +5,14 @@
 
 ## Version
 
-**2.0.0** — Cyrius port **COMPLETE**. naad's Rust line shipped through 1.2.5;
-the rewrite is a major break, so it lands as **2.0.0** (VERSION bumped at port
-completion, per directive). The 13,465-line Rust source is frozen at `rust-old/`
-as the parity oracle.
+**2.1.0** — post-port audit pass. The 2.0.0 Cyrius port (all 41 modules) is
+complete; 2.1.0 is the first work-loop iteration: a deep multi-agent review
+(correctness / memory-safety-security / performance / refactor, adversarially
+verified vs `rust-old/`) confirmed 9 findings — all repaired. Highlights: two
+real bugs fixed (dsp_spectral empty-input OOB/÷0; singular `fit_polynomial` NaN
+coeffs) and per-sample heap allocations eliminated on 4 hot buffer paths
+(filter/reverb/oscillator/acoustics_fdn — 0 bytes/sample, verified). The
+13,465-line Rust source is frozen at `rust-old/` as the parity oracle.
 
 ## Toolchain
 

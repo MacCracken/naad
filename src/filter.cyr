@@ -339,9 +339,36 @@ fn filter_svf_set_params(self, frequency, q) {
 }
 
 # ================================================================
-# filter_svf_process_sample -- one sample -> all four outputs (SvfOutput
-# pointer). Integrator state is denormal-flushed.
+# _filter_svf_compute_lowpass -- value-returning SVF core. Advances the
+# integrator state (denormal-flushed) and returns only the low-pass output,
+# allocating nothing. Shared by the low-pass sample/buffer hot paths so the
+# bump allocator does not grow per sample. Numerics are bit-identical to
+# filter_svf_process_sample's low_pass field.
 # ================================================================
+#inline
+fn _filter_svf_compute_lowpass(self, input) {
+    var a1 = StateVariableFilter_a1(self);
+    var a2 = StateVariableFilter_a2(self);
+    var a3 = StateVariableFilter_a3(self);
+    var ic1eq = StateVariableFilter_ic1eq(self);
+    var ic2eq = StateVariableFilter_ic2eq(self);
+
+    var v3 = f64_sub(input, ic2eq);
+    var v1 = f64_add(f64_mul(a1, ic1eq), f64_mul(a2, v3));
+    var v2 = f64_add(f64_add(ic2eq, f64_mul(a2, ic1eq)), f64_mul(a3, v3));
+
+    StateVariableFilter_set_ic1eq(self, flush_denormal(f64_sub(f64_mul(F64_TWO, v1), ic1eq)));
+    StateVariableFilter_set_ic2eq(self, flush_denormal(f64_sub(f64_mul(F64_TWO, v2), ic2eq)));
+
+    return v2;
+}
+
+# ================================================================
+# filter_svf_process_sample -- one sample -> all four outputs (SvfOutput
+# pointer). Integrator state is denormal-flushed. This is a one-shot API;
+# the low-pass hot paths use _filter_svf_compute_lowpass to avoid the alloc.
+# ================================================================
+#inline
 #must_use
 fn filter_svf_process_sample(self, input) {
     var a1 = StateVariableFilter_a1(self);
@@ -373,12 +400,12 @@ fn filter_svf_process_sample(self, input) {
 
 # ================================================================
 # filter_svf_process_sample_lowpass -- convenience: low-pass output only.
+# Routes through the value-returning core; allocates nothing.
 # ================================================================
 #inline
 #must_use
 fn filter_svf_process_sample_lowpass(self, input) {
-    var out = filter_svf_process_sample(self, input);
-    return SvfOutput_low_pass(out);
+    return _filter_svf_compute_lowpass(self, input);
 }
 
 # ================================================================

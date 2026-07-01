@@ -13,8 +13,12 @@
 # f64 state via fncall2), which cannot integrate a coupled system correctly.
 # We therefore hand-roll the identical classic 4th-order Runge-Kutta step over
 # the 4-vector (same k1..k4 / (1,2,2,1)/6 weights hisab's Rust rk4 uses),
-# calling physical_moog_deriv for the derivative. This reproduces the oracle's
-# numerics exactly; it is a faithful reimplementation, not an approximation.
+# calling physical_moog_deriv for the derivative — a faithful reimplementation,
+# not an approximation. One deliberate, port-wide difference: the oracle stores
+# each ladder state as `flush_denormal(new_state[i] as f32) as f64` (re-quantized
+# to f32 every sample, a Rust-native artifact); consistent with naad's f32->f64
+# widening policy this port keeps the state at f64 (a precision refinement, not
+# a divergence in intent). Both flush denormals.
 #
 # Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE/TWO/
 # HALF/PI/TAU, f64_clamp), ganita (f64_tanh), error.cyr (validate_frequency/

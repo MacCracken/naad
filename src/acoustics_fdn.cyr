@@ -123,9 +123,14 @@ fn naad_fdn_reverb_reset(self) {
 #   Row 2: + + - - + + - -      Row 6: + + - - - - + +
 #   Row 3: + - - + + - - +      Row 7: + - - + - + + -
 # ================================================================
+# _naad_fdn_hadamard8_into -- Hadamard core that writes the 8 results into a
+# caller-owned 8-slot scratch vec (via vec_set, no allocation). The hot buffer
+# loop calls this against struct-owned scratch to avoid a per-sample alloc; the
+# public one-shot wrapper below allocates a fresh vec once and delegates here.
+# Numerics are bit-identical to the original (same op order, vec_set only
+# replaces vec_push).
 #inline
-#must_use
-fn naad_fdn_hadamard8(x) {
+fn _naad_fdn_hadamard8_into(x, out) {
     var x0 = vec_get(x, 0);
     var x1 = vec_get(x, 1);
     var x2 = vec_get(x, 2);
@@ -146,15 +151,27 @@ fn naad_fdn_hadamard8(x) {
     var c2 = f64_sub(f64_sub(f64_add(x4, x5), x6), x7);
     var d2 = f64_add(f64_sub(f64_sub(x4, x5), x6), x7);
 
+    vec_set(out, 0, f64_add(a, a2));
+    vec_set(out, 1, f64_add(b, b2));
+    vec_set(out, 2, f64_add(c, c2));
+    vec_set(out, 3, f64_add(d, d2));
+    vec_set(out, 4, f64_sub(a, a2));
+    vec_set(out, 5, f64_sub(b, b2));
+    vec_set(out, 6, f64_sub(c, c2));
+    vec_set(out, 7, f64_sub(d, d2));
+    return 0;
+}
+
+#inline
+#must_use
+fn naad_fdn_hadamard8(x) {
     var out = vec_new();
-    vec_push(out, f64_add(a, a2));
-    vec_push(out, f64_add(b, b2));
-    vec_push(out, f64_add(c, c2));
-    vec_push(out, f64_add(d, d2));
-    vec_push(out, f64_sub(a, a2));
-    vec_push(out, f64_sub(b, b2));
-    vec_push(out, f64_sub(c, c2));
-    vec_push(out, f64_sub(d, d2));
+    var i = 0;
+    while (i < MATRIX_FDN_N) {
+        vec_push(out, 0);
+        i = i + 1;
+    }
+    _naad_fdn_hadamard8_into(x, out);
     return out;
 }
 
@@ -168,6 +185,8 @@ fn naad_fdn_hadamard8(x) {
 #   target_rt60    : target RT60 in seconds
 #   sample_rate    : Hz
 #   mix            : wet/dry mix (0 = dry, 1 = wet)
+#   scratch_delay  : owned 8-slot scratch for per-line damped reads (no alloc)
+#   scratch_had    : owned 8-slot scratch for the Hadamard mix output (no alloc)
 # ================================================================
 #derive(accessors)
 struct MatrixFdn {
@@ -179,6 +198,8 @@ struct MatrixFdn {
     target_rt60;
     sample_rate;
     mix;
+    scratch_delay;
+    scratch_had;
 }
 
 # The eight delay lengths in milliseconds, in order.
@@ -248,6 +269,18 @@ fn naad_fdn_matrix_new(target_rt60, sample_rate, mix) {
         i = i + 1;
     }
 
+    # Per-instance scratch vecs (8 slots each), allocated ONCE here so the hot
+    # process_sample path can overwrite them in place instead of allocating a
+    # fresh result vec per sample (Cyrius bump allocator never frees).
+    var scratch_delay = vec_new();
+    var scratch_had = vec_new();
+    i = 0;
+    while (i < MATRIX_FDN_N) {
+        vec_push(scratch_delay, 0);
+        vec_push(scratch_had, 0);
+        i = i + 1;
+    }
+
     var self = alloc(sizeof(MatrixFdn));
     MatrixFdn_set_buffers(self, buffers);
     MatrixFdn_set_positions(self, positions);
@@ -257,6 +290,8 @@ fn naad_fdn_matrix_new(target_rt60, sample_rate, mix) {
     MatrixFdn_set_target_rt60(self, target_rt60);
     MatrixFdn_set_sample_rate(self, sample_rate);
     MatrixFdn_set_mix(self, f64_clamp(mix, 0, F64_ONE));
+    MatrixFdn_set_scratch_delay(self, scratch_delay);
+    MatrixFdn_set_scratch_had(self, scratch_had);
     return self;
 }
 
@@ -278,7 +313,9 @@ fn naad_fdn_matrix_process_sample(self, input) {
     var norm = f64_sqrt(f64_from(MATRIX_FDN_N));
 
     # Read delay-line outputs, apply per-line damping, accumulate the sum.
-    var delayed = vec_new();
+    # Reuse the struct-owned scratch (overwrite via vec_set) -- no per-sample
+    # allocation.
+    var delayed = MatrixFdn_scratch_delay(self);
     var wet_sum = 0;
     var i = 0;
     while (i < MATRIX_FDN_N) {
@@ -287,7 +324,7 @@ fn naad_fdn_matrix_process_sample(self, input) {
         var read_pos = (vec_get(positions, i) + 1) % len;
         var damped = f64_mul(vec_get(line, read_pos), vec_get(damping_gain, i));
         var slot = flush_denormal(damped);
-        vec_push(delayed, slot);
+        vec_set(delayed, i, slot);
         vec_set(damping_state, i, slot);
         wet_sum = f64_add(wet_sum, slot);
         i = i + 1;
@@ -296,8 +333,10 @@ fn naad_fdn_matrix_process_sample(self, input) {
     # Output sum before writing feedback: sum / sqrt(N).
     var wet = f64_div(wet_sum, norm);
 
-    # Apply the normalised Hadamard mix: y = (1/sqrt(N)) * H * x.
-    var h = naad_fdn_hadamard8(delayed);
+    # Apply the normalised Hadamard mix: y = (1/sqrt(N)) * H * x. Write into the
+    # struct-owned Hadamard scratch instead of allocating a result vec.
+    var h = MatrixFdn_scratch_had(self);
+    _naad_fdn_hadamard8_into(delayed, h);
     var scale = f64_div(F64_ONE, norm);
 
     # Write input + scaled feedback into each line.

@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - Post-port audit: correctness, security & hot-path memory
+
+First work-loop pass over the 2.0.0 Cyrius port. A deep multi-agent review
+(6 module groups × 4 lenses: correctness, memory-safety/security, performance,
+refactor) surfaced 13 candidate findings; adversarial verification against the
+`rust-old/` oracle confirmed **9** (4 rejected). All 9 repaired. **475 parity
+assertions green** across 37 suites; `cyrius deny` clean.
+
+### Fixed
+
+- **dsp_spectral (security)** — `fft_magnitudes` / `power_spectrum` on empty
+  input fell through hisab `num_fft`'s `n<=1` early-return into a `half=1` scale
+  loop that did an out-of-bounds `load64` on a zero-byte alloc with a `1/0=+inf`
+  scale (the Rust oracle panics on the length-0 slice). Added an `n==0 → empty`
+  guard.
+- **dsp_spectral (correctness)** — `fit_polynomial` on a rank-deficient design
+  (e.g. duplicate x values) divided by a ~0 QR diagonal and returned a vec of
+  NaN/inf coefficients; the oracle returns `None`. Now detects non-finite
+  coefficients and returns the empty vec.
+
+### Performance
+
+- **Eliminated per-sample heap allocations** on four hot buffer paths — under
+  Cyrius's free-less bump allocator these leaked unboundedly across a render:
+  - `filter` — SVF lowpass routes through a new alloc-free `#inline` core;
+    `filter_svf_process_buffer_lowpass` allocates **0 bytes/sample** (was one
+    `SvfOutput`/sample — verified: 100k calls → 0 bytes allocated).
+  - `reverb` — `reverb_process_buffer` reuses one scratch `ReverbStereo`.
+  - `oscillator` — `unison_fill_buffer_stereo` writes L/R directly into the
+    output vecs (was one `UnisonStereo`/sample).
+  - `acoustics` — `MatrixFdn` owns two 8-slot scratch vecs allocated once in
+    its constructor (was two throwaway vecs/sample).
+  - `panning::pan_mono` — gains computed in locals (dropped a redundant
+    `PanGains` alloc/call).
+  Numerics unchanged (each module's parity suite green at the same assertion
+  count); single-sample benchmarks show no regression.
+- Added `#inline` to `filter_svf_process_sample` to match the oracle.
+
+### Changed
+
+- `physical` — corrected the module header: the Moog-ladder state is kept at
+  f64 (consistent with naad's port-wide f32→f64 widening) — a precision
+  refinement over the oracle's per-sample f32 re-quantization, not a bit-exact
+  match. Both flush denormals.
+
+### Added
+
+- Regression tests for the empty-input and singular-system guards
+  (dsp_spectral 40 → 43 assertions).
+
 ## [2.0.0] - Cyrius port
 
 Complete rewrite from Rust to **Cyrius**. naad's Rust line shipped through 1.2.5;

@@ -377,5 +377,19 @@ var pir_buf = synth_sine(f64_from(440), f64_from(44100), 1024);
 assert(f64_lt(detect_pitch_autocorr(pir_buf, f64_from(44100), f64_from(2000), f64_from(30)), 0), "min > max -> None");
 assert(f64_lt(detect_pitch_autocorr(pir_buf, f64_neg(F64_ONE), f64_from(30), f64_from(2000)), 0), "negative sample rate -> None");
 
+# ================================================================
+# Regression: audit fixes (empty-input OOB guard + singular polyfit).
+test_group("audit: empty-input + singular guards");
+var empty = vec_new();
+assert_eq(vec_len(fft_magnitudes(empty)), 0, "fft_magnitudes(empty) -> empty (no OOB/1-0)");
+assert_eq(vec_len(power_spectrum(empty)), 0, "power_spectrum(empty) -> empty");
+# Rank-deficient design (duplicate x) -> singular system -> None (empty vec),
+# NOT a vec of NaN/inf coefficients.
+var sxs = vec_new();
+vec_push(sxs, F64_ONE); vec_push(sxs, F64_ONE); vec_push(sxs, F64_ONE);
+var sys = vec_new();
+vec_push(sys, F64_TWO); vec_push(sys, f64_from(3)); vec_push(sys, f64_from(4));
+assert_eq(vec_len(fit_polynomial(sxs, sys, 1)), 0, "fit_polynomial(singular) -> empty (not NaN coeffs)");
+
 var rc = assert_summary();
 syscall(60, rc);
