@@ -11,8 +11,8 @@
 #
 # Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE/TWO/
 # HALF), builtins (f64_abs/exp/from/sub/mul/div/neg/lt/gt), error.cyr
-# (naad_is_err/flush_denormal/ERR_*), dsp_util.cyr (amplitude_to_db/
-# db_to_amplitude) and filter.cyr (filter_biquad_* + FILTER_* constants).
+# (naad_is_err/flush_denormal/ERR_*), dsp_util.cyr (naad_amplitude_to_db/
+# naad_db_to_amplitude) and filter.cyr (filter_biquad_* + FILTER_* constants).
 # No `include` lines.
 
 # ================================================================
@@ -255,12 +255,12 @@ fn eq_deesser_process_sample(self, input) {
     env = flush_denormal(env);
     DeEsser_set_envelope(self, env);
 
-    var env_db = amplitude_to_db(env);
+    var env_db = naad_amplitude_to_db(env);
     var threshold = DeEsser_threshold_db(self);
     if (f64_gt(env_db, threshold) == 1) {
         var overshoot = f64_sub(env_db, threshold);
         var reduction_db = f64_max(f64_neg(overshoot), DeEsser_max_reduction_db(self));
-        return f64_mul(input, db_to_amplitude(reduction_db));
+        return f64_mul(input, naad_db_to_amplitude(reduction_db));
     }
     return input;
 }

@@ -5,6 +5,16 @@
 
 ## Version
 
+**2.1.1** — abaco↔naad namespace de-collision. abaco's `dsp` module and naad
+both exported bare `amplitude_to_db` / `db_to_amplitude`; in Cyrius's flat
+distlib namespace they collided, blocking dhvani from bundling both libs. Renamed
+naad's two onto the `naad_` prefix (matching `naad_fdn_*` / `naad_analysis_*`):
+`naad_amplitude_to_db` / `naad_db_to_amplitude`. `dist/naad.cyr` × `dist/abaco.cyr`
+top-level symbol intersection: **2 → 0**. Pure rename, numerics unchanged (dsp_util
+/ dynamics / eq suites green at the same counts). Reviewed and rejected taking an
+abaco dependency: naad owns these primitives, and abaco's DSP formulas diverge
+from the `rust-old/` oracle (window `N-1` vs `N`; pole vs `1-exp` EMA coeff).
+
 **2.1.0** — post-port audit pass. The 2.0.0 Cyrius port (all 41 modules) is
 complete; 2.1.0 is the first work-loop iteration: a deep multi-agent review
 (correctness / memory-safety-security / performance / refactor, adversarially

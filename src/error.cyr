@@ -27,7 +27,7 @@ var ERR_COMPUTATION         = (0 - 5);   # computation produced invalid result
 # ================================================================
 var NAAD_EPSILON        = 0x3E80000000000000;   # f32::EPSILON = 2^-23 ~ 1.192e-7
 var NAAD_POS_INF        = 0x7FF0000000000000;   # +inf
-var NAAD_NEG_INF        = 0xFFF0000000000000;   # -inf (amplitude_to_db(<=0))
+var NAAD_NEG_INF        = 0xFFF0000000000000;   # -inf (naad_amplitude_to_db(<=0))
 var NAAD_F32_MIN_POS    = 0x3810000000000000;   # f32::MIN_POSITIVE ~ 1.175e-38
 
 # 1 if `code` is an error (negative), 0 otherwise.

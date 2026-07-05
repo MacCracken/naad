@@ -7,7 +7,7 @@
 # dynamics, but the frozen oracle's dynamics.rs references `envelope` only in
 # a doc comment (the 1.1.0 EnvelopeDetector->LevelDetector rename note) -- no
 # code path uses it. LevelDetector is self-contained. The genuine code deps
-# are dsp_util (amplitude_to_db / db_to_amplitude_lut) + the crate-root
+# are dsp_util (naad_amplitude_to_db / db_to_amplitude_lut) + the crate-root
 # flush_denormal (folded into error.cyr). So envelope.cyr (and its hisab
 # prerequisite) are intentionally NOT included here.
 
@@ -147,7 +147,7 @@ assert(f64_lt(after_hold, C0_005), "gate must close after hold expires");
 # ================================================================
 test_group("limiter ceiling exact match passes through");
 var ceiling_db = f64_neg(f64_from(3));
-var amp_at_ceiling = db_to_amplitude(ceiling_db);   # 10^(ceiling_db/20)
+var amp_at_ceiling = naad_db_to_amplitude(ceiling_db);   # 10^(ceiling_db/20)
 var le = dynamics_limiter_new(ceiling_db, C0_01, f64_from(SR));
 i = 0;
 while (i < 2000) {

@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.1] - abaco↔naad namespace de-collision
+
+Unblocks a downstream consumer (dhvani) from bundling **both** abaco and naad
+in Cyrius's single flat distlib namespace. abaco's math-engine `dsp` module and
+naad both exported bare `amplitude_to_db` / `db_to_amplitude`; concatenated into
+one bundle they collided — a benign last-wins warning today (naad's own tests
+never pull abaco's copies), a hard conflict once the Wave G distlib bundles
+everything into one namespace. naad renames its two onto the `naad_` prefix it
+already uses elsewhere (`naad_fdn_*`, `naad_analysis_*`), so the audio surface is
+collision-free by construction. Top-level symbol intersection of `dist/naad.cyr`
+× `dist/abaco.cyr`: **2 → 0**. Pure rename — no numerics change; the three
+affected suites stay green at the same assertion counts (dsp_util 36, dynamics
+14, eq 9).
+
+A prior review confirmed naad should **not** take an abaco dependency to dedup
+these: naad is the AGNOS audio-synthesis-primitives owner (abaco's `dsp` is the
+interloper), the abaco bundle drags net/http/json/currency into a low-level audio
+lib, and abaco's DSP formulas diverge from the `rust-old/` oracle (windows use
+`N-1` vs naad's `N`; `time_constant` returns the raw pole vs naad's `1-exp` EMA
+coeff) — so any swap would silently break parity. De-collision, not adoption, is
+the correct resolution.
+
+### Changed
+
+- **dsp_util** — `amplitude_to_db` → `naad_amplitude_to_db`, `db_to_amplitude` →
+  `naad_db_to_amplitude`. Internal callers (`eq` de-esser, `dynamics`
+  compressor/limiter/noise-gate) and their tests updated in lockstep.
+  `db_to_amplitude_lut` is a **distinct** function and is left unchanged.
+
+### Migration
+
+- Downstream consumers calling naad's `amplitude_to_db` / `db_to_amplitude` must
+  switch to the `naad_`-prefixed names. No other naad surface is affected. Only
+  these two names collided with abaco; naad's remaining bare `dsp_util` names
+  (`lerp`, `rms`, `peak`, `normalize`, `hard_limit`, `soft_clip_tanh`,
+  `hermite_interpolate`, `crossfade_equal_power`, `apply_hann_window`,
+  `apply_blackman_window`, `eval_polynomial`, `xorshift32*`) are a known Wave G
+  cleanup, tracked separately — not part of this fix.
+
 ## [2.1.0] - Post-port audit: correctness, security & hot-path memory
 
 First work-loop pass over the 2.0.0 Cyrius port. A deep multi-agent review

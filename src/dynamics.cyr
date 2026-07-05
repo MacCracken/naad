@@ -12,7 +12,7 @@
 #
 # Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE/TWO/
 # HALF, f64_max, f64_clamp), builtins (f64_exp/abs), dsp_util.cyr
-# (amplitude_to_db, db_to_amplitude_lut) and error.cyr (flush_denormal,
+# (naad_amplitude_to_db, db_to_amplitude_lut) and error.cyr (flush_denormal,
 # naad_is_finite). No `include` lines -- the entry orders the modules.
 
 # ================================================================
@@ -162,7 +162,7 @@ fn dynamics_compressor_compute_gain_db(self, input_db) {
 #must_use
 fn dynamics_compressor_process_sample(self, input) {
     var env = dynamics_level_detector_process(Compressor_detector(self), input);
-    var env_db = amplitude_to_db(env);
+    var env_db = naad_amplitude_to_db(env);
     var gain_db = 0;
     if (f64_le(Compressor_knee_db(self), 0) == 1) {
         gain_db = dynamics_compressor_compute_gain_db_hard(self, env_db);
@@ -295,7 +295,7 @@ fn dynamics_noise_gate_new(threshold_db, attack, hold, release, sample_rate) {
 #must_use
 fn dynamics_noise_gate_process_sample(self, input) {
     var env = dynamics_level_detector_process(NoiseGate_detector(self), input);
-    var env_db = amplitude_to_db(env);
+    var env_db = naad_amplitude_to_db(env);
 
     var target = 0;
     if (f64_ge(env_db, NoiseGate_threshold_db(self)) == 1) {
