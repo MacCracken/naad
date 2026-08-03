@@ -1,0 +1,31 @@
+# naadex — agnos ring-3 naad-oscillator END-PROOF (agnos 1.53.x FP/SIMD arc, bite B6).
+#
+# The arc-closer: a REAL heavy-f64 DSP workload from the naad library runs in agnos ring 3.
+# naad's 440 Hz sine oscillator generates 256 samples via f64_sin/f64_mul/... — i.e. the
+# mulsd/addsd/divsd/sqrtsd/comisd codegen that B1-B5 gave the kernel. Every sample must be
+# finite (non-NaN, non-Inf); exits 88 (0x58) iff all 256 are — the distinctive "naad ring-3
+# oscillator OK" gate. Mirrors fpex (B4) but exercises a shipping library, not 5 hand-picked ops.
+#
+# Uses the SYS_EXIT bare-call form (NOT naad main's `syscall(60, r)`, which is a no-op on agnos
+# → the auto-EEXIT would drop the exit code). Include preamble mirrors naad/src/main.cyr exactly;
+# built FROM the naad repo root so lib/ + dist/ resolve. Heap via lib/alloc_agnos.cyr (sys_mmap #27).
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "dist/naad.cyr"
+
+fn naadex_main(): i64 {
+    alloc_init();
+    var osc = osc_new(WAVEFORM_SINE, f64_from(440), f64_from(44100));
+    if (naad_is_err(osc) == 1) { return 1; }   # oscillator init failed
+    var i = 0;
+    var ok = 0;
+    while (i < 256) {
+        if (naad_is_finite(osc_next_sample(osc)) == 1) { ok = ok + 1; }
+        i = i + 1;
+    }
+    if (ok == 256) { return 88; }   # 0x58 — all 256 f64 sine samples finite in ring 3
+    return 1;                       # a non-finite sample = f64/XMM broke
+}
+
+fn _entry(): i64 { var r = naadex_main(); syscall(SYS_EXIT, r); return 0; }
+_entry();
