@@ -174,5 +174,37 @@ while (i10 < 8) {
 }
 assert(nyq2_ok, "above-Nyquist partials remain 0.0 after restore");
 
+# ================================================================
+# DCT dispatch coverage. hisab 2.8.3 replaced num_dct/num_idct's O(n^2)
+# kernels with a size-dispatched FFT/Bluestein reduction: FFT for n = 8, 16,
+# 27-32, 40+; the retained direct kernel for n = 2-7, 9-15, 17-26, 33-39;
+# first Bluestein at n = 27. Every existing DCT assertion here uses n in
+# {8, 16} -- both FFT -- so a dispatch retune or a Bluestein regression is
+# invisible. These two round-trips straddle the crossover. Same 1e-4
+# tolerance as the n=16 case above; the kernels agree to ~1e-15 relative.
+# ================================================================
+test_group("DCT round-trip across the dispatch crossover");
+var dci = 0;
+while (dci < 2) {
+    var dcn = 5;                       # direct-kernel branch (n <= 7)
+    if (dci == 1) { dcn = 28; }        # Bluestein branch (non-pow2, n >= 27)
+    var dsyn = additive_new(f64_from(A440), dcn, f64_from(SR));
+    var dp = AdditiveSynth_partials(dsyn);
+    var dpre = vec_new();
+    var dk = 0;
+    while (dk < dcn) { vec_push(dpre, Partial_amplitude(vec_get(dp, dk))); dk = dk + 1; }
+    var dcoeffs = additive_compress_amplitudes_dct(dsyn, additive_num_partials(dsyn));
+    assert_eq(vec_len(dcoeffs), dcn, "compress keeps every coefficient off the FFT branch");
+    assert_eq(additive_restore_amplitudes_dct(dsyn, dcoeffs), ERR_NONE, "restore ok off the FFT branch");
+    var dok = 1;
+    dk = 0;
+    while (dk < dcn) {
+        if (f64_ge(f64_abs(f64_sub(Partial_amplitude(vec_get(dp, dk)), vec_get(dpre, dk))), C1E_4) == 1) { dok = 0; }
+        dk = dk + 1;
+    }
+    assert(dok, "DCT compress/restore round-trips off the FFT branch");
+    dci = dci + 1;
+}
+
 var rc = assert_summary();
 syscall(60, rc);

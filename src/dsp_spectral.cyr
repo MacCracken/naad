@@ -388,8 +388,8 @@ fn detect_pitch_autocorr(buffer, sample_rate, min_hz, max_hz) {
     while (l < max_lag) {
         var al = vec_get(autocorr, l);
         if (f64_gt(al, peak_val) == 1
-        && f64_gt(al, vec_get(autocorr, l - 1)) == 1
-        && f64_gt(al, vec_get(autocorr, l + 1)) == 1) {
+          && f64_gt(al, vec_get(autocorr, l - 1)) == 1
+          && f64_gt(al, vec_get(autocorr, l + 1)) == 1) {
             peak_val = al;
             peak_lag = l;
         }
@@ -427,7 +427,7 @@ fn detect_pitch_autocorr(buffer, sample_rate, min_hz, max_hz) {
         if (stop == 0) {
             var t2 = f64_mul(t, t);
             var fx = f64_mul(F64_HALF,
-            f64_add(f64_add(f64_mul(f64_mul(three, a), t2), f64_mul(f64_mul(F64_TWO, b), t)), c));
+              f64_add(f64_add(f64_mul(f64_mul(three, a), t2), f64_mul(f64_mul(F64_TWO, b), t)), c));
             if (f64_lt(f64_abs(fx), SPEC_C1E9) == 1) {
                 converged = 1;
                 stop = 1;
@@ -517,6 +517,14 @@ fn bspline_eval_1d(degree, control_points, t) {
 # degree+1 samples. Builds the Vandermonde by incremental multiplication
 # (robust for negative/zero xs, unlike exp/ln pow) and solves via ganita's QR
 # least squares. Ports fit_polynomial.
+#
+# `degree` is `usize` in the oracle but signed here, so a negative degree is a
+# state Rust cannot express; it maps to the same empty vec. The
+# `ganita_mat_new` null check is load-bearing: ganita 1.1.4 (cyrius 6.5.35)
+# gave the constructor failure returns (non-positive dims, designs over
+# GANITA_MAT_MAX_ELEMS, alloc failure) where it previously always returned a
+# usable header, and `ganita_mat_least_squares` dereferences its argument
+# immediately.
 # ================================================================
 #must_use
 fn fit_polynomial(xs, ys, degree) {
@@ -524,11 +532,13 @@ fn fit_polynomial(xs, ys, degree) {
     var nx = vec_len(xs);
     var ny = vec_len(ys);
     if (nx != ny) { return out; }
+    if (degree < 0) { return out; }
     if (nx <= degree) { return out; }
 
     var cols = degree + 1;
     # Vandermonde A: nx x cols, A[i][j] = xs[i]^j (built incrementally).
     var a = ganita_mat_new(nx, cols);
+    if (a == 0) { return out; }
     var i = 0;
     while (i < nx) {
         var xi = vec_get(xs, i);

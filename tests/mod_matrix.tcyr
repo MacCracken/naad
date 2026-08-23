@@ -45,7 +45,7 @@ mod_matrix_add_routing(m3, r3);
 mod_matrix_set_source(m3, MOD_SOURCE_LFO1, F64_ONE);
 mod_matrix_compute(m3);
 assert(f64_lt(f64_abs(mod_matrix_get_destination(m3, MOD_DEST_PITCH)), NAAD_EPSILON),
-"disabled routing should not contribute");
+  "disabled routing should not contribute");
 
 # ================================================================
 test_group("max routings");
@@ -60,7 +60,7 @@ while (i4 < MOD_MATRIX_MAX_ROUTINGS) {
 assert(added_all, "all MAX_ROUTINGS routings added");
 # 17th should fail
 assert_eq(mod_matrix_add_routing(m4, mod_matrix_routing_new(MOD_SOURCE_LFO1, MOD_DEST_PITCH, C0_1)), 0,
-"17th routing fails");
+  "17th routing fails");
 
 var rc = assert_summary();
 syscall(60, rc);

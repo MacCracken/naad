@@ -123,7 +123,7 @@ fn physical_ks_next_sample(self) {
     var brightness = KarplusStrong_brightness(self);
     var damping_prev = KarplusStrong_damping_prev(self);
     var filtered = f64_add(f64_mul(brightness, delayed),
-    f64_mul(f64_sub(F64_ONE, brightness), damping_prev));
+      f64_mul(f64_sub(F64_ONE, brightness), damping_prev));
     KarplusStrong_set_damping_prev(self, flush_denormal(filtered));
 
     # Write back with feedback.
@@ -367,20 +367,20 @@ fn physical_moog_rk4_step(omega, k, input, state, dt, scratch) {
 
     physical_moog_deriv(omega, k, input, y0, y1, y2, y3, k1);
     physical_moog_deriv(omega, k, input,
-    f64_add(y0, f64_mul(h2, load64(k1))),
-    f64_add(y1, f64_mul(h2, load64(k1 + 8))),
-    f64_add(y2, f64_mul(h2, load64(k1 + 16))),
-    f64_add(y3, f64_mul(h2, load64(k1 + 24))), k2);
+      f64_add(y0, f64_mul(h2, load64(k1))),
+      f64_add(y1, f64_mul(h2, load64(k1 + 8))),
+      f64_add(y2, f64_mul(h2, load64(k1 + 16))),
+      f64_add(y3, f64_mul(h2, load64(k1 + 24))), k2);
     physical_moog_deriv(omega, k, input,
-    f64_add(y0, f64_mul(h2, load64(k2))),
-    f64_add(y1, f64_mul(h2, load64(k2 + 8))),
-    f64_add(y2, f64_mul(h2, load64(k2 + 16))),
-    f64_add(y3, f64_mul(h2, load64(k2 + 24))), k3);
+      f64_add(y0, f64_mul(h2, load64(k2))),
+      f64_add(y1, f64_mul(h2, load64(k2 + 8))),
+      f64_add(y2, f64_mul(h2, load64(k2 + 16))),
+      f64_add(y3, f64_mul(h2, load64(k2 + 24))), k3);
     physical_moog_deriv(omega, k, input,
-    f64_add(y0, f64_mul(dt, load64(k3))),
-    f64_add(y1, f64_mul(dt, load64(k3 + 8))),
-    f64_add(y2, f64_mul(dt, load64(k3 + 16))),
-    f64_add(y3, f64_mul(dt, load64(k3 + 24))), k4);
+      f64_add(y0, f64_mul(dt, load64(k3))),
+      f64_add(y1, f64_mul(dt, load64(k3 + 8))),
+      f64_add(y2, f64_mul(dt, load64(k3 + 16))),
+      f64_add(y3, f64_mul(dt, load64(k3 + 24))), k4);
 
     # y_new = y + (dt/6) * (k1 + 2*k2 + 2*k3 + k4), per component.
     var over6 = f64_div(dt, f64_from(6));
@@ -388,8 +388,8 @@ fn physical_moog_rk4_step(omega, k, input, state, dt, scratch) {
     while (i < 4) {
         var off = i * 8;
         var sum = f64_add(load64(k1 + off),
-        f64_add(f64_mul(F64_TWO, load64(k2 + off)),
-        f64_add(f64_mul(F64_TWO, load64(k3 + off)), load64(k4 + off))));
+          f64_add(f64_mul(F64_TWO, load64(k2 + off)),
+            f64_add(f64_mul(F64_TWO, load64(k3 + off)), load64(k4 + off))));
         vec_set(state, i, f64_add(vec_get(state, i), f64_mul(over6, sum)));
         i = i + 1;
     }

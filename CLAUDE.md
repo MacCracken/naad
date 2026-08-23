@@ -40,14 +40,25 @@ Project was scaffolded with `cyrius port`. Original Rust at `rust-old/` is the r
 
 ```sh
 cyrius deps                              # resolve dependencies
-cyrius build src/main.cyr build/naad    # compile the smoke binary
-cyrius test tests/<mod>.tcyr             # run ONE suite (explicit path — no auto-discovery)
+cyrius build src/main.cyr build/naad     # compile the smoke binary
+cyrius test                              # auto-discovers and runs every tests/**/*.tcyr
+cyrius test tests/<mod>.tcyr             # run ONE suite
+cyrius audit                             # fmt/lint/docs/tests/bench sweep
 ```
 
-**Porting concurrency**: `cyrius test`/`build`/`deps` re-resolve deps and race
-on `cyrius.lock` (concurrent runs corrupt it). When porting modules in parallel,
-serialize every toolchain call: `flock <scratch>/naad-build.lock cyrius test …`.
-Subdir modules (`synth/`, `oscillator/`, `acoustics/`) flatten into `src/*.cyr`.
+Both `cyrius test` forms are real: bare is what CI runs (`.github/workflows/ci.yml`,
+the only test step), the explicit path is the inner loop while working one module.
+
+**Toolchain concurrency**: `cyrius test`/`build`/`deps` re-resolve deps and race
+on `cyrius.lock` (concurrent runs corrupt it). Whenever more than one agent or shell
+may touch this repo, serialize every toolchain call:
+`flock <scratch>/naad-build.lock cyrius test …`.
+Rust subdir modules (`rust-old/src/{synth,oscillator,acoustics}/`) flatten into
+`src/` with descriptive names: `oscillator/` and `acoustics/` take a module prefix
+(`osc_core.cyr`, `acoustics_fdn.cyr`), `synth/` keeps its bare names (`fm.cyr`,
+`granular.cyr`). One `src/<module>.cyr` per module, with a matching
+`tests/<module>.tcyr` — the four `osc_*` modules are the exception and share
+`tests/oscillator.tcyr`.
 Port status + conventions live in [`docs/development/port-audit.md`](docs/development/port-audit.md).
 
 ## Key Principles
@@ -55,8 +66,15 @@ Port status + conventions live in [`docs/development/port-audit.md`](docs/develo
 - **Cross-check against `rust-old/`** — the port's correctness bar is "matches what Rust did". Diverge only with an ADR.
 - **Correctness over cleverness** — if the Cyrius behavior diverges silently from Rust, the bugs win
 - Test after every change, not after the feature is "done"
+- **A green suite is not evidence that a toolchain or dependency bump changed nothing.**
+  After any pin or dep bump, re-vendor `lib/` and verify it file-by-file against the
+  *pin's own* snapshot (`~/.cyrius/versions/<pin>/lib`) — comparing old-pin against
+  new-pin can show a tidy diff and still miss a half-synced tree. Inherited behavior
+  changes (new guards, new failure returns from a dep) surface as segfaults and silent
+  divergence, not as red tests, so re-read the dep's changelog and pin the new contract
+  with assertions.
 - ONE change at a time — never bundle unrelated changes
-- Build with `cyrius build`, not raw `cat file | cc5` — the manifest auto-resolves deps
+- Build with `cyrius build`, not by invoking `cycc` directly — the manifest auto-resolves deps
 - Source files only need project includes — stdlib auto-resolves from `cyrius.cyml`
 - `var buf[N]` = N **bytes**, not N entries
 
@@ -66,7 +84,11 @@ Port status + conventions live in [`docs/development/port-audit.md`](docs/develo
 - **Never use `gh` CLI** — use `curl` to the GitHub API if needed
 - Do not modify `rust-old/` — it's the parity oracle
 - Do not skip tests before claiming changes work
-- Do not modify `lib/` files (vendored stdlib / dep symlinks)
+- **`cyrius fmt <file>` rewrites that file IN PLACE and prints nothing** — never reach
+  for it to inspect canonical output. `cyrius fmt <file> --check` is the non-destructive
+  form, and the one `cyrius audit` gates on. There is no `-w` flag.
+- Do not modify `lib/` files by hand — they are vendored copies (stdlib from the
+  toolchain pin, deps from `[deps.*]`) that `cyrius deps` regenerates
 - Do not hardcode toolchain versions in CI YAML — `cyrius = "X.Y.Z"` in `cyrius.cyml` is the source of truth
 
 ## Documentation

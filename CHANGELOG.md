@@ -5,6 +5,265 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.2] - Toolchain + dependency catch-up
+
+Fifteen months of upstream in one bump — cyrius **6.3.19 → 6.5.35**, hisab
+**2.6.7 → 2.11.2**, goonj **2.0.0 → 2.0.4**, sakshi (transitive) **2.4.2 →
+2.4.11** — plus the vendored stdlib re-synced and the port's first post-release
+audit of what a dependency bump *silently* changed.
+
+**The suite was green before the bump and green after it, at exactly 477
+assertions either side. That is not evidence, and this release is mostly about
+what it failed to see.** Every defect below was invisible to it. One is a real
+regression this bump introduced: `fit_polynomial` gained a null-pointer
+dereference — reproduced as a **SIGSEGV (exit 139)** — because ganita's matrix
+constructor learned to report failure and naad's only call site never checked.
+The suite is now **502 assertions across 38 suites**, and each of the 25 new
+ones was verified to *fail* without its fix.
+
+### Changed — toolchain, dependencies, and the vendored stdlib
+
+- **`cyrius.cyml`**: `cyrius = "6.3.19"` → `"6.5.35"`; `[deps.hisab]` tag
+  `2.6.7` → `2.11.2`; `[deps.goonj]` tag `2.0.0` → `2.0.4`. goonj 2.0.4 pins
+  hisab 2.11.2 and hisab 2.11.2 pins sakshi 2.4.11, so the graph resolves
+  consistently; exact commits are in `cyrius.lock`.
+- **`lib/` re-vendored from the 6.5.35 snapshot** — all **30** stdlib files
+  verified **byte-identical** to `~/.cyrius/versions/6.5.35/lib`, file by file,
+  rather than assumed. (`lib/` holds 32 `.cyr`; the other two, `hisab.cyr` and
+  `goonj.cyr`, are the git+tag dependency bundles and have no snapshot
+  counterpart.) Comparing old-pin against new-pin would have shown a tidy diff
+  and could not have detected a half-synced tree; only comparing against the
+  pin's own snapshot can.
+- A local hand-edit to `lib/syscalls_x86_64_agnos.cyr` (an `agnos` `sys_fstat`
+  peer that fails closed) was discarded rather than re-applied: the same
+  function has since landed upstream and arrives with the re-vendored file.
+  `naadex.cyr`, the agnos ring-3 oscillator proof, still builds.
+- **`dist/naad.deps` was empty and is now populated** with all 15 stdlib leaf
+  requirements. Consumers of `dist/naad.cyr` were not being told what naad needs
+  in scope — a real consumer-visible fix, independent of the version header.
+- **CI gains a pre-tag changelog gate.** `release.yml` builds the release body by
+  awk-ing the `## [<tag>]` section out of this file and falls back to the literal
+  "No changelog entry for <tag>." — but that step runs *after* the tag is pushed,
+  so failing there would leave a published tag with no release. `ci.yml` now runs
+  the same extractor against `VERSION` on the branch. Verified in both
+  directions: it passes here and fails on a VERSION with no matching section.
+  (This release would have tripped it — the entry you are reading did not exist
+  when the bump was applied.)
+- 12 `src/*.cyr` files reformatted for the 6.5.35 formatter (continuation-line
+  indentation). The reformat itself is whitespace only — measured before
+  applying it: zero line-count change and zero non-whitespace change across all
+  12. Three of those files (`acoustics_analysis`, `acoustics_binaural`,
+  `dsp_spectral`) do move line counts in this release, from the code fixes
+  below, not from the reformat. `cyrius audit`'s fmt gate is clean again.
+
+### Fixed — a null dereference this bump introduced
+
+- **`fit_polynomial` (`src/dsp_spectral.cyr`) SIGSEGV'd on a negative degree.**
+  ganita 1.1.4 gave `ganita_mat_new` failure returns (non-positive dimensions,
+  designs over `GANITA_MAT_MAX_ELEMS`, allocation failure) where it had
+  previously always returned a usable header. naad's only call site never
+  checked it, and `ganita_mat_least_squares` dereferences its argument
+  immediately. The existing `nx <= degree` guard cannot catch a negative degree
+  — `nx >= 0` is never `<= -1` — so `cols <= 0` reached the constructor.
+  **Before** the bump that same path returned a valid 16-byte header and no-op'd
+  its way to an empty vec; **after**, it faulted.
+  ⚠ **Confirmed by execution, not by reading**: removing the two new guards
+  makes `tests/dsp_spectral.tcyr` exit **139**. `degree` is `usize` in
+  `rust-old/`, so the oracle cannot express this state at all — the port widened
+  the domain to signed `i64` and the bump turned the widened region from benign
+  into fatal. No test covered it, which is why 477 assertions passed either side.
+
+### Fixed — half-bound `sample_rate` guards in the acoustics wrappers
+
+Five wrappers tested `sample_rate == 0` where the oracle types the parameter
+`u32`. Rust cannot represent a negative rate; signed Cyrius can, and the guards
+were transliterated verbatim, so a single upper-bound test was only half a bound.
+All five now test `<= 0`, matching naad's own idiom elsewhere
+(`src/error.cyr`, `src/vocoder.cyr`, `src/additive.cyr`).
+
+- **`naad_fdn_matrix_new` produced a divergent, unbounded reverb.** A negative
+  rate flips the damping exponent positive, making every per-delay gain exceed 1
+  (measured 1.000143 at `sr = -48000`); under the orthogonal Hadamard mix the
+  loop grows roughly 1000× per 48 000 samples — while the constructor reports
+  success. This is the one that produces wrong audio.
+- **`naad_analysis_analyze_impulse_response` — bump-attributable.** goonj 2.0.2
+  widened `_analysis_clarity`'s own `rate == 0` guard to `rate <= 0`, which
+  turned what had been a loud `vec: index < 0` process abort into a fully
+  populated `RoomMetrics` carrying a **negative RT60** with `naad_is_err == 0`.
+  Every downstream `is_err` and finiteness check passes on wrong data.
+- `naad_analysis_estimate_rt60` is a separate public entry point and divided by
+  the negative rate directly; it needed its own guard.
+- `naad_fdn_reverb_new` and `naad_binaural_new` were benign but silent — goonj
+  clamped or returned empty IRs, leaving a processor that reported success and
+  passed mono through unspatialised forever. Fixed as input-domain hygiene.
+
+Only the analysis entry point changed behaviour *at this bump*; the other four
+are pre-existing port defects this audit surfaced.
+
+### Fixed — a test that could not fail
+
+- `tests/acoustics_analysis.tcyr`'s empty-RT60 assertion compared through
+  `f64_to`, which truncates toward zero, so it held for **every** RT60 in
+  (−1.0, 1.0) — most of the realistic output range. It now compares raw f64
+  bits (+0.0 is the bit pattern 0), matching the oracle's exact equality.
+
+### Changed — inherited behaviour: `f64_tanh` no longer returns NaN
+
+`ganita_f64_tanh` gained saturation guards, so it no longer falls into
+`inf/inf` when `f64_exp` overflows.
+
+⚠ **The boundary is |x| > ~709.78, not |x| > 20.** Measured against the old body
+compiled standalone: for every integer in **[20, 709] the two paths are
+bit-identical** (both exactly 1.0); the first NaN is exactly **x = 710**. ±inf
+went NaN → ±1.0. Quoting the guard's literal threshold of 20 would have
+described a change that does not exist there, and any test written at drive 100
+would have proved nothing.
+
+Three naad surfaces sat directly on it, unvalidated, for **every naad release to
+date**:
+
+- `soft_clip_tanh` (`src/dsp_util.cyr`) — public, no validation.
+- `effects_distortion_process_sample` under `DISTORTION_SOFT_CLIP` — `drive` is
+  floored at 0 and deliberately **not** capped (the oracle is `drive.max(0.0)`
+  with no upper bound), so the NaN survived the dry/wet blend.
+- `physical_moog_process_sample` — the worst case. `physical_moog_deriv` tanh's
+  the input *and* re-tanh's the RK4 stage states, so one over-range sample left
+  the ladder NaN for **every subsequent sample until reset**. Persistent state
+  corruption, not a per-buffer glitch.
+
+Rust's `tanh` saturates for all inputs and never yields NaN at either width —
+`f32::tanh` for `soft_clip_tanh` (`rust-old/src/dsp_util.rs:59`) and the
+distortion path (`effects.rs:302`), and `f64::tanh` for the Moog ladder, which
+casts to `f64` first (`synth/physical.rs:382`). So **this moves naad toward
+parity** — it silently repaired a real divergence. `drive` was
+deliberately *not* clamped in response: that would create a fresh divergence to
+fix a defect that no longer exists. The new assertions pin the contract at drive
+1000 with controls at 100 that pass on both sides of the bump, so a silent
+upstream revert cannot reintroduce a NaN nobody is watching for.
+
+*Consumers who relied on the NaN as a signal must adapt.* Note also that
+`ganita_f64_sinh` / `ganita_f64_cosh` remain unguarded and still overflow to
+±inf; naad does not call them.
+
+### Changed — inherited: DCT/IDCT now dispatch by size
+
+hisab 2.8.3 replaced `num_dct` / `num_idct`'s O(n²) kernels with a size-dispatched
+FFT/Bluestein reduction, which `src/additive.cyr`'s amplitude compression crosses
+at this bump. Dispatch is non-monotonic: FFT for n = 8, 16, 27–32, 40+; the
+retained direct kernel for n = 2–7, 9–15, 17–26, 33–39; first Bluestein at n = 27.
+Coefficients moved by ~1e-15 relative — **no parity impact**, and `rust-old/`
+delegates to the same hisab entry points. Every existing DCT assertion used
+n ∈ {8, 16}, both on the FFT branch, so a dispatch retune was invisible; the
+suite now also round-trips n = 5 (direct) and n = 28 (Bluestein).
+
+### Changed — benchmarks are on a new instrument and are not comparable
+
+cyrius 6.5.19 taught `lib/bench.cyr` to **calibrate one clock read on the host
+and subtract it from every sample**, and taught `bench_run` to size its own
+batches instead of wrapping a clock pair around every iteration. Both rewrite the
+number without touching the code being measured.
+
+**2.1.2 makes no speedup claim.** Re-measured on this host (hpet clocksource,
+this boot), with the floor stated beside them as it must be:
+
+| Benchmark | 2.1.2 (net of floor) |
+|---|---|
+| `osc_next_sample` (sine) | 58–64 ns |
+| `filter_svf` lowpass | 35–38 ns |
+| `envelope_adsr` next_value | 22–23 ns |
+| `noise` pink (Voss-McCartney) | 102–110 ns |
+| *measured timer floor* | *1.320–1.349 µs per clock read* |
+
+Ranges are the observed envelope over eight runs on one host and one boot, not a
+confidence interval — every endpoint is a figure somebody actually saw.
+
+The four operations differ by **4.78×**; 2.0.0 reported them as a single
+"~1.4 µs/sample" because a common ~1.34 µs floor swamped all four. A real
+regression had room to hide inside that. ⚠ The floor is **host- and
+boot-dependent** — `lib/bench.cyr` records this same machine producing both
+~400 ns and ~1,700 ns across reboots, and a 230× spread across the four hosts the
+upstream gate runs on — so no fixed figure belongs in a comment, and every
+recorded row must carry the floor it was taken against.
+
+- `scripts/bench-history.sh` **rewritten**. It was a dead pre-port script running
+  `cargo bench` into `benches/history/`; neither exists (no `Cargo.toml`, no
+  `benches/`), so it was unreachable from both ends and naad has **zero**
+  archived bench rows. The replacement drives `cyrius bench` under the project's
+  `flock` rule and writes a CSV carrying **derived** `regime` and `floor_ns`
+  columns — read from whether the harness printed its own measured floor, so
+  they cannot go stale the way a hand-written constant does. A trend filter must
+  refuse to compare across regimes: rows either side of this boundary are all
+  `stat=avg`, so filtering on the statistic alone would report pure instrument
+  artefact as improvement.
+- `tests/naad.bcyr` quoted "~240 ns per start/stop pair on x86_64 Linux", copied
+  from the old `lib/bench.cyr` header. Upstream **retired** that figure and
+  measures 1,346 ns here — 5.6× low — so the constant is gone and the comment
+  points at `bench_clock_overhead_ns()` instead. The "batch sub-microsecond ops"
+  guidance it sat next to is still correct and stays.
+
+### Documentation
+
+The docs had drifted far enough that several were describing a project that no
+longer exists. Corrected against **measured** state, with dated records left
+intact and stamped rather than rewritten.
+
+- **`README.md` was still the pre-port Rust crate README** — a `use
+  naad::oscillator::…` usage block, a Feature Flags table whose only row was
+  `tracing-subscriber`, and a tree of `.rs` files. Rewritten for the Cyrius
+  library, including the `dist/naad.cyr` consumption path, the `dist/naad.deps`
+  sidecar, and the include order consumers need.
+- **`CONTRIBUTING.md` demanded six `cargo` commands**, none of which can run, and
+  mandated serde derives and `tracing` that the port removed. Rewritten around
+  the real `cyrius` gates, the porting conventions, and the `flock` rule.
+- **`SECURITY.md` declared the shipping line unsupported** — its only supported
+  row was `0.1.x`, a version that was never git-tagged. Rewritten.
+- **A durable rule in `CLAUDE.md` had gone false**: it stated `cyrius test` has
+  *no auto-discovery* and each suite must be run by explicit path. Bare
+  `cyrius test` discovers and runs all 38 suites, and `.github/workflows/ci.yml`
+  has been relying on exactly that. The same false sentence was in
+  `docs/development/state.md` and `docs/development/port-audit.md`.
+- **`cyrius fmt <file>` rewrites the file IN PLACE** and prints nothing; the
+  non-destructive form is `--check`. Documented as a hazard where the old text
+  implied otherwise. (`cyrius audit`'s own hint text suggests a `-w` flag that
+  does not exist.)
+- **`docs/development/state.md` refreshed** — it is designated the authority on
+  volatile state and had gone stale on the pin (`6.3.18`, a value that never
+  matched even the pre-bump manifest), the assertion counts, and the dependency
+  form, still describing hisab/goonj as path deps with goonj "commented out".
+  Version numbers and counts now point at their source of truth instead of being
+  inlined, since inlining is precisely what drifted.
+- `cyrius.cyml`'s bundle comment said 443 top-level fns; measured **446**, all
+  unique. The "collisions audited to zero" claim is **true** and is re-verified
+  against hisab, goonj, sakshi, abaco and the stdlib — but it is fn-scoped and
+  provably cannot see the `var` collision class, which is now noted there.
+- `docs/development/roadmap.md` and `port-audit.md` refreshed; the shipped
+  git+tag pinning ticked, historical counts stamped as-of rather than rewritten.
+
+### Known — deliberately not fixed here
+
+- **`ERR_INVALID_FREQUENCY` is defined twice**: naad's `src/error.cyr` (−1) and
+  `lib/goonj.cyr` (−3), in one flat namespace. ⚠ Duplicate top-level `var`s draw
+  **no diagnostic at all** from `cycc` or `cyrlint` — unlike duplicate `fn`s,
+  which warn — so 2.1.1's "benign last-wins warning" does not apply to this
+  class. It is inert today: goonj never returns the code, naad never calls
+  goonj's error helpers, and every consumer includes goonj before naad. A
+  `tests/bundle.tcyr` assertion now pins the resolved values so the collision
+  becomes visible the moment either side's meaning is relied on. The durable fix
+  — prefixing naad's block to `NAAD_ERR_*`, as hisab did with `HSB_ERR_*` — is a
+  minor-release change, not a patch.
+- **`fit_polynomial` still has a hard cliff at nx ≥ 5793**, inside
+  `ganita_mat_least_squares`, which allocates an `nx × nx` matrix unchecked and
+  has no way to report failure. This threshold is **unchanged by the bump**.
+  Capping it in naad may be a deliberate divergence from the oracle rather than
+  parity restoration, so it needs checking against hisab's Rust source first; it
+  belongs upstream in ganita either way.
+- `GANITA_MAT_MAX_ELEMS` is still derived from a 256 MiB `ALLOC_MAX` that is now
+  2 GiB — 8× stale, but it errs conservative and changes no naad behaviour.
+- 8 undocumented public fns keep `cyrius audit` at exit 1.
+- CI runs the changelog gate → deps → build → test. fmt, lint, deny, bench and
+  fuzz are still not wired in, and there is no gate for the symbol-collision
+  class above.
+
 ## [2.1.1] - abaco↔naad namespace de-collision
 
 Unblocks a downstream consumer (dhvani) from bundling **both** abaco and naad
@@ -122,7 +381,13 @@ cross-checked against it function-for-function. Per-module ledger in
   (null `0`, `NaN`, `-1.0`). No unwinding — Cyrius has none by design.
 - **Dependencies**: `hisab` (math/geometry, `num_fft`, `calc_bspline`,
   least-squares) and `goonj` (acoustics engine) consumed as Cyrius distlib
-  bundles. `smallvec`/`serde`/`thiserror`/`tracing`/`criterion` dropped
+  bundles.
+  > **Erratum, noted at 2.1.2**: least-squares is not hisab's. `fit_polynomial`
+  > calls `ganita_mat_*`, which comes from the stdlib `ganita` leaf, not from
+  > `lib/hisab.cyr` (which defines no `ganita_mat_*`). The line is left as
+  > written because it is a record; the misattribution is corrected in
+  > `cyrius.cyml` and matters because that is where 2.1.2's null-deref
+  > originated. `smallvec`/`serde`/`thiserror`/`tracing`/`criterion` dropped
   (`SmallVec`/`Vec` → stdlib `vec`; no serde in Cyrius).
 
 ### Added
@@ -137,6 +402,14 @@ cross-checked against it function-for-function. Per-module ledger in
 - **Hot-path benchmarks** (`cyrius bench tests/hotpath.bcyr`): oscillator,
   state-variable filter, ADSR envelope, pink noise (~1.4 µs/sample, scalar
   reference; hosts own SIMD dispatch).
+  > **Annotated at 2.1.2 — this figure is ~96 % timer floor, not naad.** It was
+  > produced by the pre-6.5.19 `bench_run`, which wrapped a clock pair around
+  > every iteration and subtracted nothing. On this host a clock read costs
+  > ~1.34 µs, so all four operations reported ~1.4 µs regardless of their own
+  > cost. Re-measured under the calibrated instrument they span **4.78×** —
+  > 23 ns to 105 ns (see 2.1.2). The number is left as written because it is a
+  > record of what was measured; it is not comparable to anything measured
+  > after the 6.5.19 boundary.
 
 ### Removed
 

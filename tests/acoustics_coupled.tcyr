@@ -21,7 +21,7 @@ fn small_room() {
     var source = hvec3_new(F64_ONE, one_and_half(), F64_ONE);
     var listener = hvec3_new(f64_from(4), one_and_half(), f64_from(3));
     return naad_room_reverb_config_new(f64_from(5), f64_from(4), f64_from(3),
-    "carpet", source, listener, 48000);
+      "carpet", source, listener, 48000);
 }
 
 # Oracle large_room(): 20 x 15 x 8 m concrete room at 48 kHz, source
@@ -30,7 +30,7 @@ fn large_room() {
     var source = hvec3_new(f64_from(10), f64_from(4), f64_from(7));
     var listener = hvec3_new(f64_from(5), f64_from(4), f64_from(7));
     return naad_room_reverb_config_new(f64_from(20), f64_from(15), f64_from(8),
-    "concrete", source, listener, 48000);
+      "concrete", source, listener, 48000);
 }
 
 # Oracle small_room() with a caller-supplied wall material (for the
@@ -39,7 +39,7 @@ fn small_room_mat(material) {
     var source = hvec3_new(F64_ONE, one_and_half(), F64_ONE);
     var listener = hvec3_new(f64_from(4), one_and_half(), f64_from(3));
     return naad_room_reverb_config_new(f64_from(5), f64_from(4), f64_from(3),
-    material, source, listener, 48000);
+      material, source, listener, 48000);
 }
 
 # Oracle portal(): position [5, 1.5, 2], +X normal, 1 x 2 m opening.
@@ -80,7 +80,7 @@ test_group("coupled_decay_late_is_longer");
 var cfg2 = naad_coupled_room_config_new(small_room(), large_room(), portal());
 var d2 = naad_coupled_analyze_decay(cfg2);
 assert(f64_ge(CoupledDecayResult_rt60_late(d2), CoupledDecayResult_rt60_early(d2)),
-"concrete coupled room should sustain late decay");
+  "concrete coupled room should sustain late decay");
 
 # ================================================================
 # test_invalid_material_errors: an unknown wall material on room A makes the

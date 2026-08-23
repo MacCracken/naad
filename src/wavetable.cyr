@@ -260,7 +260,7 @@ fn wavetable_osc_next_sample(self) {
     var sample = wavetable_read_interpolated(WavetableOscillator_table(self), WavetableOscillator_phase(self));
 
     var phase = f64_add(WavetableOscillator_phase(self),
-    f64_div(WavetableOscillator_frequency(self), WavetableOscillator_sample_rate(self)));
+      f64_div(WavetableOscillator_frequency(self), WavetableOscillator_sample_rate(self)));
     if (f64_ge(phase, F64_ONE) == 1) {
         phase = f64_sub(phase, F64_ONE);
     }

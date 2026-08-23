@@ -103,7 +103,7 @@ test_group("from_room_creates_loaded_reverb");
 var fr_source = hvec3_new(F64_TWO, ear_height(), f64_from(3));
 var fr_listener = hvec3_new(f64_from(6), ear_height(), f64_from(3));
 var fr_cfg = naad_room_reverb_config_new(f64_from(8), f64_from(6), f64_from(3),
-"concrete", fr_source, fr_listener, 48000);
+  "concrete", fr_source, fr_listener, 48000);
 var fr_rev = naad_convolution_from_room(fr_cfg);
 assert_eq(naad_is_err(fr_rev), 0, "from_room should succeed for a valid config");
 assert_eq(naad_convolution_is_loaded(fr_rev), 1, "generated IR should be loaded");
@@ -115,12 +115,12 @@ assert_eq(naad_is_finite(fr_out), 1, "room-convolved output should be finite");
 # from_room rejects bad material and non-positive dimensions.
 test_group("from_room_rejects_invalid");
 var bm_cfg = naad_room_reverb_config_new(f64_from(8), f64_from(6), f64_from(3),
-"unobtanium", hvec3_new(F64_TWO, ear_height(), f64_from(3)),
-hvec3_new(f64_from(6), ear_height(), f64_from(3)), 48000);
+  "unobtanium", hvec3_new(F64_TWO, ear_height(), f64_from(3)),
+  hvec3_new(f64_from(6), ear_height(), f64_from(3)), 48000);
 assert_eq(naad_is_err(naad_convolution_from_room(bm_cfg)), 1, "unknown material -> error");
 var bd_cfg = naad_room_reverb_config_new(f64_neg(F64_ONE), f64_from(6), f64_from(3),
-"concrete", hvec3_new(F64_TWO, ear_height(), f64_from(3)),
-hvec3_new(f64_from(6), ear_height(), f64_from(3)), 48000);
+  "concrete", hvec3_new(F64_TWO, ear_height(), f64_from(3)),
+  hvec3_new(f64_from(6), ear_height(), f64_from(3)), 48000);
 assert_eq(naad_is_err(naad_convolution_from_room(bd_cfg)), 1, "negative dimension -> error");
 
 # ================================================================

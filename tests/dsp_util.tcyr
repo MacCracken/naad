@@ -156,5 +156,23 @@ while (u < 10000) {
 }
 assert(urange, "unit PRNG in [0,1]");
 
+# ================================================================
+# tanh saturation contract (cyrius 6.5.35 / ganita 1.1.4).
+# The stdlib gained saturation guards, so f64_tanh no longer returns NaN when
+# f64_exp overflows. The real delta is |x| > ~709.78, NOT |x| > 20: for every
+# integer in [20, 709] the old and new paths are bit-identical (both exactly
+# 1.0). Drive must therefore push |sample*drive| past ~710 or the assertion
+# proves nothing. The oracle (rust-old/src/dsp_util.rs:59, f32::tanh)
+# saturates for all inputs, so this pins naad TOWARD parity -- and stops a
+# silent upstream revert from reintroducing a NaN nobody is watching for.
+# ================================================================
+test_group("soft_clip_tanh saturation (overflow region)");
+assert_eq(soft_clip_tanh(F64_ONE, f64_from(1000)), F64_ONE, "tanh saturates to +1 at drive 1000");
+assert_eq(soft_clip_tanh(f64_neg(F64_ONE), f64_from(1000)), f64_neg(F64_ONE), "tanh saturates to -1 at drive 1000");
+assert_eq(naad_is_finite(soft_clip_tanh(F64_ONE, f64_from(1000))), 1, "no NaN escapes the overflow region");
+# Control: below the overflow threshold both sides of the bump agree bit-for-bit.
+# If this ever fails, the change was NOT confined to the overflow region.
+assert_eq(soft_clip_tanh(f64_from(100), F64_ONE), F64_ONE, "control: tanh(100) = 1 on both sides of the bump");
+
 var rc = assert_summary();
 syscall(60, rc);

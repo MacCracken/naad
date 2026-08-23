@@ -46,5 +46,13 @@ test_group("zero sample rate errors");
 var proc4 = naad_binaural_new(f64_from(0), f64_from(0), 0);
 assert(naad_is_err(proc4) == 1, "zero sample rate should error");
 
+# ================================================================
+# Negative sample_rate (oracle types it `u32`, rust-old/src/acoustics/
+# binaural.rs:58). Previously accepted: goonj returned empty IRs, naad_is_err
+# stayed 0, and the processor passed mono through unspatialised forever.
+# ================================================================
+test_group("negative sample rate is rejected");
+assert_eq(naad_is_err(naad_binaural_new(F64_HALF, f64_from(0), 0 - 48000)), 1, "binaural rejects a negative rate");
+
 var rc = assert_summary();
 syscall(60, rc);

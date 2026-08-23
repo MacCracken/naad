@@ -45,11 +45,11 @@ assert(finite_ok, "output should be finite and bounded");
 # ================================================================
 test_group("fdn invalid params");
 assert(naad_is_err(naad_fdn_reverb_new(0, f64_from(8), f64_from(3), F64_ONE, 48000, F64_ONE)),
-"zero length -> err");
+  "zero length -> err");
 assert(naad_is_err(naad_fdn_reverb_new(f64_from(10), f64_from(8), f64_from(3), f64_neg(F64_ONE), 48000, F64_ONE)),
-"negative rt60 -> err");
+  "negative rt60 -> err");
 assert(naad_is_err(naad_fdn_reverb_new(f64_from(10), f64_from(8), f64_from(3), F64_ONE, 0, F64_ONE)),
-"zero sample rate -> err");
+  "zero sample rate -> err");
 
 # ================================================================
 test_group("hadamard8 orthogonality");
@@ -144,6 +144,19 @@ test_group("matrix fdn dry passthrough");
 var mp = naad_fdn_matrix_new(F64_ONE, 48000, 0);
 out = naad_fdn_matrix_process_sample(mp, C0_7);
 assert(f64_lt(f64_abs(f64_sub(out, C0_7)), C1E_5), "mix=0 passes input through");
+
+# ================================================================
+# Negative sample_rate. The oracle types it `u32`
+# (rust-old/src/acoustics/fdn_reverb.rs:195, :50) so negatives are
+# unrepresentable there; Cyrius ints are signed, and the port transliterated
+# the implicit `== 0` guard verbatim. A negative rate flipped the damping
+# exponent positive, giving per-delay gains > 1 under an orthogonal Hadamard
+# mix -- a constructor that reported success and then grew without bound.
+# ================================================================
+test_group("negative sample rate is rejected");
+assert_eq(naad_is_err(naad_fdn_matrix_new(F64_ONE, 0 - 48000, F64_ONE)), 1, "fdn matrix rejects a negative rate");
+assert_eq(naad_is_err(naad_fdn_matrix_new(F64_ONE, 0, F64_ONE)), 1, "fdn matrix still rejects a zero rate");
+assert_eq(naad_is_err(naad_fdn_reverb_new(f64_from(10), f64_from(8), f64_from(3), F64_ONE, 0 - 48000, F64_ONE)), 1, "fdn reverb rejects a negative rate");
 
 var rc = assert_summary();
 syscall(60, rc);

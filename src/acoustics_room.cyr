@@ -50,7 +50,7 @@ struct RoomReverbConfig {
 # HVec3 pointers (hvec3_new). Ports the Rust struct literal.
 #must_use
 fn naad_room_reverb_config_new(length, width, height, wall_material_name,
-source_position, listener_position, sample_rate) {
+  source_position, listener_position, sample_rate) {
     var c = alloc(sizeof(RoomReverbConfig));
     RoomReverbConfig_set_length(c, length);
     RoomReverbConfig_set_width(c, width);
@@ -95,7 +95,7 @@ fn naad_room_reverb_new(config) {
     if (f64_le(RoomReverbConfig_height(config), 0) == 1) { return ERR_COMPUTATION; }
 
     var room = acoustic_room_shoebox(RoomReverbConfig_length(config),
-    RoomReverbConfig_width(config), RoomReverbConfig_height(config), material);
+      RoomReverbConfig_width(config), RoomReverbConfig_height(config), material);
 
     var source = RoomReverbConfig_source_position(config);
     var listener = RoomReverbConfig_listener_position(config);

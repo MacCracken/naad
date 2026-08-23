@@ -36,5 +36,17 @@ test_group("bundle: acoustics (goonj-backed)");
 assert(naad_acoustics_material_by_name("concrete") != 0, "acoustics material base");
 assert_eq(naad_acoustics_material_by_name("nope"), 0, "unknown material -> None");
 
+test_group("bundle: naad/goonj error-code namespace");
+# naad's src/error.cyr and lib/goonj.cyr BOTH define a top-level
+# `ERR_INVALID_FREQUENCY` var (naad -1, goonj -3) in one flat namespace, and
+# duplicate top-level `var`s draw no diagnostic from cycc or cyrlint -- unlike
+# duplicate `fn`s. It is inert today (goonj never returns the code, and every
+# consumer includes goonj before naad, so naad's value wins), but nothing
+# would report it if that changed. These pin the values naad's own surface
+# depends on; a `naad_`/`GNJ_` prefix pass is the durable fix.
+assert_eq(ERR_NONE, 0, "ERR_NONE agrees across naad and goonj");
+assert_eq(ERR_INVALID_FREQUENCY, 0 - 1, "naad's ERR_INVALID_FREQUENCY wins over goonj's -3");
+assert(ERR_INVALID_FREQUENCY != ERR_COMPUTATION, "naad error codes stay distinct under the bundle");
+
 var rc = assert_summary();
 syscall(60, rc);

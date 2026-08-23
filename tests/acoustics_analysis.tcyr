@@ -34,7 +34,7 @@ fn make_room(length, material) {
     var src = hvec3_new(f64_from(4), F64_TWO, f64_from(3));
     var lis = hvec3_new(f64_from(4), F64_TWO, f64_from(3));
     return naad_room_reverb_config_new(length, f64_from(6), f64_from(4),
-    material, src, lis, 48000);
+      material, src, lis, 48000);
 }
 
 fn live_room() { return make_room(f64_from(8), "concrete"); }
@@ -74,7 +74,10 @@ assert_eq(naad_is_finite(t4_rt60), 1, "RT60 should be finite");
 
 # ================================================================
 test_group("estimate_rt60_empty");
-assert_eq(f64_to(naad_analysis_estimate_rt60(vec_new(), 48000)), 0, "empty RT60 = 0.0");
+# Raw f64 bits (+0.0 == 0), not f64_to: truncation made this hold for every
+# RT60 in (-1.0, 1.0) -- i.e. most of the realistic output range. The oracle
+# asserts exact equality (rust-old/src/acoustics/analysis.rs:212).
+assert_eq(naad_analysis_estimate_rt60(vec_new(), 48000), 0, "empty RT60 = 0.0");
 
 # ================================================================
 test_group("suggest_absorption_returns_advice");
@@ -101,6 +104,23 @@ assert_eq(naad_is_err(t8_advice), 1, "unknown material -> error");
 test_group("suggest_absorption_invalid_dimensions");
 var t9_advice = naad_analysis_suggest_absorption(make_room(f64_neg(F64_ONE), "concrete"), F64_HALF);
 assert_eq(naad_is_err(t9_advice), 1, "negative dimension -> error");
+
+# ================================================================
+# Negative sample_rate. Bump-attributable for analyze_impulse_response: goonj
+# 2.0.2 widened _analysis_clarity's `rate == 0` guard to `rate <= 0`, which
+# turned what had been a loud `vec: index < 0` process abort into a fully
+# populated RoomMetrics reporting a NEGATIVE RT60 with naad_is_err == 0 --
+# every downstream is_err/finiteness check passing on wrong data.
+# estimate_rt60 is a separate entry point and needs its own assertion.
+# ================================================================
+test_group("negative sample rate is rejected");
+var tn_ir = vec_new();
+vec_push(tn_ir, F64_ONE);
+vec_push(tn_ir, F64_HALF);
+assert_eq(naad_is_err(naad_analysis_analyze_impulse_response(tn_ir, 0 - 48000)), 1, "negative sample rate -> error");
+# Raw f64 bits, not f64_to: +0.0 is the bit pattern 0. Comparing through
+# f64_to would truncate and hold for the whole open interval (-1.0, 1.0).
+assert_eq(naad_analysis_estimate_rt60(synthetic_ir(48000, F64_TWO, f64_from(3)), 0 - 48000), 0, "negative rate RT60 = +0.0");
 
 var rc = assert_summary();
 syscall(60, rc);

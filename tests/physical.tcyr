@@ -237,9 +237,27 @@ assert(naad_is_err(physical_moog_new(f64_from(50000), F64_ONE, f64_from(SR))), "
 test_group("moog ladder resonance clamps");
 var fclamp = physical_moog_new(f64_from(1000), f64_from(100), f64_from(SR));
 assert(f64_lt(f64_abs(f64_sub(physical_moog_resonance(fclamp), f64_from(4))), NAAD_EPSILON),
-"resonance clamps to 4");
+  "resonance clamps to 4");
 physical_moog_set_resonance(fclamp, f64_neg(F64_ONE));
 assert(f64_lt(f64_abs(physical_moog_resonance(fclamp)), NAAD_EPSILON), "resonance clamps to 0");
+
+# ================================================================
+# Moog ladder: a single over-range sample must not poison the filter state.
+# physical_moog_deriv tanh's the input and re-tanh's the RK4 stage states, so
+# before cyrius 6.5.35 one sample past the f64_exp overflow threshold left the
+# filter NaN for EVERY subsequent sample until physical_moog_reset. A
+# single-sample assertion would not catch that -- feed ordinary samples after.
+# ================================================================
+test_group("moog survives an over-range sample");
+var mpoison = physical_moog_new(f64_from(1000), F64_HALF, f64_from(44100));
+physical_moog_process_sample(mpoison, f64_from(100000));
+var mp_ok = 1;
+var mpi = 0;
+while (mpi < 64) {
+    if (naad_is_finite(physical_moog_process_sample(mpoison, C0_1)) == 0) { mp_ok = 0; }
+    mpi = mpi + 1;
+}
+assert(mp_ok, "moog state recovers after an over-range sample (no persistent NaN)");
 
 var rc = assert_summary();
 syscall(60, rc);

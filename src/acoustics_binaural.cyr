@@ -9,7 +9,8 @@
 # `(f32, f32)` tuple returned by process_sample becomes a BinauralStereo struct
 # (naad-distinct name; goonj owns BinauralIr/BinauralAngles/HrtfPair). Vec<f32>
 # IRs and ring buffers become stdlib vecs (f64 stored directly). Result<Self>
-# collapses to the struct pointer on success or ERR_COMPUTATION (sample_rate 0).
+# collapses to the struct pointer on success or ERR_COMPUTATION (sample_rate
+# not positive).
 #
 # Requires (from the build/test unit): lib/hisab.cyr (hvec3_new), lib/goonj.cyr
 # (acoustic_room_shoebox, acoustic_material_concrete, ir_config_new,
@@ -99,14 +100,15 @@ fn naad_binaural_build_minimal_hrtf(azimuth, elevation, sample_rate) {
 # naad_binaural_new -- create a binaural processor for a source direction.
 # Builds a 6x4x3 concrete shoebox, a minimal HRTF dataset, and generates the
 # stereo IR via goonj. Returns the struct pointer on success or ERR_COMPUTATION
-# when sample_rate is 0. Ports BinauralProcessor::new.
+# when sample_rate is not positive. Ports BinauralProcessor::new. (Oracle types
+# sample_rate `u32`; the signed Cyrius port must reject negatives explicitly.)
 # ================================================================
 #must_use
 fn naad_binaural_new(azimuth, elevation, sample_rate) {
-    if (sample_rate == 0) { return ERR_COMPUTATION; }
+    if (sample_rate <= 0) { return ERR_COMPUTATION; }
 
     var room = acoustic_room_shoebox(
-    f64_from(6), f64_from(4), f64_from(3), acoustic_material_concrete());
+      f64_from(6), f64_from(4), f64_from(3), acoustic_material_concrete());
     var source = hvec3_new(f64_from(2), F64_ONE_HALF, f64_from(2));
     var listener = hvec3_new(f64_from(4), F64_ONE_HALF, f64_from(2));
 
@@ -210,8 +212,8 @@ fn naad_binaural_process_sample(self, input) {
 #must_use
 fn naad_binaural_rebuild(self) {
     var fresh = naad_binaural_new(
-    BinauralProcessor_azimuth(self), BinauralProcessor_elevation(self),
-    BinauralProcessor_sample_rate(self));
+      BinauralProcessor_azimuth(self), BinauralProcessor_elevation(self),
+      BinauralProcessor_sample_rate(self));
     if (naad_is_err(fresh) == 1) { return fresh; }
     BinauralProcessor_set_left_ir(self, BinauralProcessor_left_ir(fresh));
     BinauralProcessor_set_right_ir(self, BinauralProcessor_right_ir(fresh));

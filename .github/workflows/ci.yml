@@ -33,6 +33,24 @@ jobs:
             CYRIUS_VERSION="$CYRIUS_VERSION" sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
+      - name: Changelog entry matches VERSION
+        # Pre-tag gate. release.yml extracts the release body by awk-ing the
+        # `## [<tag>]` section out of CHANGELOG.md and falls back to the literal
+        # "No changelog entry for <tag>." when that comes back empty — but that
+        # step runs AFTER the tag is pushed, so failing there would leave a
+        # published tag with no release and force a delete-and-retag. Catch it
+        # on the branch instead, using the SAME extractor release.yml uses.
+        run: |
+          set -e
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          BODY=$(awk "/^## \\[$VERSION\\]/{found=1; next} /^## \\[/{if(found) exit} found{print}" CHANGELOG.md)
+          if [ -z "$BODY" ]; then
+            echo "CHANGELOG.md has no '## [$VERSION]' section (VERSION=$VERSION)."
+            echo "Add one before tagging — release.yml would publish an empty release body."
+            exit 1
+          fi
+          echo "Changelog entry found for $VERSION ($(printf '%s' "$BODY" | wc -c) bytes)"
+
       - name: Resolve dependencies
         run: cyrius deps
 
@@ -42,9 +60,9 @@ jobs:
           cyrius build src/main.cyr build/${{ github.event.repository.name }}
 
       - name: Test
-        # v5.6.28: bare `cyrius test` picks up the [build].test entry
-        # AND auto-discovers tests/*.tcyr — avoids the previous
-        # `cyrius test src/test.cyr` form that hard-failed when the
-        # stub didn't exist (Issue 1) and also wouldn't ever exercise
-        # tests/${proj}.tcyr.
+        # Bare `cyrius test` auto-discovers and runs every tests/**/*.tcyr
+        # (recursively since 6.5.11; shallow but still automatic before that) —
+        # 38 suites here. This avoids the old `cyrius test src/test.cyr` form,
+        # which hard-failed when the stub didn't exist and never exercised the
+        # per-module suites. Run one suite by path: `cyrius test tests/<mod>.tcyr`.
         run: cyrius test

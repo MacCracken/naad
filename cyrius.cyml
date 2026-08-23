@@ -5,7 +5,7 @@ description = "naad — audio synthesis primitives (oscillators, filters, envelo
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/naad"
 language = "cyrius"
-cyrius = "6.3.19"
+cyrius = "6.5.35"
 
 [build]
 entry = "src/main.cyr"
@@ -17,8 +17,13 @@ output = "build/naad"
 # the flat namespace). Every module is self-contained (no `include` lines).
 # The bundle resolves stdlib + hisab (HVec3/HComplex/num_fft/calc_bspline/
 # ganita) + goonj (acoustics engine, which itself pulls sakshi) from the
-# CONSUMER's manifest. Cross-module symbol collisions audited to zero (443
-# top-level fns share one flat namespace once concatenated).
+# CONSUMER's manifest. Cross-module symbol collisions audited to zero: all 446
+# top-level fns share one flat namespace once concatenated, and the bundle's fn
+# set is disjoint from hisab, goonj, sakshi, abaco and the stdlib. Re-measure
+# rather than trusting this number: `grep -c '^fn ' dist/naad.cyr`. NOTE the
+# audit is fn-scoped and provably cannot see top-level `var` collisions --
+# naad's ERR_INVALID_FREQUENCY (-1) still shadows goonj's (-3); see
+# tests/bundle.tcyr.
 [lib]
 modules = [
     "src/error.cyr",
@@ -87,12 +92,18 @@ stdlib = [
 ]
 
 # hisab — math/geometry. naad consumes HVec3 (envelope, additive,
-# physical, wavetable) and HComplex + num_fft/calc_bspline/ganita
-# least-squares (dsp_spectral) from the single distlib bundle, same
-# pattern goonj uses. Pinned to the released tag for reproducible builds.
+# physical, wavetable) and HComplex + num_fft/num_ifft/num_dct/num_idct/
+# num_rk4/calc_bspline/calc_catmull_rom (dsp_spectral, additive, wavetable)
+# from the single distlib bundle, same pattern goonj uses. Pinned to the
+# released tag for reproducible builds.
+#   NOTE the least-squares path (`ganita_mat_*`, used by `fit_polynomial`)
+#   is NOT hisab's — it comes from the stdlib `ganita` leaf declared in
+#   [deps].stdlib above. `lib/hisab.cyr` defines no `ganita_mat_*`. Earlier
+#   revisions of this comment (and the 2.0.0 CHANGELOG entry) attributed it
+#   to hisab; that is where the 2.1.2 null-deref actually originated.
 [deps.hisab]
 git = "https://github.com/MacCracken/hisab.git"
-tag = "2.6.7"
+tag = "2.11.2"
 modules = ["dist/hisab.cyr"]
 
 # goonj — acoustics engine. Consumed by the `acoustics/*` wrapper modules
@@ -102,5 +113,5 @@ modules = ["dist/hisab.cyr"]
 # via hisab). Pinned to the released tag.
 [deps.goonj]
 git = "https://github.com/MacCracken/goonj.git"
-tag = "2.0.0"
+tag = "2.0.4"
 modules = ["dist/goonj.cyr"]

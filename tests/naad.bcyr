@@ -2,9 +2,13 @@
 # Stdlib auto-included via cyrius.cyml
 #
 # Pattern: bench_new -> bench_batch_start -> tight loop -> bench_batch_stop -> bench_report.
-# For sub-1us ops use batch_size >= 1000 to amortize clock_gettime overhead
-# (~240 ns per start/stop pair on x86_64 Linux). See lib/bench.cyr header for
-# the full overhead-vs-batching guidance.
+# Batch anything near or below the clock floor -- batch_size >= 1000 for a
+# sub-microsecond op, and higher still if the host's floor is high. Do NOT
+# write the overhead down as a constant here: cyrius 6.5.19 retired the fixed
+# figure this comment used to carry, because one clock read spans ~15 ns
+# (macOS arm64) to ~3,550 ns (aarch64 Linux) across the hosts the gate runs
+# on, and it moves between reboots on a single machine. Read it at runtime
+# with bench_clock_overhead_ns(); see the lib/bench.cyr header.
 
 fn bench_noop(): i64 { return 0; }
 

@@ -181,7 +181,7 @@ fn subtractive_next_sample(self) {
 
     # Filter with envelope modulation (depth in octaves -> 2^mod).
     var filter_mod = f64_mul(envelope_adsr_next_value(SubtractiveSynth_filter_env(self)),
-    SubtractiveSynth_filter_env_depth(self));
+      SubtractiveSynth_filter_env_depth(self));
     var modulated_cutoff = f64_mul(SubtractiveSynth_base_cutoff(self), f64_pow(F64_TWO, filter_mod));
     var nyq = f64_mul(SubtractiveSynth_sample_rate(self), SUB_C0_49);
     var clamped = f64_clamp(modulated_cutoff, f64_from(20), nyq);

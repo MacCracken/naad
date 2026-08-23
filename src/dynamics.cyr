@@ -281,7 +281,7 @@ fn dynamics_noise_gate_new(threshold_db, attack, hold, release, sample_rate) {
     NoiseGate_set_hold_counter(self, 0);
     NoiseGate_set_hold_samples(self, f64_to(f64_mul(hold, sample_rate)));
     NoiseGate_set_attack_coeff(self,
-    f64_sub(F64_ONE, f64_exp(f64_div(f64_neg(F64_ONE), f64_mul(attack_time, sample_rate)))));
+      f64_sub(F64_ONE, f64_exp(f64_div(f64_neg(F64_ONE), f64_mul(attack_time, sample_rate)))));
     var rc = F64_ONE;
     if (f64_gt(release, 0) == 1) {
         rc = f64_sub(F64_ONE, f64_exp(f64_div(f64_neg(F64_ONE), f64_mul(release, sample_rate))));

@@ -50,43 +50,43 @@ alloc_init();
 test_group("omnidirectional_is_unity_in_all_directions");
 var front_x = hvec3_unit_x();
 assert(approx(naad_directivity_gain(NAAD_DIR_OMNIDIRECTIONAL, hvec3_unit_x(), front_x), F64_ONE, TOL_1E5),
-"omni +x -> 1.0");
+  "omni +x -> 1.0");
 assert(approx(naad_directivity_gain(NAAD_DIR_OMNIDIRECTIONAL, hvec3_neg(hvec3_unit_x()), front_x), F64_ONE, TOL_1E5),
-"omni -x -> 1.0");
+  "omni -x -> 1.0");
 assert(approx(naad_directivity_gain(NAAD_DIR_OMNIDIRECTIONAL, hvec3_unit_y(), front_x), F64_ONE, TOL_1E5),
-"omni +y -> 1.0");
+  "omni +y -> 1.0");
 assert(approx(naad_directivity_gain(NAAD_DIR_OMNIDIRECTIONAL, hvec3_unit_z(), front_x), F64_ONE, TOL_1E5),
-"omni +z -> 1.0");
+  "omni +z -> 1.0");
 
 # ================================================================
 # test_cardioid_null_at_rear
 # On-axis = 1.0, 180° = 0.0.
 test_group("cardioid_null_at_rear");
 assert(approx(naad_directivity_gain_polar(NAAD_DIR_CARDIOID, 0), F64_ONE, TOL_1E5),
-"cardioid on-axis -> 1.0");
+  "cardioid on-axis -> 1.0");
 assert(f64_lt(naad_directivity_gain_polar(NAAD_DIR_CARDIOID, F64_PI), TOL_1E5) == 1,
-"cardioid rear -> 0.0");
+  "cardioid rear -> 0.0");
 
 # ================================================================
 # test_figure8_nulls_at_sides
 # Peaks at 0 and π, nulls at ±π/2.
 test_group("figure8_nulls_at_sides");
 assert(approx(naad_directivity_gain_polar(NAAD_DIR_FIGURE8, 0), F64_ONE, TOL_1E5),
-"figure8 on-axis -> 1.0");
+  "figure8 on-axis -> 1.0");
 assert(approx(naad_directivity_gain_polar(NAAD_DIR_FIGURE8, F64_PI), F64_ONE, TOL_1E5),
-"figure8 rear -> 1.0");
+  "figure8 rear -> 1.0");
 assert(f64_lt(naad_directivity_gain_polar(NAAD_DIR_FIGURE8, F64_PI_2), TOL_1E5) == 1,
-"figure8 side -> 0.0");
+  "figure8 side -> 0.0");
 
 # ================================================================
 # test_supercardioid_has_small_rear_lobe
 # Zero at π (clipped), positive at 2π/3.
 test_group("supercardioid_has_small_rear_lobe");
 assert(f64_lt(naad_directivity_gain_polar(NAAD_DIR_SUPERCARDIOID, F64_PI), TOL_1E5) == 1,
-"supercardioid rear -> 0.0 (clipped)");
+  "supercardioid rear -> 0.0 (clipped)");
 var theta_oblique = f64_div(f64_mul(F64_TWO, F64_PI), f64_from(3));
 assert(f64_gt(naad_directivity_gain_polar(NAAD_DIR_SUPERCARDIOID, theta_oblique), 0) == 1,
-"supercardioid oblique -> > 0.0");
+  "supercardioid oblique -> > 0.0");
 
 # ================================================================
 # test_polar_matches_3d_for_axisymmetric

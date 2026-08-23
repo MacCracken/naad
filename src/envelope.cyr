@@ -84,7 +84,7 @@ fn envelope_adsr_with_sample_rate(attack, decay, sustain, release, sample_rate) 
 #must_use
 fn envelope_adsr_new(attack, decay, sustain, release) {
     return envelope_adsr_with_sample_rate(attack, decay, sustain, release,
-    f64_from(ENV_DEFAULT_SAMPLE_RATE));
+      f64_from(ENV_DEFAULT_SAMPLE_RATE));
 }
 
 # Current envelope state (ENV_STATE_* constant).
@@ -378,7 +378,7 @@ fn envelope_catmull_rom_next_value(self) {
 
     var t = f64_div(CatmullRomEnvelope_elapsed_samples(self), CatmullRomEnvelope_sample_rate(self));
     CatmullRomEnvelope_set_elapsed_samples(self,
-    f64_add(CatmullRomEnvelope_elapsed_samples(self), F64_ONE));
+      f64_add(CatmullRomEnvelope_elapsed_samples(self), F64_ONE));
 
     var points = CatmullRomEnvelope_points(self);
     var n = vec_len(points);

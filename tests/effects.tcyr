@@ -82,5 +82,18 @@ var ddry = effects_distortion_new(DISTORTION_HARD_CLIP, f64_from(10), 0);
 var dryo = effects_distortion_process_sample(ddry, C0_5);
 assert(f64_lt(f64_abs(f64_sub(dryo, C0_5)), NAAD_EPSILON), "mix 0.0 should be fully dry");
 
+# ================================================================
+# soft clip past the f64_exp overflow threshold. Before cyrius 6.5.35 this
+# returned NaN and survived the dry+wet blend in effects_distortion_process_
+# sample. `drive` is floored at 0 but deliberately NOT capped (the oracle,
+# rust-old/src/effects.rs:290, is `drive.max(0.0)` with no upper bound), so
+# the saturation must come from tanh itself.
+# ================================================================
+test_group("soft clip saturates past exp overflow");
+var dsat = effects_distortion_new(DISTORTION_SOFT_CLIP, f64_from(1000), F64_ONE);
+var sato = effects_distortion_process_sample(dsat, F64_ONE);
+assert_eq(naad_is_finite(sato), 1, "soft clip at drive 1000 stays finite");
+assert(f64_le(f64_abs(sato), F64_ONE), "soft clip at drive 1000 stays in [-1, 1]");
+
 var rc = assert_summary();
 syscall(60, rc);

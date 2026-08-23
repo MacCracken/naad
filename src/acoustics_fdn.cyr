@@ -75,7 +75,7 @@ fn naad_fdn_reverb_new(room_length, room_width, room_height, target_rt60, sample
     if (f64_le(room_height, 0) == 1) { return ERR_COMPUTATION; }
     if (f64_le(target_rt60, 0) == 1) { return ERR_COMPUTATION; }
     if (naad_is_finite(target_rt60) == 0) { return ERR_COMPUTATION; }
-    if (sample_rate == 0) { return ERR_COMPUTATION; }
+    if (sample_rate <= 0) { return ERR_COMPUTATION; }
 
     var config = fdn_config_for_room(room_length, room_width, room_height, target_rt60, sample_rate);
     var fdn = fdn_new(config);
@@ -225,7 +225,7 @@ fn _matrix_fdn_ms(i) {
 fn naad_fdn_matrix_new(target_rt60, sample_rate, mix) {
     if (f64_le(target_rt60, 0) == 1) { return ERR_COMPUTATION; }
     if (naad_is_finite(target_rt60) == 0) { return ERR_COMPUTATION; }
-    if (sample_rate == 0) { return ERR_COMPUTATION; }
+    if (sample_rate <= 0) { return ERR_COMPUTATION; }
 
     var sr = f64_from(sample_rate);
 

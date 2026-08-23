@@ -20,7 +20,7 @@ fn make_config(length, material) {
     var source = hvec3_new(F64_TWO, ear_height(), f64_from(3));
     var listener = hvec3_new(f64_from(6), ear_height(), f64_from(3));
     return naad_room_reverb_config_new(length, f64_from(6), f64_from(3),
-    material, source, listener, 48000);
+      material, source, listener, 48000);
 }
 
 fn test_config() { return make_config(f64_from(8), "concrete"); }

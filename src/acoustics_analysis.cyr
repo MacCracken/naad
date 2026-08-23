@@ -79,7 +79,7 @@ fn naad_analysis_room_metrics_new(c50, c80, d50, sti, rt60) {
 fn naad_analysis_estimate_rt60(ir, sample_rate) {
     var n = vec_len(ir);
     if (n == 0) { return 0; }
-    if (sample_rate == 0) { return 0; }
+    if (sample_rate <= 0) { return 0; }
 
     # Total energy of the impulse response.
     var total_energy = 0;
@@ -115,13 +115,15 @@ fn naad_analysis_estimate_rt60(ir, sample_rate) {
 # ImpulseResponse from the sample vec then feeds each goonj analysis metric;
 # RT60 uses naad's own energy-decay estimate. Returns the RoomMetrics pointer
 # on success, or a negative ERR_COMPUTATION if the IR is empty or the sample
-# rate is zero. `ir` is a vec of f64 samples, `sample_rate` an integer in Hz.
+# rate is not positive. `ir` is a vec of f64 samples, `sample_rate` an integer
+# in Hz. (The oracle types it `u32`; Cyrius ints are signed, so the guard is
+# `<= 0`, not the oracle's implicit `== 0`.)
 # Ports analyze_impulse_response.
 # ================================================================
 #must_use
 fn naad_analysis_analyze_impulse_response(ir, sample_rate) {
     if (vec_len(ir) == 0) { return ERR_COMPUTATION; }
-    if (sample_rate == 0) { return ERR_COMPUTATION; }
+    if (sample_rate <= 0) { return ERR_COMPUTATION; }
 
     # rt60 field is 0.0 here -- the analysis metrics do not read it.
     var goonj_ir = impulse_response_new(ir, sample_rate, 0);
@@ -183,7 +185,7 @@ fn naad_analysis_suggest_absorption(config, target_rt60) {
     if (f64_le(RoomReverbConfig_height(config), 0) == 1) { return ERR_COMPUTATION; }
 
     var room = acoustic_room_shoebox(RoomReverbConfig_length(config),
-    RoomReverbConfig_width(config), RoomReverbConfig_height(config), material);
+      RoomReverbConfig_width(config), RoomReverbConfig_height(config), material);
     var suggestions = suggest_absorption_placement(room, target_rt60);
 
     var advice = vec_new();
@@ -192,9 +194,9 @@ fn naad_analysis_suggest_absorption(config, target_rt60) {
     while (i < n) {
         var s = vec_get(suggestions, i);
         vec_push(advice, naad_analysis_wall_absorption_advice_new(
-        AbsorptionSuggestion_wall_index(s),
-        AbsorptionSuggestion_rt60_sensitivity(s),
-        AbsorptionSuggestion_current_absorption(s)));
+            AbsorptionSuggestion_wall_index(s),
+            AbsorptionSuggestion_rt60_sensitivity(s),
+            AbsorptionSuggestion_current_absorption(s)));
         i = i + 1;
     }
     return advice;

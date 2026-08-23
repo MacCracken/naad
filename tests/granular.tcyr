@@ -128,10 +128,10 @@ assert(f64_lt(f64_abs(f64_sub(granular_window_value(GRAIN_WINDOW_HANN, C0_5), F6
 assert(f64_lt(f64_abs(granular_window_value(GRAIN_WINDOW_HANN, F64_ONE)), C0_01), "hann(1) ~ 0");
 # Gaussian: peak at 0.5.
 assert(f64_gt(granular_window_value(GRAIN_WINDOW_GAUSSIAN, C0_5),
-granular_window_value(GRAIN_WINDOW_GAUSSIAN, 0)), "gaussian(0.5) > gaussian(0)");
+    granular_window_value(GRAIN_WINDOW_GAUSSIAN, 0)), "gaussian(0.5) > gaussian(0)");
 # Rectangular: always 1.
 assert(f64_lt(f64_abs(f64_sub(granular_window_value(GRAIN_WINDOW_RECTANGULAR, C0_3), F64_ONE)), NAAD_EPSILON),
-"rectangular(0.3) = 1");
+  "rectangular(0.3) = 1");
 
 # ================================================================
 test_group("spray jitter stays finite");
