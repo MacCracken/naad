@@ -30,8 +30,10 @@ still is, for any change to a ported module — "matches what Rust did".
   decimal in a comment. Generate with:
   `python3 -c "import struct;print(hex(struct.unpack('<Q',struct.pack('<d',X))[0]))"`.
 - **`enum` → integer `var` constants** (see `src/error.cyr`, `src/dsp_util.cyr`).
-- **`enum` errors → integer codes**; validators return `ERR_NONE` (0) or a
-  negative `ERR_*` from `src/error.cyr`. `Option<Error>` → the code directly.
+- **`enum` errors → integer codes**; validators return `NAAD_ERR_NONE` (0) or a
+  negative `NAAD_ERR_*` from `src/error.cyr`. `Option<Error>` → the code
+  directly. (These were bare `ERR_*` through 2.1.2; renamed in 2.1.3 to
+  de-collide from goonj in the flat namespace.)
 - **`Result<T>` / `Option<T>`** → sentinel returns (error code, or a NaN/None
   sentinel) unless a real payload is needed (then `lib/tagged.cyr`).
 - **`Vec<T>` → stdlib `vec`** (`vec_new`/`vec_push`/`vec_len`/`vec_get`/`vec_set`);
@@ -100,7 +102,7 @@ still is, for any change to a ported module — "matches what Rust did".
 | vocoder (synth) |  249 | ✅  9 | filter | Channel vocoder; SmallVec→vec bands. |
 | drum (synth)    |  501 | ✅ 12 | dsp_util, filter | Kick/snare/hat; xorshift + biquad. |
 | envelope        |  688 | ✅ 20 | (error), hisab | ADSR + curve morph via hisab `calc_catmull_rom`. |
-| additive (synth)|  411 | ✅ 21 | (error), hisab | Additive/DCT via hisab `num_dct`/`num_idct`; ERR_COMPUTATION on failure. |
+| additive (synth)|  411 | ✅ 21 | (error), hisab | Additive/DCT via hisab `num_dct`/`num_idct`; `NAAD_ERR_COMPUTATION` on failure. |
 | physical (synth)|  637 | ✅ 15 | delay, dsp_util, hisab | Karplus-Strong/waveguide; hisab `num_rk4` derivative via fn-ptr. |
 | wavetable       |  505 | ✅ 11 | dsp_util, dsp_spectral, hisab | Full: core + cubic B-spline morph (`next_sample_smooth` → `bspline_eval_1d`). |
 | dynamics        |  562 | ✅ 14 | dsp_util | compressor/limiter/gate/LevelDetector; dB LUT hot path. (envelope was a doc-only false dep.) |
@@ -166,10 +168,10 @@ work is in [`roadmap.md`](roadmap.md), not here.
   transitively for goonj's `logging`. Since pinned to a released tag alongside
   hisab (see `cyrius.cyml` / `cyrius.lock`).
 - ✅ **`[lib]` distlib bundle** (`dist/naad.cyr`) — assembled in dependency
-  order, cross-module symbol-collision audit clean at close-out. The audit is
-  **fn-scoped** and provably cannot see top-level `var` collisions; the residual
-  `ERR_*` shadowing of goonj's codes is pinned by `tests/bundle.tcyr` and
-  tracked as an open gate in [`roadmap.md`](roadmap.md).
+  order, cross-module symbol-collision audit clean at close-out. That audit was
+  **fn-scoped** and provably could not see top-level `var` collisions, which is
+  how the `ERR_*` shadowing of goonj's codes survived to 2.1.3; it was closed
+  there by the `NAAD_ERR_` rename, and the audit now covers `var`s too.
 - ✅ **Version 2.0.0** — `VERSION` bumped at port completion (per user
   directive: "version project 2.0.0 after port process"), having been held at
   1.2.5 throughout the port.

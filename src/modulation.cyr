@@ -3,7 +3,7 @@
 # Ports rust-old/src/modulation.rs. f32 -> f64 throughout. The `LfoShape`
 # and `LfoMode` enums become integer constants; serde/Display derives and
 # their round-trip test are dropped. Constructors return the struct pointer
-# on success or a negative ERR_* on invalid frequency/sample_rate.
+# on success or a negative NAAD_ERR_* on invalid frequency/sample_rate.
 #
 # The `ModulationSource` trait collapses to a free function
 # (modulation_lfo_next_modulation_value) that just calls next_value.
@@ -17,7 +17,7 @@
 #
 # Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE/TWO/
 # HALF/TAU, f64_add/sub/mul/div/neg/abs/clamp/sin/lt/gt/ge/le/from), error.cyr
-# (validate_sample_rate, naad_is_err, naad_is_finite, ERR_*), dsp_util.cyr
+# (validate_sample_rate, naad_is_err, naad_is_finite, NAAD_ERR_*), dsp_util.cyr
 # (xorshift32_signed_f32), and osc_core.cyr (osc_new/osc_next_sample/
 # osc_frequency/osc_sample_rate/osc_advance_phase_sine, WAVEFORM_*). No
 # `include` lines -- the entry orders the deps.
@@ -64,7 +64,7 @@ struct Lfo { shape; frequency; sample_rate; phase; mode; depth; sh_value; rng; }
 
 # ================================================================
 # modulation_lfo_new -- construct. Returns the struct pointer on success, or a
-# negative ERR_* (ERR_INVALID_SAMPLE_RATE / ERR_INVALID_PARAMETER) on failure.
+# negative NAAD_ERR_* (NAAD_ERR_INVALID_SAMPLE_RATE / NAAD_ERR_INVALID_PARAMETER) on failure.
 # The oracle seeds rng=42, advances it once, and derives the initial S&H value
 # from that first step so the first cycle isn't silent.
 # ================================================================
@@ -72,8 +72,14 @@ struct Lfo { shape; frequency; sample_rate; phase; mode; depth; sh_value; rng; }
 fn modulation_lfo_new(shape, frequency, sample_rate) {
     var e = validate_sample_rate(sample_rate);
     if (naad_is_err(e) == 1) { return e; }
-    if (f64_lt(frequency, 0) == 1) { return ERR_INVALID_PARAMETER; }
-    if (naad_is_finite(frequency) == 0) { return ERR_INVALID_PARAMETER; }
+    if (f64_lt(frequency, 0) == 1) { return NAAD_ERR_INVALID_PARAMETER; }
+    if (naad_is_finite(frequency) == 0) { return NAAD_ERR_INVALID_PARAMETER; }
+    # The oracle takes the 6-variant LfoShape enum and matches exhaustively
+    # (rust-old/src/modulation.rs:199-201). Unvalidated here, the dispatch chain
+    # falls through to the sample-and-hold slot whose re-roll is itself gated on
+    # shape == SAMPLE_AND_HOLD -- so the LFO emits a frozen DC value forever.
+    if (shape < MODULATION_LFO_SINE) { return NAAD_ERR_INVALID_PARAMETER; }
+    if (shape > MODULATION_LFO_SAMPLE_AND_HOLD) { return NAAD_ERR_INVALID_PARAMETER; }
 
     # Seed the PRNG and take the first step for the initial S&H value.
     var rng = alloc(8);
@@ -178,23 +184,31 @@ fn modulation_lfo_next_modulation_value(self) {
 
 # ================================================================
 # modulation_lfo_set_frequency -- validate then set. Rust's predicate is
-# `freq < 0.0 || !freq.is_finite()`. Returns ERR_NONE or ERR_INVALID_PARAMETER.
+# `freq < 0.0 || !freq.is_finite()`. Returns NAAD_ERR_NONE or NAAD_ERR_INVALID_PARAMETER.
 # ================================================================
 fn modulation_lfo_set_frequency(self, freq) {
-    if (f64_lt(freq, 0) == 1) { return ERR_INVALID_PARAMETER; }
-    if (naad_is_finite(freq) == 0) { return ERR_INVALID_PARAMETER; }
+    if (f64_lt(freq, 0) == 1) { return NAAD_ERR_INVALID_PARAMETER; }
+    if (naad_is_finite(freq) == 0) { return NAAD_ERR_INVALID_PARAMETER; }
     Lfo_set_frequency(self, freq);
-    return ERR_NONE;
+    return NAAD_ERR_NONE;
 }
 
 # ================================================================
 # modulation_lfo_set_shape / _set_mode -- setters.
 # ================================================================
 fn modulation_lfo_set_shape(self, shape) {
+    if (shape < MODULATION_LFO_SINE) { return NAAD_ERR_INVALID_PARAMETER; }
+    if (shape > MODULATION_LFO_SAMPLE_AND_HOLD) { return NAAD_ERR_INVALID_PARAMETER; }
     Lfo_set_shape(self, shape);
     return 0;
 }
 
+# Set the LFO output mode: MODULATION_LFO_BIPOLAR (-1.0..+1.0) or
+# MODULATION_LFO_UNIPOLAR (0.0..+1.0). Returns 0. Deliberately NOT range-checked,
+# unlike modulation_lfo_set_shape: any other value falls through to the bipolar
+# branch, which is the oracle's own default (rust-old/src/modulation.rs:99-100,
+# `mode: LfoMode::Bipolar`) and produces a correct full-amplitude signal. An
+# out-of-range shape, by contrast, produces frozen DC -- hence the asymmetry.
 fn modulation_lfo_set_mode(self, mode) {
     Lfo_set_mode(self, mode);
     return 0;
@@ -227,7 +241,7 @@ struct FmModulator { carrier; modulator; mod_index; carrier_base_freq; }
 
 # ================================================================
 # modulation_fm_new -- construct. Both operators are sine oscillators. Returns
-# the struct pointer on success or a negative ERR_* on invalid sr/frequency.
+# the struct pointer on success or a negative NAAD_ERR_* on invalid sr/frequency.
 # ================================================================
 #must_use
 fn modulation_fm_new(carrier_freq, mod_freq, mod_index, sample_rate) {
@@ -311,7 +325,7 @@ struct RingModulator { modulator; }
 
 # ================================================================
 # modulation_ring_new -- construct. Returns the struct pointer on success or a
-# negative ERR_* on invalid frequency/sample_rate.
+# negative NAAD_ERR_* on invalid frequency/sample_rate.
 # ================================================================
 #must_use
 fn modulation_ring_new(waveform, mod_freq, sample_rate) {

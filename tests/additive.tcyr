@@ -99,7 +99,7 @@ var j6 = 0;
 while (j6 < 16) { vec_push(orig6, Partial_amplitude(vec_get(p6, j6))); j6 = j6 + 1; }
 var coeffs6 = additive_compress_amplitudes_dct(s6, additive_num_partials(s6));
 assert_eq(vec_len(coeffs6), 16, "full roundtrip keeps 16 coeffs");
-assert_eq(additive_restore_amplitudes_dct(s6, coeffs6), ERR_NONE, "restore ok");
+assert_eq(additive_restore_amplitudes_dct(s6, coeffs6), NAAD_ERR_NONE, "restore ok");
 var rt_ok = 1;
 j6 = 0;
 while (j6 < 16) {
@@ -118,7 +118,7 @@ var j7 = 0;
 while (j7 < 16) { vec_push(orig7, Partial_amplitude(vec_get(p7, j7))); j7 = j7 + 1; }
 var coeffs7 = additive_compress_amplitudes_dct(s7, 4);
 assert_eq(vec_len(coeffs7), 4, "truncated keeps 4 coeffs");
-assert_eq(additive_restore_amplitudes_dct(s7, coeffs7), ERR_NONE, "restore truncated ok");
+assert_eq(additive_restore_amplitudes_dct(s7, coeffs7), NAAD_ERR_NONE, "restore truncated ok");
 var sse7 = 0;
 j7 = 0;
 while (j7 < 16) {
@@ -158,11 +158,11 @@ var p10 = AdditiveSynth_partials(s10);
 var dbuf = alloc(8 * 8);
 var jd = 0;
 while (jd < 8) { store64(dbuf + jd * 8, C0_5); jd = jd + 1; }
-assert_eq(num_dct(dbuf, 8), ERR_NONE, "hisab dct ok");
+assert_eq(num_dct(dbuf, 8), NAAD_ERR_NONE, "hisab dct ok");
 var coeffs10 = vec_new();
 jd = 0;
 while (jd < 8) { vec_push(coeffs10, load64(dbuf + jd * 8)); jd = jd + 1; }
-assert_eq(additive_restore_amplitudes_dct(s10, coeffs10), ERR_NONE, "restore respects-nyquist ok");
+assert_eq(additive_restore_amplitudes_dct(s10, coeffs10), NAAD_ERR_NONE, "restore respects-nyquist ok");
 var nyq2_ok = 1;
 var i10 = 0;
 while (i10 < 8) {
@@ -195,7 +195,7 @@ while (dci < 2) {
     while (dk < dcn) { vec_push(dpre, Partial_amplitude(vec_get(dp, dk))); dk = dk + 1; }
     var dcoeffs = additive_compress_amplitudes_dct(dsyn, additive_num_partials(dsyn));
     assert_eq(vec_len(dcoeffs), dcn, "compress keeps every coefficient off the FFT branch");
-    assert_eq(additive_restore_amplitudes_dct(dsyn, dcoeffs), ERR_NONE, "restore ok off the FFT branch");
+    assert_eq(additive_restore_amplitudes_dct(dsyn, dcoeffs), NAAD_ERR_NONE, "restore ok off the FFT branch");
     var dok = 1;
     dk = 0;
     while (dk < dcn) {

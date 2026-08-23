@@ -3,7 +3,7 @@
 # Ports rust-old/src/oscillator/core.rs. f32 -> f64 throughout. The
 # `Waveform` enum becomes integer constants; serde/Display derives are
 # dropped; the constructor returns the struct pointer on success (or a
-# negative ERR_* on invalid sample_rate/frequency). Methods become free
+# negative NAAD_ERR_* on invalid sample_rate/frequency). Methods become free
 # `osc_*` functions taking the struct pointer.
 #
 # Noise waveforms: like the oracle's `Option<noise::NoiseGenerator>`, the
@@ -14,7 +14,7 @@
 #
 # Requires (from the build/test unit): stdlib alloc/vec + math/ganita
 # (F64_ONE/TWO/HALF/TAU, f64_clamp/fract/sin/cos), error.cyr
-# (validate_frequency/validate_sample_rate, naad_is_err, ERR_*), and
+# (validate_frequency/validate_sample_rate, naad_is_err, NAAD_ERR_*), and
 # noise.cyr (noise_new, noise_next_sample, NOISE_*). No `include` lines.
 
 # ================================================================
@@ -92,11 +92,19 @@ struct Oscillator { waveform; frequency; phase; sample_rate; pulse_width; noise_
 
 # ================================================================
 # osc_new -- construct. Returns the struct pointer on success, or a negative
-# ERR_* on invalid sample_rate/frequency (frequency is not validated for the
+# NAAD_ERR_* on invalid sample_rate/frequency (frequency is not validated for the
 # noise waveforms, matching the oracle).
 # ================================================================
 #must_use
 fn osc_new(waveform, frequency, sample_rate) {
+    # The oracle's `waveform` is an 8-variant enum, so an out-of-range value is
+    # unrepresentable in Rust; Cyrius ints are signed and the port lost that.
+    # Without this, a bad id leaves noise_gen null and osc_next_sample's noise
+    # arm dereferences it (rust-old/src/oscillator/core.rs:189-197 matches
+    # exhaustively).
+    if (waveform < WAVEFORM_SINE) { return NAAD_ERR_INVALID_PARAMETER; }
+    if (waveform > WAVEFORM_BROWN_NOISE) { return NAAD_ERR_INVALID_PARAMETER; }
+
     var e = validate_sample_rate(sample_rate);
     if (naad_is_err(e) == 1) { return e; }
 
@@ -177,7 +185,12 @@ fn osc_next_sample(self) {
     } else {
         # Noise waveforms -- delegate to the owned NoiseGenerator (White =
         # xorshift, Pink = Voss-McCartney, Brown = integrated), matching oracle.
-        sample = noise_next_sample(Oscillator_noise_gen(self));
+        # The null check mirrors the oracle's `else { 0.0 }` arm
+        # (rust-old/src/oscillator/core.rs:189-197): the constructor rejects a
+        # bad waveform id, but Oscillator_set_waveform is a public accessor and
+        # can reach here with noise_gen still null.
+        var ng = Oscillator_noise_gen(self);
+        if (ng == 0) { sample = 0; } else { sample = noise_next_sample(ng); }
     }
 
     var ph = f64_add(t, dt);
@@ -234,13 +247,13 @@ fn osc_pulse_width(self) {
 }
 
 # ================================================================
-# osc_set_frequency -- validate then set. Returns ERR_NONE or negative ERR_*.
+# osc_set_frequency -- validate then set. Returns NAAD_ERR_NONE or negative NAAD_ERR_*.
 # ================================================================
 fn osc_set_frequency(self, freq) {
     var e = validate_frequency(freq, Oscillator_sample_rate(self));
     if (naad_is_err(e) == 1) { return e; }
     Oscillator_set_frequency(self, freq);
-    return ERR_NONE;
+    return NAAD_ERR_NONE;
 }
 
 # ================================================================

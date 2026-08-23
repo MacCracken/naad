@@ -37,7 +37,9 @@ that index buffers or convert `f64` to an integer. Non-finite (`NaN`, `±Inf`),
 negative, and out-of-range parameters are the input class that matters.
 
 Two porting hazards account for every defect found so far, and are the first
-place to look:
+place to look. The 2.1.3 sweep found sixteen more instances of the same two
+shapes — three of them reproducing as SIGSEGV — so treat them as the standing
+checklist rather than as historical anecdotes:
 
 - **A guard transliterated from the oracle can be half a bound.** The Rust
   original types many counts as unsigned, so negatives are unrepresentable and a
@@ -59,10 +61,35 @@ place to look:
   `tests/dsp_spectral.tcyr` exit 139 (SIGSEGV). A `degree < 0` guard was added
   on the same path.
 
-The one memory-safety defect predating those is 2.1.0's out-of-bounds read in
+A third hazard was added by the 2.1.3 sweep:
+
+- **`f64_to` does not saturate the way Rust's `as` casts do.** `as usize` maps
+  `NaN` and negatives to 0; `f64_to` overflows to `INT64_MIN`, which is neither
+  `> MAX` nor `== 0`, so a one-sided clamp written in the Rust idiom lets it
+  straight through to an index. 2.1.3 fixed five such sites
+  (`wavetable_read_interpolated`, both morph paths, `granular_next_sample`,
+  `db_to_amplitude_lut`). ⚠ **`INT64_MIN % 1024 == 0`**, so a power-of-two
+  buffer masks the defect entirely — and audio buffers are habitually
+  power-of-two. A reproducer needs a non-power-of-two length.
+
+2.1.3 also closed the largest availability issue: `lib/alloc.cyr` is a bump
+allocator with **no individual free**, so a per-call allocation on a streaming
+path is a permanent leak. `naad_convolution_process_block` was allocating three
+FFT scratch buffers per block — about 147 MB/s of unreclaimable memory for a
+0.5 s IR at 48 kHz, or ~8.6 GiB over a one-minute render. Three per-sample paths
+leaked similarly. `tests/allocbudget.tcyr` now bounds them.
+
+The memory-safety defect predating all of these is 2.1.0's out-of-bounds read in
 `fft_magnitudes` / `power_spectrum`: empty input fell through the FFT's
 early-return into a scale loop that did a `load64` on a zero-byte allocation
 with a `1/0 = +inf` scale factor.
+
+**Known and deliberately unfixed:** `fit_polynomial` rejects inputs at or above
+about 5 800 samples rather than faulting inside the stdlib's least-squares
+solver, which allocates an `nx × nx` matrix and never checks it. That guard
+closes the deterministic cliff, **not** the allocation-failure path at lower
+`nx` under a memory ceiling — see
+[ADR-0001](docs/adr/0001-fit-polynomial-sample-cap.md).
 
 What to expect from a report:
 

@@ -4,13 +4,13 @@
 # EQ Cookbook (Robert Bristow-Johnson) biquad coefficient formulas plus a
 # Cytomic/Simper state-variable filter with simultaneous LP/HP/BP/Notch
 # outputs. The `FilterType` enum becomes integer constants; serde derives are
-# dropped; validators return integer ERR_* codes and constructors return the
-# struct pointer on success (or a negative ERR_* on failure). Methods become
+# dropped; validators return integer NAAD_ERR_* codes and constructors return the
+# struct pointer on success (or a negative NAAD_ERR_* on failure). Methods become
 # free `filter_*` functions taking the struct pointer.
 #
 # Requires (from the build/test unit): stdlib alloc/vec + math/ganita
 # (F64_ONE/TWO/HALF/PI/TAU, f64_pow) and error.cyr (validate_frequency/
-# validate_sample_rate, flush_denormal, naad_is_finite, ERR_*). No `include`.
+# validate_sample_rate, flush_denormal, naad_is_finite, NAAD_ERR_*). No `include`.
 
 # ================================================================
 # FilterType -> integer constants (was `enum FilterType`).
@@ -57,15 +57,21 @@ struct StateVariableFilter { frequency; q; sample_rate; g; k; a1; a2; a3; ic1eq;
 # ================================================================
 
 # Create a biquad filter with gain (shelf/peak types). Returns the struct
-# pointer on success, or a negative ERR_* on invalid sample_rate/frequency/q.
+# pointer on success, or a negative NAAD_ERR_* on invalid sample_rate/frequency/q.
 #must_use
 fn filter_biquad_with_gain(filter_type, sample_rate, frequency, q, gain_db) {
     var e = validate_sample_rate(sample_rate);
     if (naad_is_err(e) == 1) { return e; }
     e = validate_frequency(frequency, sample_rate);
     if (naad_is_err(e) == 1) { return e; }
-    if (f64_le(q, 0) == 1) { return ERR_INVALID_PARAMETER; }
-    if (naad_is_finite(q) == 0) { return ERR_INVALID_PARAMETER; }
+    if (f64_le(q, 0) == 1) { return NAAD_ERR_INVALID_PARAMETER; }
+    if (naad_is_finite(q) == 0) { return NAAD_ERR_INVALID_PARAMETER; }
+    # The oracle matches an 8-variant enum (rust-old/src/filter.rs:135), so an
+    # out-of-range type cannot occur there. Unvalidated here it falls off the
+    # end of the coefficient chain with a0 still +0.0, making every coefficient
+    # NaN and latching NaN into z1/z2 forever.
+    if (filter_type < FILTER_LOWPASS) { return NAAD_ERR_INVALID_PARAMETER; }
+    if (filter_type > FILTER_PEAK) { return NAAD_ERR_INVALID_PARAMETER; }
 
     var self = alloc(sizeof(BiquadFilter));
     BiquadFilter_set_b0(self, F64_ONE);
@@ -84,7 +90,7 @@ fn filter_biquad_with_gain(filter_type, sample_rate, frequency, q, gain_db) {
     return self;
 }
 
-# Create a biquad filter (gain_db = 0.0). Returns pointer or negative ERR_*.
+# Create a biquad filter (gain_db = 0.0). Returns pointer or negative NAAD_ERR_*.
 #must_use
 fn filter_biquad_new(filter_type, sample_rate, frequency, q) {
     return filter_biquad_with_gain(filter_type, sample_rate, frequency, q, 0);
@@ -187,6 +193,13 @@ fn filter_biquad_compute_coefficients(self) {
         a0 = f64_add(F64_ONE, pk_ad);
         a1 = f64_mul(neg2, cos_w0);
         a2 = f64_sub(F64_ONE, pk_ad);
+    } else {
+        # Unreachable through the validated constructor, but
+        # BiquadFilter_set_filter_type is a public derive accessor. Unity
+        # pass-through so no path can publish NaN coefficients (a0 would
+        # otherwise still be +0.0 here, making inv_a0 +Inf).
+        b0 = F64_ONE;
+        a0 = F64_ONE;
     }
 
     var inv_a0 = f64_div(F64_ONE, a0);
@@ -221,19 +234,19 @@ fn filter_biquad_process_sample(self, input) {
 }
 
 # ================================================================
-# filter_biquad_set_params -- update parameters + recompute. Returns ERR_NONE
-# on success, or a negative ERR_* on invalid frequency/q.
+# filter_biquad_set_params -- update parameters + recompute. Returns NAAD_ERR_NONE
+# on success, or a negative NAAD_ERR_* on invalid frequency/q.
 # ================================================================
 fn filter_biquad_set_params(self, frequency, q, gain_db) {
     var e = validate_frequency(frequency, BiquadFilter_sample_rate(self));
     if (naad_is_err(e) == 1) { return e; }
-    if (f64_le(q, 0) == 1) { return ERR_INVALID_PARAMETER; }
-    if (naad_is_finite(q) == 0) { return ERR_INVALID_PARAMETER; }
+    if (f64_le(q, 0) == 1) { return NAAD_ERR_INVALID_PARAMETER; }
+    if (naad_is_finite(q) == 0) { return NAAD_ERR_INVALID_PARAMETER; }
     BiquadFilter_set_frequency(self, frequency);
     BiquadFilter_set_q(self, q);
     BiquadFilter_set_gain_db(self, gain_db);
     filter_biquad_compute_coefficients(self);
-    return ERR_NONE;
+    return NAAD_ERR_NONE;
 }
 
 # ================================================================
@@ -282,15 +295,15 @@ fn _filter_svf_compute(self) {
 }
 
 # Create a state variable filter. Returns the struct pointer on success, or a
-# negative ERR_* on invalid sample_rate/frequency/q.
+# negative NAAD_ERR_* on invalid sample_rate/frequency/q.
 #must_use
 fn filter_svf_new(frequency, q, sample_rate) {
     var e = validate_sample_rate(sample_rate);
     if (naad_is_err(e) == 1) { return e; }
     e = validate_frequency(frequency, sample_rate);
     if (naad_is_err(e) == 1) { return e; }
-    if (f64_le(q, 0) == 1) { return ERR_INVALID_PARAMETER; }
-    if (naad_is_finite(q) == 0) { return ERR_INVALID_PARAMETER; }
+    if (f64_le(q, 0) == 1) { return NAAD_ERR_INVALID_PARAMETER; }
+    if (naad_is_finite(q) == 0) { return NAAD_ERR_INVALID_PARAMETER; }
 
     var self = alloc(sizeof(StateVariableFilter));
     StateVariableFilter_set_frequency(self, frequency);
@@ -324,18 +337,18 @@ fn filter_svf_sample_rate(self) {
 }
 
 # ================================================================
-# filter_svf_set_params -- update frequency/q + recompute. Returns ERR_NONE
-# on success, or a negative ERR_* on invalid frequency/q.
+# filter_svf_set_params -- update frequency/q + recompute. Returns NAAD_ERR_NONE
+# on success, or a negative NAAD_ERR_* on invalid frequency/q.
 # ================================================================
 fn filter_svf_set_params(self, frequency, q) {
     var e = validate_frequency(frequency, StateVariableFilter_sample_rate(self));
     if (naad_is_err(e) == 1) { return e; }
-    if (f64_le(q, 0) == 1) { return ERR_INVALID_PARAMETER; }
-    if (naad_is_finite(q) == 0) { return ERR_INVALID_PARAMETER; }
+    if (f64_le(q, 0) == 1) { return NAAD_ERR_INVALID_PARAMETER; }
+    if (naad_is_finite(q) == 0) { return NAAD_ERR_INVALID_PARAMETER; }
     StateVariableFilter_set_frequency(self, frequency);
     StateVariableFilter_set_q(self, q);
     _filter_svf_compute(self);
-    return ERR_NONE;
+    return NAAD_ERR_NONE;
 }
 
 # ================================================================

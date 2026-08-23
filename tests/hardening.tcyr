@@ -1,0 +1,256 @@
+# hardening.tcyr -- the 2.1.3 P-1 hardening suite.
+#
+# Every assertion here is a NEGATIVE case: an out-of-range enum id, a negative
+# count, a NaN, or an oversized input. The 505-assertion parity suite contains
+# none of these, which is exactly why every defect this file pins survived to
+# 2.1.3 with the suite green.
+#
+# Kept in its own file deliberately. Most of these cases ABORT THE PROCESS
+# before the fix (SIGSEGV 139, SIGFPE 136, or exit 1 from `_vec_die`), not
+# merely fail an assertion. In a shared suite a pre-fix run dies partway through
+# and prints a confusing partial result; here the signal exit is unmistakable.
+#
+# Two classes of defect are pinned, both consequences of Cyrius semantics rather
+# than of the algorithms:
+#   1. Rust `usize`/enum guarantees erased by Cyrius's signed i64 -- a single
+#      upper-bound test is only HALF a bound.
+#   2. `f64_to` overflowing to INT64_MIN where Rust's `as` casts SATURATE.
+#
+# Runs against the shipped bundle (dist/naad.cyr), i.e. exactly the surface a
+# consumer links. Regenerate with `cyrius distlib` after changing src/.
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "dist/naad.cyr"
+
+alloc_init();
+
+var H_C0_5 = 0x3FE0000000000000;   # 0.5
+var H_ONE  = 0x3FF0000000000000;   # 1.0
+var H_TWO  = 0x4000000000000000;   # 2.0
+
+# ================================================================
+# A1 -- osc_new accepts any integer waveform.
+# Pre-fix: osc_new(8, ...) returns a VALID pointer with noise_gen null, and the
+# first osc_next_sample dereferences it -> SIGSEGV. The oracle matches an
+# 8-variant enum exhaustively AND carries an `else { 0.0 }` arm
+# (rust-old/src/oscillator/core.rs:189-197), so both halves are parity.
+# ================================================================
+test_group("A1: osc_new rejects an out-of-range waveform");
+assert_eq(naad_is_err(osc_new(8, f64_from(440), f64_from(44100))), 1, "waveform 8 rejected");
+assert_eq(naad_is_err(osc_new(0 - 1, f64_from(440), f64_from(44100))), 1, "waveform -1 rejected");
+# Controls: every valid id still constructs.
+var a1i = 0;
+var a1_ok = 1;
+while (a1i < 8) {
+    if (naad_is_err(osc_new(a1i, f64_from(440), f64_from(44100))) == 1) { a1_ok = 0; }
+    a1i = a1i + 1;
+}
+assert(a1_ok, "all 8 valid waveforms still construct");
+
+# The public derive accessor can still reach the noise arm with a null generator;
+# this is what proves the `else` guard rather than the constructor guard.
+test_group("A1: noise dispatch survives a null generator");
+var a1o = osc_new(WAVEFORM_SINE, f64_from(440), f64_from(44100));
+Oscillator_set_waveform(a1o, 8);
+assert_eq(naad_is_finite(osc_next_sample(a1o)), 1, "null noise_gen yields silence, not a fault");
+
+# ================================================================
+# A2 -- bspline_eval_1d had no `degree < 0` guard. degree <= -2 drives n_knots
+# to 0 while interior_count grows, so the knot loop stores out of bounds (or
+# through a null for degree <= -(n+1)). Oracle types degree `usize`.
+# ================================================================
+test_group("A2: bspline_eval_1d rejects a non-positive degree");
+var a2cps = vec_new();
+vec_push(a2cps, H_ONE);
+vec_push(a2cps, H_TWO);
+vec_push(a2cps, H_ONE);
+assert_eq(naad_is_finite(bspline_eval_1d(0 - 4, a2cps, H_C0_5)), 0, "degree -4 -> NaN, not an OOB store");
+assert_eq(naad_is_finite(bspline_eval_1d(0 - 2, a2cps, H_C0_5)), 0, "degree -2 -> NaN");
+# Control: the pre-existing `== 0` rejection must survive widening to `<= 0`.
+assert_eq(naad_is_finite(bspline_eval_1d(0, a2cps, H_C0_5)), 0, "control: degree 0 still rejected");
+
+# ================================================================
+# A3 -- wavetable_from_harmonics guarded `size == 0` but not `size < 0`, so a
+# negative size produced an EMPTY samples vec behind a valid pointer; the first
+# read then did `floor_i % 0` -> SIGFPE. Oracle takes `size: usize`.
+# ================================================================
+test_group("A3: wavetable_from_harmonics rejects negative counts");
+var a3amps = vec_new();
+vec_push(a3amps, H_ONE);
+assert_eq(naad_is_err(wavetable_from_harmonics(1, a3amps, 0 - 64)), 1, "negative size rejected");
+assert_eq(naad_is_err(wavetable_from_harmonics(0 - 1, a3amps, 128)), 1, "negative harmonics rejected");
+assert_eq(naad_is_err(wavetable_from_harmonics(1, a3amps, 0)), 1, "control: zero size still rejected");
+assert_eq(naad_is_err(wavetable_from_harmonics(1, a3amps, 128)), 0, "control: valid table still builds");
+
+# ================================================================
+# A4 -- fm_engine_new guarded `== 0` only; a negative count left `operators`
+# empty and the default SERIAL2 algorithm did vec_get(operators, 0) -> abort.
+# ================================================================
+test_group("A4: fm_engine_new rejects a negative operator count");
+assert_eq(naad_is_err(fm_engine_new(0 - 1, f64_from(44100))), 1, "negative operator count rejected");
+assert_eq(naad_is_err(fm_engine_new(0, f64_from(44100))), 1, "control: zero still rejected");
+assert_eq(naad_is_err(fm_engine_new(4, f64_from(44100))), 0, "control: 4 operators still valid");
+
+# ================================================================
+# A6 -- filter_biquad's coefficient chain had no `else`, so an out-of-range
+# type left a0 at +0.0, made every coefficient NaN, and latched NaN into z1/z2
+# permanently (reset clears state but not coefficients). Oracle matches an
+# 8-variant enum with no `_ =>` arm.
+# ================================================================
+test_group("A6: filter_biquad rejects an out-of-range filter type");
+assert_eq(naad_is_err(filter_biquad_new(8, f64_from(44100), f64_from(1000), H_ONE)), 1, "type 8 rejected");
+assert_eq(naad_is_err(filter_biquad_new(0 - 1, f64_from(44100), f64_from(1000), H_ONE)), 1, "type -1 rejected");
+var a6eq = eq_parametric_new(f64_from(44100));
+assert_eq(naad_is_err(eq_add_band(a6eq, 8, f64_from(1000), H_ONE, 0)), 1, "eq_add_band forwards the rejection");
+
+# The half that matters: the public setter can still reach the chain.
+test_group("A6: coefficient chain never publishes NaN");
+var a6f = filter_biquad_new(FILTER_LOWPASS, f64_from(44100), f64_from(1000), H_ONE);
+BiquadFilter_set_filter_type(a6f, 8);
+filter_biquad_compute_coefficients(a6f);
+assert_eq(naad_is_finite(filter_biquad_process_sample(a6f, H_C0_5)), 1, "unknown type -> unity pass-through, not NaN");
+
+# ================================================================
+# A7 -- tuning_table_custom validated ratio VALUES but not the COUNT. The
+# oracle's parameter is `[f32; 12]`, so the length was a type invariant;
+# erasing it to a vec dropped it, and tuning_note_to_freq reads index 9
+# unconditionally -> abort on the first lookup.
+# ================================================================
+test_group("A7: tuning_table_custom enforces exactly 12 ratios");
+var a7short = vec_new();
+vec_push(a7short, H_ONE);
+vec_push(a7short, H_TWO);
+vec_push(a7short, H_ONE);
+assert_eq(naad_is_err(tuning_table_custom("three", a7short, f64_from(440))), 1, "3 ratios rejected");
+var a7r = vec_new();
+var a7i = 0;
+while (a7i < 12) { vec_push(a7r, H_ONE); a7i = a7i + 1; }
+assert_eq(naad_is_err(tuning_table_custom("twelve", a7r, f64_from(440))), 0, "control: 12 ratios accepted");
+vec_push(a7r, H_ONE);
+assert_eq(naad_is_err(tuning_table_custom("thirteen", a7r, f64_from(440))), 1, "13 ratios rejected (!= 12, not just non-empty)");
+
+# ================================================================
+# A8 -- the f64_to truncation cluster. Rust's `as usize` SATURATES; f64_to
+# overflows to INT64_MIN, which no one-sided clamp catches.
+#
+# NOTE the buffer lengths below are deliberately NON-POWER-OF-TWO. INT64_MIN %
+# 1024 == 0, so with a power-of-two length the pre-fix code lands on index 0 and
+# the test passes WITHOUT the fix. Audio buffers are habitually power-of-two,
+# which is precisely why the parity suite never caught this.
+# ================================================================
+test_group("A8: db_to_amplitude_lut saturates its index");
+assert_eq(naad_is_finite(db_to_amplitude_lut(SPEC_NAN)), 0, "NaN dB -> NaN out (matches Rust), not an abort");
+
+test_group("A8: wavetable_read_interpolated saturates its index");
+var a8amps = vec_new();
+vec_push(a8amps, H_ONE);
+var a8wt = wavetable_from_harmonics(1, a8amps, 100);   # 100, NOT 128
+assert_eq(naad_is_finite(wavetable_read_interpolated(a8wt, SPEC_NAN)), 0, "NaN phase -> NaN, not an abort");
+
+test_group("A8: morph wavetables saturate their table index");
+var a8tables = vec_new();
+vec_push(a8tables, wavetable_from_harmonics(1, a8amps, 100));
+vec_push(a8tables, wavetable_from_harmonics(2, a8amps, 100));
+var a8m = wavetable_morph_new(a8tables, f64_from(440), f64_from(44100));
+wavetable_morph_set_morph(a8m, SPEC_NAN);
+assert_eq(naad_is_finite(wavetable_morph_next_sample(a8m)), 0, "NaN morph position -> NaN, not an abort");
+
+var a8t4 = vec_new();
+vec_push(a8t4, wavetable_from_harmonics(1, a8amps, 100));
+vec_push(a8t4, wavetable_from_harmonics(2, a8amps, 100));
+vec_push(a8t4, wavetable_from_harmonics(3, a8amps, 100));
+vec_push(a8t4, wavetable_from_harmonics(4, a8amps, 100));
+var a8m4 = wavetable_morph_new(a8t4, f64_from(440), f64_from(44100));
+wavetable_morph_set_morph(a8m4, SPEC_NAN);
+assert_eq(naad_is_finite(wavetable_morph_next_sample_smooth(a8m4)), 0, "NaN morph (B-spline path) -> NaN, not an abort");
+
+test_group("A8: granular read index saturates");
+var a8src = vec_new();
+var a8i = 0;
+while (a8i < 1000) { vec_push(a8src, H_C0_5); a8i = a8i + 1; }   # 1000, NOT 1024
+var a8g = granular_new(f64_from(44100));
+granular_set_source(a8g, a8src);
+granular_set_position(a8g, SPEC_NAN);
+var a8ok = 1;
+a8i = 0;
+while (a8i < 4096) {
+    if (naad_is_finite(granular_next_sample(a8g)) == 2) { a8ok = 0; }
+    a8i = a8i + 1;
+}
+assert(a8ok, "NaN grain position never aborts the process");
+
+# ================================================================
+# A9 -- the LFO shape was never validated. The dispatch chain has no default
+# and fell through to the sample-and-hold slot, whose re-roll is itself gated
+# on shape == SAMPLE_AND_HOLD -- so the LFO emitted a FROZEN DC value forever.
+# Plausible-looking, completely wrong audio, with no error anywhere.
+# ================================================================
+test_group("A9: LFO shape is validated");
+assert_eq(naad_is_err(modulation_lfo_new(6, f64_from(2), f64_from(44100))), 1, "shape 6 rejected");
+assert_eq(naad_is_err(modulation_lfo_new(0 - 1, f64_from(2), f64_from(44100))), 1, "shape -1 rejected");
+var a9l = modulation_lfo_new(MODULATION_LFO_SINE, f64_from(2), f64_from(44100));
+assert_eq(naad_is_err(modulation_lfo_set_shape(a9l, 42)), 1, "setter rejects shape 42");
+assert_eq(modulation_lfo_set_shape(a9l, MODULATION_LFO_TRIANGLE), 0, "control: valid shape still accepted");
+
+# The wrong-audio symptom itself: a valid LFO must actually move.
+var a9moved = 0;
+var a9first = modulation_lfo_next_value(a9l);
+var a9i = 0;
+while (a9i < 512) {
+    if (f64_eq(modulation_lfo_next_value(a9l), a9first) == 0) { a9moved = 1; }
+    a9i = a9i + 1;
+}
+assert(a9moved, "a valid LFO modulates rather than emitting frozen DC");
+
+# ================================================================
+# A10 -- mod_matrix source/destination ids were unvalidated where the oracle
+# used the ModSource / ModDestination enums. The scratch vecs hold exactly 8
+# slots, so an out-of-range id aborted out of a public setter.
+# ================================================================
+test_group("A10: mod_matrix validates source and destination ids");
+var a10m = mod_matrix_new();
+assert_eq(naad_is_err(mod_matrix_set_source(a10m, 8, H_ONE)), 1, "source 8 rejected");
+assert_eq(naad_is_err(mod_matrix_set_source(a10m, 0 - 1, H_ONE)), 1, "source -1 rejected");
+assert_eq(mod_matrix_set_source(a10m, 0, H_ONE), 0, "control: source 0 accepted");
+# f64 return -> no error channel; out-of-range reads as "nothing targets it".
+assert_eq(mod_matrix_get_destination(a10m, 8), 0, "destination 8 reads +0.0");
+assert_eq(mod_matrix_get_destination(a10m, 0 - 1), 0, "destination -1 reads +0.0");
+assert_eq(naad_is_err(mod_matrix_routing_new(8, 0, H_C0_5)), 1, "routing source 8 rejected");
+assert_eq(naad_is_err(mod_matrix_routing_new(0, 8, H_C0_5)), 1, "routing destination 8 rejected");
+assert_eq(naad_is_err(mod_matrix_routing_new(0, 0, H_C0_5)), 0, "control: valid routing still builds");
+
+# ================================================================
+# A5 -- fit_polynomial's sample cap. ganita_mat_least_squares allocates an
+# nx x nx Q internally and never checks it; GANITA_MAT_MAX_ELEMS makes that
+# return 0 from nx = 5793 up, after which ganita_mat_qr stores through the null.
+#
+# This is a DELIBERATE DIVERGENCE -- hisab 1.4.0 used a thin QR and returns
+# coefficients here. See docs/adr/0001-fit-polynomial-sample-cap.md.
+#
+# No positive control at nx = 5792: that allocates a 268 MB Q from a
+# never-freeing bump arena.
+# ================================================================
+test_group("A5: fit_polynomial caps its sample count");
+var a5xs = vec_new();
+var a5ys = vec_new();
+var a5i = 0;
+while (a5i < 5793) {
+    vec_push(a5xs, f64_from(a5i));
+    vec_push(a5ys, f64_from(a5i));
+    a5i = a5i + 1;
+}
+assert_eq(vec_len(fit_polynomial(a5xs, a5ys, 2)), 0, "nx = 5793 returns the empty vec, not a SIGSEGV");
+
+var a5sx = vec_new();
+var a5sy = vec_new();
+a5i = 0;
+while (a5i < 64) {
+    vec_push(a5sx, f64_from(a5i));
+    vec_push(a5sy, f64_from(a5i));
+    a5i = a5i + 1;
+}
+assert_eq(vec_len(fit_polynomial(a5sx, a5sy, 2)), 3, "control: the cap does not over-reject small inputs");
+
+var rc = assert_summary();
+syscall(60, rc);

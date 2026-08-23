@@ -33,7 +33,7 @@ assert(f64_gt(diff, C0_01), "different vowels should produce different spectra")
 # ================================================================
 test_group("morph");
 var synth_m = formant_synth_new(VOWEL_A, f64_from(SR));
-assert_eq(formant_synth_morph(synth_m, VOWEL_A, VOWEL_O, C0_5), ERR_NONE, "morph A->O ok");
+assert_eq(formant_synth_morph(synth_m, VOWEL_A, VOWEL_O, C0_5), NAAD_ERR_NONE, "morph A->O ok");
 var out_m = formant_synth_process_sample(synth_m, F64_ONE);
 assert(naad_is_finite(out_m), "morph output finite");
 

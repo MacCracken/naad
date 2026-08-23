@@ -95,7 +95,7 @@ fn fft_magnitudes(input) {
         i = i + 1;
     }
     var out = vec_new();
-    # Empty input: num_fft returns ERR_NONE for n<=1 without validating, so it
+    # Empty input: num_fft returns NAAD_ERR_NONE for n<=1 without validating, so it
     # would fall through to a half=1 read/scale loop over alloc(0) (OOB) with a
     # 1/0=+inf scale. Rust panics on the length-0 slice; we return empty. (n>=1
     # is in-bounds and agrees with the oracle.)
@@ -129,7 +129,7 @@ fn power_spectrum(input) {
         i = i + 1;
     }
     var out = vec_new();
-    # Empty input: num_fft returns ERR_NONE for n<=1 without validating, so it
+    # Empty input: num_fft returns NAAD_ERR_NONE for n<=1 without validating, so it
     # would fall through to a half=1 read/scale loop over alloc(0) (OOB) with a
     # 1/0=+inf scale. Rust panics on the length-0 slice; we return empty. (n>=1
     # is in-bounds and agrees with the oracle.)
@@ -466,16 +466,52 @@ fn detect_pitch_autocorr(buffer, sample_rate, min_hz, max_hz) {
 #must_use
 fn bspline_eval_1d(degree, control_points, t) {
     var n = vec_len(control_points);
-    if (degree == 0) { return SPEC_NAN; }
+    # `degree` is `usize` in the oracle (rust-old/src/dsp_util.rs:223), so
+    # `== 0` was the complete bound there. Signed here: degree <= -2 drives
+    # n_knots to 0 while interior_count grows, and the knot loop then stores
+    # through a null/undersized buffer.
+    if (degree <= 0) { return SPEC_NAN; }
     if (n <= degree) { return SPEC_NAN; }
     if (f64_lt(t, 0) == 1) { return SPEC_NAN; }
     if (f64_gt(t, F64_ONE) == 1) { return SPEC_NAN; }
+
+    var n_knots = n + degree + 1;
+    var knots = alloc(n_knots * 8);
+    if (knots == 0) { return SPEC_NAN; }
+    var cps = alloc(n * 8);
+    if (cps == 0) { return SPEC_NAN; }
+    var lifts = vec_new();
+    var li = 0;
+    while (li < n) {
+        vec_push(lifts, hvec3_new(0, 0, 0));
+        li = li + 1;
+    }
+    return _bspline_eval_1d_into(degree, control_points, t, knots, cps, lifts);
+}
+
+# ================================================================
+# _bspline_eval_1d_into -- the scratch-taking core of bspline_eval_1d. Same
+# math; the caller owns the three buffers so a per-sample caller can hoist them
+# out of its loop. lib/alloc.cyr is a bump allocator with NO individual free, so
+# the allocating wrapper above leaks ~192 bytes per call; the oracle's
+# equivalents are stack/Vec values dropped at scope exit. Mirrors the
+# naad_fdn_hadamard8 / _naad_fdn_hadamard8_into split in acoustics_fdn.cyr.
+#
+#   knots : byte buffer, >= (n + degree + 1) * 8
+#   cps   : byte buffer, >= n * 8 (holds HVec3 POINTERS, not values)
+#   lifts : vec of >= n pre-allocated HVec3, mutated in place via HVec3_set_x
+#
+# Guards are the caller's responsibility -- bspline_eval_1d has already applied
+# them. Returns SPEC_NAN (the port's None) on a hisab failure.
+# ================================================================
+#must_use
+fn _bspline_eval_1d_into(degree, control_points, t, knots, cps, lifts) {
+    var n = vec_len(control_points);
 
     # Clamped open-uniform knots: (degree+1) zeros, uniform interior,
     # (degree+1) ones. Total length n + degree + 1.
     var interior_count = n - degree - 1;
     var n_knots = n + degree + 1;
-    var knots = alloc(n_knots * 8);
     var idx = 0;
     var z = 0;
     while (z <= degree) {
@@ -497,11 +533,13 @@ fn bspline_eval_1d(degree, control_points, t) {
         z = z + 1;
     }
 
-    # Lift scalar control points into HVec3.x (as the Rust oracle does).
-    var cps = alloc(n * 8);
+    # Lift scalar control points into HVec3.x (as the Rust oracle does), reusing
+    # the caller's HVec3 slots rather than allocating fresh ones.
     var i = 0;
     while (i < n) {
-        store64(cps + i * 8, hvec3_new(vec_get(control_points, i), 0, 0));
+        var lv = vec_get(lifts, i);
+        HVec3_set_x(lv, vec_get(control_points, i));
+        store64(cps + i * 8, lv);
         i = i + 1;
     }
 
@@ -520,11 +558,13 @@ fn bspline_eval_1d(degree, control_points, t) {
 #
 # `degree` is `usize` in the oracle but signed here, so a negative degree is a
 # state Rust cannot express; it maps to the same empty vec. The
-# `ganita_mat_new` null check is load-bearing: ganita 1.1.4 (cyrius 6.5.35)
-# gave the constructor failure returns (non-positive dims, designs over
-# GANITA_MAT_MAX_ELEMS, alloc failure) where it previously always returned a
-# usable header, and `ganita_mat_least_squares` dereferences its argument
-# immediately.
+# `ganita_mat_new` null check is load-bearing but NOT sufficient on its own:
+# ganita 1.1.4 (cyrius 6.5.35) gave the constructor failure returns
+# (non-positive dims, designs over GANITA_MAT_MAX_ELEMS, alloc failure) where it
+# previously always returned a usable header, and `ganita_mat_least_squares`
+# dereferences its argument immediately. It also allocates its OWN nx x nx Q
+# internally and never checks that one -- which naad cannot see and cannot
+# patch. Hence the sample cap below.
 # ================================================================
 #must_use
 fn fit_polynomial(xs, ys, degree) {
@@ -534,6 +574,19 @@ fn fit_polynomial(xs, ys, degree) {
     if (nx != ny) { return out; }
     if (degree < 0) { return out; }
     if (nx <= degree) { return out; }
+
+    # DIVERGENCE FROM THE ORACLE -- see docs/adr/0001-fit-polynomial-sample-cap.md.
+    # ganita_mat_least_squares allocates an nx x nx orthogonal Q internally
+    # (lib/ganita.cyr:834) and never checks it; GANITA_MAT_MAX_ELEMS makes that
+    # return 0 from nx = 5793 up, after which ganita_mat_qr stores through the
+    # null. naad cannot patch lib/. hisab 1.4.0's least_squares_poly used a THIN
+    # QR (Q is nx x cols) and returns Some(coeffs) at every nx, so Rust succeeds
+    # where this returns the empty vec. Rejecting is strictly better than
+    # faulting, and it reuses the same empty-vec channel every other rejected
+    # input already uses. Derived from the upstream constant, not hardcoded, so
+    # it tracks a ganita bump. nx >= 1 here (degree >= 0 and nx > degree), so
+    # the division is safe.
+    if (nx > GANITA_MAT_MAX_ELEMS / nx) { return out; }
 
     var cols = degree + 1;
     # Vandermonde A: nx x cols, A[i][j] = xs[i]^j (built incrementally).

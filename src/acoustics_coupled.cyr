@@ -20,12 +20,12 @@
 # The wall material name resolves through naad_acoustics_material_by_name
 # (src/acoustics.cyr); the room config reuses RoomReverbConfig from
 # src/acoustics_room.cyr. Result<Self> -> struct pointer on success or a
-# negative ERR_COMPUTATION on unknown material / non-positive dimensions.
+# negative NAAD_ERR_COMPUTATION on unknown material / non-positive dimensions.
 #
 # Requires (from the build/test unit): stdlib alloc + math (f64_le), hisab
 # (hvec3_new), the goonj bundle (portal_new, acoustic_room_shoebox,
 # CoupledRooms, coupled_room_decay, CoupledDecay_*), and the naad L0 modules
-# error.cyr (ERR_COMPUTATION, naad_is_err) + acoustics.cyr
+# error.cyr (NAAD_ERR_COMPUTATION, naad_is_err) + acoustics.cyr
 # (naad_acoustics_material_by_name) + acoustics_room.cyr (RoomReverbConfig_*).
 # This file has no `include` lines.
 
@@ -103,17 +103,17 @@ struct CoupledDecayResult {
 # ================================================================
 # naad_coupled_build_room -- build a goonj AcousticRoom from a naad
 # RoomReverbConfig. Returns the room pointer on success, or a negative
-# ERR_COMPUTATION if the wall material name is unknown or the room
+# NAAD_ERR_COMPUTATION if the wall material name is unknown or the room
 # dimensions are not positive. Ports the private `build_room` helper.
 # ================================================================
 #must_use
 fn naad_coupled_build_room(config) {
     var material = naad_acoustics_material_by_name(RoomReverbConfig_wall_material_name(config));
-    if (material == 0) { return ERR_COMPUTATION; }
+    if (material == 0) { return NAAD_ERR_COMPUTATION; }
 
-    if (f64_le(RoomReverbConfig_length(config), 0) == 1) { return ERR_COMPUTATION; }
-    if (f64_le(RoomReverbConfig_width(config), 0) == 1) { return ERR_COMPUTATION; }
-    if (f64_le(RoomReverbConfig_height(config), 0) == 1) { return ERR_COMPUTATION; }
+    if (f64_le(RoomReverbConfig_length(config), 0) == 1) { return NAAD_ERR_COMPUTATION; }
+    if (f64_le(RoomReverbConfig_width(config), 0) == 1) { return NAAD_ERR_COMPUTATION; }
+    if (f64_le(RoomReverbConfig_height(config), 0) == 1) { return NAAD_ERR_COMPUTATION; }
 
     return acoustic_room_shoebox(RoomReverbConfig_length(config),
       RoomReverbConfig_width(config), RoomReverbConfig_height(config), material);
@@ -123,16 +123,16 @@ fn naad_coupled_build_room(config) {
 # naad_coupled_analyze_decay -- run the coupled-decay analysis for a
 # two-room configuration. Builds the underlying goonj rooms + portal, then
 # asks goonj for the double-slope decay parameters. Returns the
-# CoupledDecayResult pointer on success, or a negative ERR_COMPUTATION if
+# CoupledDecayResult pointer on success, or a negative NAAD_ERR_COMPUTATION if
 # either room's material name is unknown or any room dimension is
 # non-positive. Ports `analyze_coupled_decay`.
 # ================================================================
 #must_use
 fn naad_coupled_analyze_decay(config) {
     var room_a = naad_coupled_build_room(CoupledRoomConfig_room_a(config));
-    if (naad_is_err(room_a) == 1) { return ERR_COMPUTATION; }
+    if (naad_is_err(room_a) == 1) { return NAAD_ERR_COMPUTATION; }
     var room_b = naad_coupled_build_room(CoupledRoomConfig_room_b(config));
-    if (naad_is_err(room_b) == 1) { return ERR_COMPUTATION; }
+    if (naad_is_err(room_b) == 1) { return NAAD_ERR_COMPUTATION; }
 
     var np = CoupledRoomConfig_portal(config);
     var portal = portal_new(CoupledPortal_position(np), CoupledPortal_normal(np),

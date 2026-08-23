@@ -2,11 +2,11 @@
 #
 # Ports rust-old/src/oscillator/sub.rs. f32 -> f64 throughout. The
 # `SubOctave` enum becomes integer constants; serde derives/tests are
-# dropped; the constructor returns the struct pointer or a negative ERR_*.
+# dropped; the constructor returns the struct pointer or a negative NAAD_ERR_*.
 # The sub embeds an Oscillator pointer (built via osc_new from osc_core.cyr).
 #
 # Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE/TWO,
-# f64_div/mul/max/from) and error.cyr (naad_is_err, ERR_NONE) and
+# f64_div/mul/max/from) and error.cyr (naad_is_err, NAAD_ERR_NONE) and
 # osc_core.cyr (osc_new/osc_next_sample/osc_set_frequency, WAVEFORM_*).
 # No `include` lines.
 
@@ -31,7 +31,7 @@ struct SubOscillator { osc; octave; base_frequency; level; }
 
 # ================================================================
 # subosc_new -- construct. Divides base_frequency by 2 (Down1) or 4 (Down2),
-# floored at 0.1 Hz. Returns the struct pointer, or a negative ERR_* if the
+# floored at 0.1 Hz. Returns the struct pointer, or a negative NAAD_ERR_* if the
 # underlying Oscillator failed to build.
 # ================================================================
 #must_use
@@ -61,7 +61,7 @@ fn subosc_next_sample(self) {
 
 # ================================================================
 # subosc_set_base_frequency -- update base frequency (sub freq derived).
-# Validates before mutating. Returns ERR_NONE or a negative ERR_*.
+# Validates before mutating. Returns NAAD_ERR_NONE or a negative NAAD_ERR_*.
 # ================================================================
 fn subosc_set_base_frequency(self, freq) {
     var divisor = F64_TWO;
@@ -69,11 +69,11 @@ fn subosc_set_base_frequency(self, freq) {
     var e = osc_set_frequency(SubOscillator_osc(self), f64_max(f64_div(freq, divisor), SUBOSC_C0_1));
     if (naad_is_err(e) == 1) { return e; }
     SubOscillator_set_base_frequency(self, freq);
-    return ERR_NONE;
+    return NAAD_ERR_NONE;
 }
 
 # ================================================================
-# subosc_set_octave -- change octave division. Returns ERR_NONE or ERR_*.
+# subosc_set_octave -- change octave division. Returns NAAD_ERR_NONE or NAAD_ERR_*.
 # ================================================================
 fn subosc_set_octave(self, octave) {
     var divisor = F64_TWO;
@@ -82,7 +82,7 @@ fn subosc_set_octave(self, octave) {
     var e = osc_set_frequency(SubOscillator_osc(self), f64_max(f64_div(base, divisor), SUBOSC_C0_1));
     if (naad_is_err(e) == 1) { return e; }
     SubOscillator_set_octave(self, octave);
-    return ERR_NONE;
+    return NAAD_ERR_NONE;
 }
 
 # ================================================================

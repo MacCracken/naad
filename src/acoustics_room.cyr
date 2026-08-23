@@ -15,13 +15,13 @@
 #   hisab::Vec3::new                     -> hvec3_new(x, y, z)
 # The wall material name resolves through naad_acoustics_material_by_name
 # (src/acoustics.cyr). Result<Self> -> struct pointer on success or a
-# negative ERR_COMPUTATION on unknown material / non-positive dimensions.
+# negative NAAD_ERR_COMPUTATION on unknown material / non-positive dimensions.
 #
 # Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE,
 # f64_add/mul/le, f64_abs/lt), hisab (hvec3_new), the goonj bundle
 # (acoustic_room_shoebox, ir_config_new, generate_ir,
 # multiband_ir_to_broadband, ImpulseResponse_samples), and the naad L0
-# modules error.cyr (ERR_COMPUTATION, naad_is_err) + acoustics.cyr
+# modules error.cyr (NAAD_ERR_COMPUTATION, naad_is_err) + acoustics.cyr
 # (naad_acoustics_material_by_name). This file has no `include` lines.
 
 # ================================================================
@@ -82,17 +82,17 @@ struct RoomReverb {
 # shoebox room in goonj, generates a broadband impulse response via
 # image-source + diffuse-rain, and stores it for sample-by-sample
 # convolution. Returns the struct pointer on success, or a negative
-# ERR_COMPUTATION if the wall material name is unknown or the room
+# NAAD_ERR_COMPUTATION if the wall material name is unknown or the room
 # dimensions are not positive. Ports RoomReverb::new.
 # ================================================================
 #must_use
 fn naad_room_reverb_new(config) {
     var material = naad_acoustics_material_by_name(RoomReverbConfig_wall_material_name(config));
-    if (material == 0) { return ERR_COMPUTATION; }
+    if (material == 0) { return NAAD_ERR_COMPUTATION; }
 
-    if (f64_le(RoomReverbConfig_length(config), 0) == 1) { return ERR_COMPUTATION; }
-    if (f64_le(RoomReverbConfig_width(config), 0) == 1) { return ERR_COMPUTATION; }
-    if (f64_le(RoomReverbConfig_height(config), 0) == 1) { return ERR_COMPUTATION; }
+    if (f64_le(RoomReverbConfig_length(config), 0) == 1) { return NAAD_ERR_COMPUTATION; }
+    if (f64_le(RoomReverbConfig_width(config), 0) == 1) { return NAAD_ERR_COMPUTATION; }
+    if (f64_le(RoomReverbConfig_height(config), 0) == 1) { return NAAD_ERR_COMPUTATION; }
 
     var room = acoustic_room_shoebox(RoomReverbConfig_length(config),
       RoomReverbConfig_width(config), RoomReverbConfig_height(config), material);

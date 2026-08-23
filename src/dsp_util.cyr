@@ -249,7 +249,14 @@ fn db_to_amplitude_lut(db) {
     if (f64_ge(db, DB_LUT_MAX) == 1) { return vec_get(table, 255); }
     var normalized = f64_div(f64_sub(db, DB_LUT_MIN), DB_LUT_RANGE);
     var idx = f64_mul(normalized, f64_from(255));
+    # Two-sided, matching Rust's saturating `idx as usize`
+    # (rust-old/src/dsp_util.rs:645-650); f64_to overflows to INT64_MIN where
+    # Rust saturates to 0. A NaN idx still yields NaN out -- Rust computes
+    # table[0]*(1-NaN) + table[1]*NaN = NaN -- so this is parity, not a
+    # clamp-to-table[0].
     var i0 = f64_to(idx);
+    if (i0 < 0) { i0 = 0; }
+    if (i0 > 255) { i0 = 255; }
     var i1 = i0 + 1;
     if (i1 > 255) { i1 = 255; }
     var frac = f64_sub(idx, f64_from(i0));
@@ -269,6 +276,12 @@ fn db_to_amplitude_lut(db) {
 var U32_MASK = 0xFFFFFFFF;
 var U32_MAXF = 0x41EFFFFFFFE00000;   # not used; kept for reference (u32::MAX as f64)
 
+# Advance the xorshift32 PRNG one step and return the new state, which is also
+# the raw output. `sp` is a POINTER to a 64-bit slot holding the u32 state --
+# Rust took `&mut u32` (rust-old/src/dsp_util.rs), and u32 wrap is emulated with
+# a 0xFFFFFFFF mask after each left shift. A zero state is reset to 1, since 0
+# is the xorshift fixed point and would loop forever.
+#must_use
 fn xorshift32(sp) {
     var x = load64(sp) & U32_MASK;
     if (x == 0) { x = 1; }

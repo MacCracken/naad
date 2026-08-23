@@ -46,7 +46,7 @@ assert(naad_is_err(filter_biquad_new(FILTER_LOWPASS, f64_from(SR), f64_from(3000
 # ================================================================
 test_group("set params");
 var sp = filter_biquad_new(FILTER_LOWPASS, f64_from(SR), f64_from(FREQ_1K), C0_707);
-assert_eq(filter_biquad_set_params(sp, f64_from(2000), F64_ONE, 0), ERR_NONE, "set_params(2000,1,0) ok");
+assert_eq(filter_biquad_set_params(sp, f64_from(2000), F64_ONE, 0), NAAD_ERR_NONE, "set_params(2000,1,0) ok");
 assert(naad_is_err(filter_biquad_set_params(sp, 0, F64_ONE, 0)), "set_params(0,1,0) err");
 
 # ================================================================

@@ -7,12 +7,12 @@
 # process_sample becomes a `ReverbStereo` struct (left, right). The fixed
 # `[DampedComb; 4]` / `[ReverbAllpass; 2]` inline arrays become stdlib vecs of
 # struct pointers. Constructor returns the struct pointer on success or a
-# negative ERR_* on invalid sample_rate.
+# negative NAAD_ERR_* on invalid sample_rate.
 #
 # Requires (from the build/test unit): stdlib alloc/vec + math/ganita
 # (F64_ONE/HALF, f64_add/sub/mul/div/neg/clamp/max/floor/from/to) and the L0
 # modules error.cyr (validate_sample_rate, flush_denormal, naad_is_finite,
-# ERR_*) and delay.cyr (delay_line_*). The module file has no `include` lines.
+# NAAD_ERR_*) and delay.cyr (delay_line_*). The module file has no `include` lines.
 
 # ================================================================
 # Float literals (IEEE-754 bit patterns).
@@ -153,7 +153,7 @@ fn reverb_make_ap(base, offset, scale) {
 # reverb_new -- create a reverb. `decay` (0..1) controls feedback, `damping`
 # (0..1) high-frequency damping, `pre_delay_ms` pre-delay, `mix` (0..1)
 # wet/dry, `sample_rate` in Hz. Returns the struct pointer on success or a
-# negative ERR_* on invalid sample_rate. Ports Reverb::new.
+# negative NAAD_ERR_* on invalid sample_rate. Ports Reverb::new.
 # ================================================================
 #must_use
 fn reverb_new(decay, damping, pre_delay_ms, mix, sample_rate) {

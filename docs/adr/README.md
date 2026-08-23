@@ -19,4 +19,6 @@ Decisions about naad — what we chose, the context, and the consequences we acc
 
 ## Index
 
-_No ADRs yet. Add the first as `0001-kebab-case-title.md`._
+| ADR | Title | Status |
+|---|---|---|
+| [0001](0001-fit-polynomial-sample-cap.md) | `fit_polynomial` caps its sample count, diverging from the oracle | Accepted |

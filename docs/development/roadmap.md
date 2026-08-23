@@ -17,12 +17,13 @@ committed to — nothing here is speculative, and no milestone is invented.
 ### Release engineering
 
 - [~] **Clean gate enforced in CI.** `cyrius audit` (fmt · lint · docs · tests ·
-      bench) passes locally, but the only *quality* step in
-      `.github/workflows/ci.yml` is a bare `cyrius test`. Wire the rest in:
-      `cyrius fmt <file> --check`,
+      bench) exits 0 locally as of 2.1.3. CI enforces the changelog gate, the
+      symbol-collision gate, the bundle-freshness gate and `cyrius test` — but
+      still not fmt, lint or deny. Wire the rest in: `cyrius fmt <file> --check`,
       `cyrius lint <file>`, `cyrius deny src/main.cyr`, and `cyrius bench` over
-      `tests/hotpath.bcyr` / `tests/naad.bcyr`. Until then the gate is available,
-      not enforced — a fmt or lint regression reaches `main` unchallenged.
+      `tests/hotpath.bcyr` / `tests/naad.bcyr`. Until then those three are
+      available, not enforced — a fmt or lint regression reaches `main`
+      unchallenged.
       (Use `--check`: bare `cyrius fmt <file>` **rewrites the file in place**.)
 - [ ] **Fuzz harnesses.** `cyrius fuzz` runs `fuzz/*.fcyr`; naad has no `fuzz/`
       directory yet. Harnesses first, then a CI step. The natural first targets
@@ -31,17 +32,37 @@ committed to — nothing here is speculative, and no milestone is invented.
 
 ### Surface polish
 
-- [ ] **Undocumented public functions.** `cyrius audit` reports 8 on every run.
-      Close them out and hold the line with `cyrius doc --check <file>`.
-- [ ] **`ERR_*` prefix pass.** naad's error codes are top-level `var` constants
-      sharing Cyrius's flat distlib namespace with goonj's: naad's
-      `ERR_INVALID_FREQUENCY` (-1) shadows goonj's (-3) when both bundles are
-      concatenated. The collision audit is fn-scoped and provably cannot see
-      this — it is pinned instead by `tests/bundle.tcyr` and flagged in the
-      `[lib]` note in `cyrius.cyml`. The fix is the same de-collision move
-      2.1.1 made for `naad_amplitude_to_db` / `naad_db_to_amplitude`, applied
-      to the error surface. Breaking for consumers, so it wants a release of
-      its own with a migration note.
+- [x] **Undocumented public functions** — closed in 2.1.3. `cyrius audit` now
+      exits **0** (fmt · lint · docs · tests · bench all clean), the first time
+      in the project's history. Seven of the eight sat *second* under a shared
+      banner that already named them, so none was genuinely undocumented — the
+      docs gate attributes a banner to the first `fn` that follows it. Hold the
+      line with `cyrius doc --check <file>`.
+- [x] **`ERR_*` prefix pass** — shipped in 2.1.3. naad's six error constants
+      were top-level `var`s sharing Cyrius's flat distlib namespace with
+      goonj's, and naad's `ERR_INVALID_FREQUENCY` (-1) shadowed goonj's (-3)
+      when both bundles were concatenated. The collision audit was fn-scoped
+      and provably could not see it. Renamed to `NAAD_ERR_*`, the same
+      de-collision move 2.1.1 made for `naad_amplitude_to_db` /
+      `naad_db_to_amplitude`. The bundle's top-level symbol set is now disjoint
+      from hisab, goonj, sakshi, abaco and the stdlib in all five directions.
+      Breaking for consumers — see the 2.1.3 migration note.
+
+- [ ] **Prefix the remaining bare public names.** 2.1.1 took the dB helpers,
+      2.1.3 took the error block; `FILTER_LOWPASS`..`FILTER_PEAK` and
+      `VOICE_NONE` still collide by name with `nidhi` and `garjan`, both
+      co-linked with naad inside dhvani today. Inert — every shared value agrees
+      and nidhi's ids sit inside naad's valid band — so this is forward risk,
+      not a live defect. The Tier-1 bare names (`lerp`, `rms`, `peak`,
+      `normalize`, `chromagram`, `crossfade_equal_power`) have zero collisions
+      today but are the most likely future ones. Breaking: a 2.2.0 wave landed
+      with the sibling refreshes, not a patch.
+- [ ] **Retire ADR-0001.** `fit_polynomial`'s sample cap is a knowing divergence
+      forced by ganita materialising a full `nx × nx` Q. A thin QR over the
+      Vandermonde `fit_polynomial` already builds restores parity, drops peak
+      allocation to `nx × cols` and removes the cap — but changes rounding for
+      every currently-working input, so it is a minor release. Either that, or
+      the upstream fix: give `ganita_mat_least_squares` a failure return.
 
 ### Downstream
 

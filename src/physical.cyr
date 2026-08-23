@@ -2,7 +2,7 @@
 # RK4 Moog ladder). Ports rust-old/src/synth/physical.rs. f32 -> f64 throughout.
 #
 # Serde derives + Display are dropped. Constructors return the struct pointer on
-# success or a negative ERR_* on invalid frequency/sample_rate (mirroring the
+# success or a negative NAAD_ERR_* on invalid frequency/sample_rate (mirroring the
 # Rust `Result` error paths). Methods become free `physical_*` functions taking
 # the struct pointer. `&mut u32` PRNG state -> a pointer to an 8-byte slot
 # stepped via dsp_util's xorshift32_signed_f32. `&mut [f32]` buffers -> vec.
@@ -22,7 +22,7 @@
 #
 # Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE/TWO/
 # HALF/PI/TAU, f64_clamp), ganita (f64_tanh), error.cyr (validate_frequency/
-# validate_sample_rate, flush_denormal, naad_is_err, ERR_*), dsp_util
+# validate_sample_rate, flush_denormal, naad_is_err, NAAD_ERR_*), dsp_util
 # (xorshift32_signed_f32), delay.cyr (delay_line_*). The module has no includes.
 
 # ================================================================
@@ -51,7 +51,7 @@ struct KarplusStrong { delay_line; feedback; damping_prev; brightness; delay_sam
     sample_rate; frequency; rng; }
 
 # Create a Karplus-Strong string model. Returns the struct pointer on success,
-# or a negative ERR_* on invalid sample_rate/frequency.
+# or a negative NAAD_ERR_* on invalid sample_rate/frequency.
 #must_use
 fn physical_ks_new(frequency, decay, brightness, sample_rate) {
     var e = validate_sample_rate(sample_rate);
@@ -101,14 +101,14 @@ fn physical_ks_pluck(self) {
     return 0;
 }
 
-# Set the fundamental frequency. Returns ERR_NONE on success, negative ERR_* if
+# Set the fundamental frequency. Returns NAAD_ERR_NONE on success, negative NAAD_ERR_* if
 # the frequency is out of (0, Nyquist) or non-finite.
 fn physical_ks_set_frequency(self, frequency) {
     var e = validate_frequency(frequency, KarplusStrong_sample_rate(self));
     if (naad_is_err(e) == 1) { return e; }
     KarplusStrong_set_frequency(self, frequency);
     KarplusStrong_set_delay_samples(self, f64_div(KarplusStrong_sample_rate(self), frequency));
-    return ERR_NONE;
+    return NAAD_ERR_NONE;
 }
 
 # Generate the next sample.
@@ -173,7 +173,7 @@ struct Waveguide { forward_delay; backward_delay; delay_samples; damping; juncti
     sample_rate; }
 
 # Create a bidirectional waveguide. Returns the struct pointer on success, or a
-# negative ERR_* on invalid sample_rate/frequency.
+# negative NAAD_ERR_* on invalid sample_rate/frequency.
 #must_use
 fn physical_wg_new(frequency, damping, sample_rate) {
     var e = validate_sample_rate(sample_rate);
@@ -274,7 +274,7 @@ fn physical_wg_is_active(self) {
 struct MoogLadder { cutoff_hz; resonance; sample_rate; state; scratch; }
 
 # Create a Moog-ladder filter. Returns the struct pointer on success, or a
-# negative ERR_* on invalid sample_rate/cutoff.
+# negative NAAD_ERR_* on invalid sample_rate/cutoff.
 #must_use
 fn physical_moog_new(cutoff_hz, resonance, sample_rate) {
     var e = validate_sample_rate(sample_rate);
@@ -297,13 +297,13 @@ fn physical_moog_new(cutoff_hz, resonance, sample_rate) {
     return self;
 }
 
-# Set the cutoff frequency. Returns ERR_NONE on success, negative ERR_* if out
+# Set the cutoff frequency. Returns NAAD_ERR_NONE on success, negative NAAD_ERR_* if out
 # of the valid (0, Nyquist) range.
 fn physical_moog_set_cutoff(self, cutoff_hz) {
     var e = validate_frequency(cutoff_hz, MoogLadder_sample_rate(self));
     if (naad_is_err(e) == 1) { return e; }
     MoogLadder_set_cutoff_hz(self, cutoff_hz);
-    return ERR_NONE;
+    return NAAD_ERR_NONE;
 }
 
 # Set the resonance amount (clamped to [0, 4]).

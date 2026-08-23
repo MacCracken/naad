@@ -10,14 +10,14 @@
 # Rust's serde derives (and the lazy Fdn/buffer reconstruction they require)
 # are dropped -- with no serde the inner FDN / delay buffers are always live,
 # so the `Option<Fdn>` and `ensure_buffers` deser paths collapse away.
-# Constructors return the struct pointer on success or a negative ERR_* on
-# invalid parameters (Rust's ComputationError -> ERR_COMPUTATION). Fixed
+# Constructors return the struct pointer on success or a negative NAAD_ERR_* on
+# invalid parameters (Rust's ComputationError -> NAAD_ERR_COMPUTATION). Fixed
 # `[T; 8]` inline arrays become stdlib vecs; `Vec<f32>` ring buffers become
 # vecs of vecs.
 #
 # Requires (from the build/test unit): stdlib alloc/vec + math/ganita
 # (F64_ONE/HALF, f64_add/sub/mul/div/neg/abs/max/clamp/pow/sqrt/from/to/gt/le)
-# and the L0 modules error.cyr (flush_denormal, naad_is_finite, ERR_*) and the
+# and the L0 modules error.cyr (flush_denormal, naad_is_finite, NAAD_ERR_*) and the
 # goonj fdn engine (fdn_config_for_room / fdn_new / fdn_process_sample /
 # fdn_reset). The module file has no `include` lines.
 
@@ -66,16 +66,16 @@ struct FdnReverb {
 # naad_fdn_reverb_new -- create a goonj-backed FDN reverb. Room dimensions
 # drive the delay-line lengths (larger room = longer delays = spacier tail);
 # `target_rt60` sets decay time. Returns the struct pointer on success, or
-# ERR_COMPUTATION if any parameter is out of range. Ports FdnReverb::new.
+# NAAD_ERR_COMPUTATION if any parameter is out of range. Ports FdnReverb::new.
 # ================================================================
 #must_use
 fn naad_fdn_reverb_new(room_length, room_width, room_height, target_rt60, sample_rate, mix) {
-    if (f64_le(room_length, 0) == 1) { return ERR_COMPUTATION; }
-    if (f64_le(room_width, 0) == 1) { return ERR_COMPUTATION; }
-    if (f64_le(room_height, 0) == 1) { return ERR_COMPUTATION; }
-    if (f64_le(target_rt60, 0) == 1) { return ERR_COMPUTATION; }
-    if (naad_is_finite(target_rt60) == 0) { return ERR_COMPUTATION; }
-    if (sample_rate <= 0) { return ERR_COMPUTATION; }
+    if (f64_le(room_length, 0) == 1) { return NAAD_ERR_COMPUTATION; }
+    if (f64_le(room_width, 0) == 1) { return NAAD_ERR_COMPUTATION; }
+    if (f64_le(room_height, 0) == 1) { return NAAD_ERR_COMPUTATION; }
+    if (f64_le(target_rt60, 0) == 1) { return NAAD_ERR_COMPUTATION; }
+    if (naad_is_finite(target_rt60) == 0) { return NAAD_ERR_COMPUTATION; }
+    if (sample_rate <= 0) { return NAAD_ERR_COMPUTATION; }
 
     var config = fdn_config_for_room(room_length, room_width, room_height, target_rt60, sample_rate);
     var fdn = fdn_new(config);
@@ -219,13 +219,13 @@ fn _matrix_fdn_ms(i) {
 # naad_fdn_matrix_new -- create a color-free Hadamard-FDN reverb. `target_rt60`
 # sets decay time; delay lengths are primes around 30-80 ms scaled to the
 # sample rate; per-line damping gains give a 60 dB drop per RT60. Returns the
-# struct pointer, or ERR_COMPUTATION on bad parameters. Ports MatrixFdn::new.
+# struct pointer, or NAAD_ERR_COMPUTATION on bad parameters. Ports MatrixFdn::new.
 # ================================================================
 #must_use
 fn naad_fdn_matrix_new(target_rt60, sample_rate, mix) {
-    if (f64_le(target_rt60, 0) == 1) { return ERR_COMPUTATION; }
-    if (naad_is_finite(target_rt60) == 0) { return ERR_COMPUTATION; }
-    if (sample_rate <= 0) { return ERR_COMPUTATION; }
+    if (f64_le(target_rt60, 0) == 1) { return NAAD_ERR_COMPUTATION; }
+    if (naad_is_finite(target_rt60) == 0) { return NAAD_ERR_COMPUTATION; }
+    if (sample_rate <= 0) { return NAAD_ERR_COMPUTATION; }
 
     var sr = f64_from(sample_rate);
 

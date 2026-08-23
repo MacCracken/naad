@@ -6,8 +6,8 @@
 # amplitudes; supports smooth morphing between vowel shapes.
 #
 # The `Vowel` enum becomes integer constants; serde derives are dropped;
-# constructors return the struct pointer on success (or a negative ERR_* on
-# failure); `Result<()>` operations return ERR_NONE or a negative ERR_*. The
+# constructors return the struct pointer on success (or a negative NAAD_ERR_* on
+# failure); `Result<()>` operations return NAAD_ERR_NONE or a negative NAAD_ERR_*. The
 # fixed `[(f32,f32,f32); 3]` formant table maps to a vec of `FormantBand`
 # structs. Reuses filter.cyr's BiquadFilter (bandpass). Requires (from the
 # build/test unit): stdlib alloc/vec + math/ganita, error.cyr, filter.cyr.
@@ -111,11 +111,11 @@ fn formant_lerp(a, b, t) {
 struct FormantFilter { filters; amplitudes; }
 
 # Create a formant filter from explicit parameters (vec of FormantBand).
-# Returns the struct pointer on success, ERR_INVALID_PARAMETER if the band
-# count is not exactly 3, or a negative ERR_* if any filter params are invalid.
+# Returns the struct pointer on success, NAAD_ERR_INVALID_PARAMETER if the band
+# count is not exactly 3, or a negative NAAD_ERR_* if any filter params are invalid.
 #must_use
 fn formant_filter_new(formants, sample_rate) {
-    if (vec_len(formants) != FORMANT_NUM) { return ERR_INVALID_PARAMETER; }
+    if (vec_len(formants) != FORMANT_NUM) { return NAAD_ERR_INVALID_PARAMETER; }
 
     var filters = vec_new();
     var amplitudes = vec_new();
@@ -165,7 +165,7 @@ fn formant_filter_process_sample(self, input) {
 struct FormantSynth { filters; amplitudes; target_params; current_vowel; sample_rate; }
 
 # Create a new formant synth initialised to the given vowel. Returns the struct
-# pointer on success, or a negative ERR_* if filter parameters are invalid.
+# pointer on success, or a negative NAAD_ERR_* if filter parameters are invalid.
 # Matches Rust new(): q uses raw freq/bw (no bw > 0 guard).
 #must_use
 fn formant_synth_new(vowel, sample_rate) {
@@ -194,7 +194,7 @@ fn formant_synth_new(vowel, sample_rate) {
 }
 
 # Apply formant parameters (vec of FormantBand) to the filters. Returns
-# ERR_NONE on success or a negative ERR_* if the filter params are invalid.
+# NAAD_ERR_NONE on success or a negative NAAD_ERR_* if the filter params are invalid.
 # Ports apply_params(); q uses the bw > 0 guard.
 fn formant_synth_apply_params(self, params) {
     FormantSynth_set_target_params(self, params);
@@ -211,11 +211,11 @@ fn formant_synth_apply_params(self, params) {
         vec_set(amplitudes, i, amp);
         i = i + 1;
     }
-    return ERR_NONE;
+    return NAAD_ERR_NONE;
 }
 
-# Set the target vowel, updating filter parameters. Returns ERR_NONE or a
-# negative ERR_*. Ports set_vowel().
+# Set the target vowel, updating filter parameters. Returns NAAD_ERR_NONE or a
+# negative NAAD_ERR_*. Ports set_vowel().
 fn formant_synth_set_vowel(self, vowel) {
     FormantSynth_set_current_vowel(self, vowel);
     var params = formant_vowel_formants(vowel);
@@ -223,7 +223,7 @@ fn formant_synth_set_vowel(self, vowel) {
 }
 
 # Morph between two vowels at position t (0.0 = vowel_a, 1.0 = vowel_b).
-# Returns ERR_NONE or a negative ERR_*. Ports morph().
+# Returns NAAD_ERR_NONE or a negative NAAD_ERR_*. Ports morph().
 fn formant_synth_morph(self, vowel_a, vowel_b, t) {
     var tc = f64_clamp(t, 0, F64_ONE);
     var a = formant_vowel_formants(vowel_a);

@@ -55,9 +55,17 @@ var MOD_DEST_LFO_RATE         = 7;
 #derive(accessors)
 struct ModRouting { source; destination; depth; enabled; }
 
-# Create a routing; depth clamped to [-1, 1], enabled by default.
+# Create a routing; depth clamped to [-1, 1], enabled by default. Returns a
+# negative NAAD_ERR_INVALID_PARAMETER if either id is out of range -- the oracle
+# takes the ModSource / ModDestination enums (rust-old/src/mod_matrix.rs:189-190),
+# so a bad id is unrepresentable there; here it would reach vec_set on the
+# 8-slot scratch and abort the process out of mod_matrix_compute.
 #must_use
 fn mod_matrix_routing_new(source, destination, depth) {
+    if (source < 0) { return NAAD_ERR_INVALID_PARAMETER; }
+    if (source >= MOD_MATRIX_NUM_SOURCES) { return NAAD_ERR_INVALID_PARAMETER; }
+    if (destination < 0) { return NAAD_ERR_INVALID_PARAMETER; }
+    if (destination >= MOD_MATRIX_NUM_DESTINATIONS) { return NAAD_ERR_INVALID_PARAMETER; }
     var r = alloc(sizeof(ModRouting));
     ModRouting_set_source(r, source);
     ModRouting_set_destination(r, destination);
@@ -120,8 +128,13 @@ fn mod_matrix_clear(m) {
     return 0;
 }
 
-# Set a source value for the current frame.
+# Set a source value for the current frame. Returns NAAD_ERR_NONE, or a negative
+# NAAD_ERR_INVALID_PARAMETER for an out-of-range source id (the oracle's
+# ModSource enum made that unreachable; the scratch vec holds exactly
+# MOD_MATRIX_NUM_SOURCES slots and vec_set aborts past them).
 fn mod_matrix_set_source(m, source, value) {
+    if (source < 0) { return NAAD_ERR_INVALID_PARAMETER; }
+    if (source >= MOD_MATRIX_NUM_SOURCES) { return NAAD_ERR_INVALID_PARAMETER; }
     vec_set(ModMatrix_source_values(m), source, value);
     return 0;
 }
@@ -155,9 +168,15 @@ fn mod_matrix_compute(m) {
 }
 
 # Total modulation amount for a destination (0.0 if nothing targets it).
+# NOTE the asymmetry with mod_matrix_set_source: this returns an f64, so there
+# is no error channel. An out-of-range id returns +0.0 -- indistinguishable from
+# "nothing targets it", which is the honest answer for a destination that does
+# not exist. Do not smuggle a negative error code through the f64 return.
 #inline
 #must_use
 fn mod_matrix_get_destination(m, dest) {
+    if (dest < 0) { return 0; }
+    if (dest >= MOD_MATRIX_NUM_DESTINATIONS) { return 0; }
     return vec_get(ModMatrix_destination_values(m), dest);
 }
 

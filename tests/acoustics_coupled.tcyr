@@ -2,7 +2,7 @@
 # Ports the #[test] blocks from rust-old/src/acoustics/coupled.rs one-for-one.
 # The serde-roundtrip test is dropped (Cyrius has no serde). Rust's `.unwrap()`
 # / Result becomes: success is a positive struct pointer (naad_is_err == 0),
-# failure is a negative ERR_* code (naad_is_err == 1). f32 tolerances loosen
+# failure is a negative NAAD_ERR_* code (naad_is_err == 1). f32 tolerances loosen
 # to f64.
 
 include "lib/hisab.cyr"

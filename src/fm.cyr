@@ -8,14 +8,14 @@
 # The `FmAlgorithm` enum becomes integer FM_ALGO_* constants. The
 # `SmallVec<[FmOperator; 6]>` operator storage becomes a stdlib vec of
 # FmOperator pointers. serde/Display derives + tests are dropped. Constructors
-# return the struct pointer on success or a negative ERR_* on failure (was
+# return the struct pointer on success or a negative NAAD_ERR_* on failure (was
 # Result<Self>). `Option<()>` setters return 1 (Some) / 0 (None) for out-of-
 # range indices; `Option<&FmOperator>` accessors return the pointer or 0 (null).
 # Methods become free `fm_*` functions taking the struct pointer.
 #
 # Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE/HALF/
 # TAU, f64_clamp), builtins (f64_add/sub/mul/div/sin/floor/from/lt/gt),
-# error.cyr (validate_sample_rate, flush_denormal, naad_is_err, ERR_*), and
+# error.cyr (validate_sample_rate, flush_denormal, naad_is_err, NAAD_ERR_*), and
 # envelope.cyr (envelope_adsr_with_sample_rate/next_value/gate_on/gate_off/
 # is_active). No `include` lines.
 
@@ -72,7 +72,7 @@ struct FmOperator {
 }
 
 # Create a new FM operator at the given frequency. Returns the struct pointer
-# on success, or a negative ERR_* if the envelope/sample_rate is invalid.
+# on success, or a negative NAAD_ERR_* if the envelope/sample_rate is invalid.
 #must_use
 fn fm_operator_new(frequency, sample_rate) {
     var envelope = envelope_adsr_with_sample_rate(FM_C0_01, FM_C0_1, FM_C0_8, FM_C0_3, sample_rate);
@@ -165,12 +165,12 @@ struct FmSynthEngine {
 }
 
 # Create a new FM synth engine with `num_operators` 440 Hz sine operators.
-# Returns the struct pointer on success, or a negative ERR_* if num_operators
+# Returns the struct pointer on success, or a negative NAAD_ERR_* if num_operators
 # is 0 or > 6, or sample_rate is invalid.
 #must_use
 fn fm_engine_new(num_operators, sample_rate) {
-    if (num_operators == 0) { return ERR_INVALID_PARAMETER; }
-    if (num_operators > FM_MAX_OPERATORS) { return ERR_INVALID_PARAMETER; }
+    if (num_operators <= 0) { return NAAD_ERR_INVALID_PARAMETER; }
+    if (num_operators > FM_MAX_OPERATORS) { return NAAD_ERR_INVALID_PARAMETER; }
     var e = validate_sample_rate(sample_rate);
     if (naad_is_err(e) == 1) { return e; }
 

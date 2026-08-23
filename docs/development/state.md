@@ -8,6 +8,58 @@
 `VERSION` at the repo root is the source of truth for the current number. The
 entries below are the release record.
 
+**2.1.3** — P-1 hardening sweep, and the `ERR_*` → `NAAD_ERR_*` de-collision
+the roadmap had carried since 2.1.1.
+
+Four lenses swept `src/` (memory safety, numeric robustness, resource
+discipline, API hygiene); every finding was adversarially re-derived before it
+was believed. **16 code defects fixed, 3 reproducing as SIGSEGV.** Each fix is
+pinned by a test verified to *fail* without it — every guard was reverted one at
+a time and the suite re-run, 19 times.
+
+⚠ **The 505-assertion parity suite passed all 16.** It had to: none of its
+assertions passed an out-of-range enum id, a negative count, a NaN, or a
+non-power-of-two buffer length. That is the whole shape of the finding set, and
+it is the structural gap this release closes — the code was in better shape than
+the tests were.
+
+Two mechanical classes account for nearly all of it, both predictable from the
+port's semantics:
+
+1. **Rust `usize`/enum guarantees erased by Cyrius's signed `i64`.** Where the
+   oracle types a parameter `usize`, `u32` or an enum, a bad value is
+   unrepresentable in Rust, so the Rust body validates nothing — and a guard
+   transliterated from it is only **half a bound**.
+2. **`f64_to` truncating where Rust's `as` SATURATES.** `as usize` maps NaN and
+   negatives to 0; `f64_to` overflows to `INT64_MIN`, which is neither `> MAX`
+   nor `== 0`, so one-sided clamps written in the Rust idiom let it through.
+   ⚠ `INT64_MIN % 1024 == 0`, so power-of-two buffers mask it entirely — which
+   is exactly why the suite was green.
+
+Headline fixes: `osc_new` accepted any integer waveform and returned a valid
+pointer with a null noise generator (the most-used constructor in the library);
+`bspline_eval_1d` had no `degree < 0` guard; `fit_polynomial` faulted at
+`nx >= 5793` inside ganita's internal `nx × nx` Q. Four hot paths were leaking
+against a bump allocator with no free — convolution `process_block` at
+~147 MB/s. `filter_biquad`'s unclosed coefficient chain produced a permanently
+NaN filter, and an unvalidated LFO shape produced frozen DC: both wrong audio
+with no crash and no error.
+
+The `fit_polynomial` cap is a **deliberate divergence**, shipped with
+[ADR-0001](../adr/0001-fit-polynomial-sample-cap.md) — the repo's first ADR.
+hisab 1.4.0 used a thin QR and succeeds at every `nx`; verified by reading the
+crate the oracle's `Cargo.lock` pins.
+
+`cyrius audit` **exits 0 for the first time**: fmt, lint, docs, tests and bench
+all clean. Suite: **40 suites / 557 assertions, 0 failed** (+52).
+
+New guards against recurrence: `tests/hardening.tcyr` (41 negative-input
+assertions, isolated because most abort the process pre-fix),
+`tests/allocbudget.tcyr` (11 `alloc_used()` budgets — the first thing in the
+repo to pin the "0 bytes/sample" claim the docs had carried since 2.1.0), and
+`scripts/symbol-collision-check.sh` wired into CI alongside a bundle-freshness
+gate.
+
 **2.1.2** — toolchain + dependency bump, and the two divergences it exposed.
 Four coordinated version moves: the Cyrius pin `6.3.19 → 6.5.35`, `hisab
 2.6.7 → 2.11.2`, `goonj 2.0.0 → 2.0.4` (goonj 2.0.4 itself pins hisab 2.11.2,
@@ -89,7 +141,7 @@ coeffs) and per-sample heap allocations eliminated on 4 hot buffer paths
   inlined `6.3.18`, which never matched the committed manifest.)
 - Build: `cyrius build src/main.cyr build/naad`
 - Test **everything**: bare `cyrius test` auto-discovers and runs every
-  `tests/**/*.tcyr` (measured: 38 suites). This is the only test step in
+  `tests/**/*.tcyr` (measured: 40 suites). This is the only test step in
   `.github/workflows/ci.yml`.
 - Test **one** suite: `cyrius test tests/<mod>.tcyr`. Both forms are real.
 - **`cyrius fmt <file>.cyr` rewrites the file in place** and prints nothing.
@@ -139,9 +191,15 @@ consumed.
 
 Per-module parity tracked in [`port-audit.md`](port-audit.md). Summary:
 
-**41 / 41 modules ported — PORT COMPLETE** · **502 parity assertions green
-across 38 suites** · `dist/naad.cyr` bundle assembled, collision-audited to
-zero across 446 top-level fns · hot-path benchmarks captured.
+**41 / 41 modules ported — PORT COMPLETE** · **557 assertions green across 40
+suites** · `dist/naad.cyr` bundle assembled and collision-audited to zero across
+all **759** top-level symbols — `fn`, `var`, `const` and `struct` alike, against
+hisab, goonj, sakshi, abaco and the whole pinned stdlib. The audit was fn-scoped
+through 2.1.2, which is how the `ERR_*` `var` collision survived three releases;
+`scripts/symbol-collision-check.sh` now enforces the wider scope in CI.
+Re-measure rather than transcribing: `grep -cE '^(fn|var|const|struct) '
+dist/naad.cyr`. Hot-path benchmarks captured; allocation budgets pinned by
+`tests/allocbudget.tcyr`.
 
 Re-measure rather than transcribing — the previous "443 fns / 463 assertions"
 drifted precisely because they were hand-written:
@@ -227,17 +285,43 @@ below are genuinely open; the scheduled view lives in
   divergence from the oracle — that needs checking against hisab's Rust source
   first.
 
+**Closed in 2.1.3:** the 8 undocumented public fns (`cyrius audit` now exits 0),
+the `ERR_*` prefix pass, and the missing gate for the top-level `var` collision
+class (`scripts/symbol-collision-check.sh`, in CI, `fn`/`var`/`const`/`struct`
+scoped — verified to fail when the 2.1.2 collision is reintroduced).
+
 **Carried forward:**
 
-- **8 undocumented public fns** — `cyrius audit`'s docs gate is the only one
-  still not clean (fmt, lint, tests, bench are green).
-- **CI has no fmt / lint / deny / bench / fuzz step.** `.github/workflows/ci.yml`
-  runs a changelog-matches-`VERSION` gate, then `cyrius deps`, `cyrius build`
-  and `cyrius test` — so a fmt or lint regression still reaches `main`
-  unchallenged. naad also has no `fuzz/` directory for `cyrius fuzz` to pick up.
-- **No gate for the top-level `var` collision class.** Duplicate top-level
-  `var`s draw no diagnostic from `cycc` or `cyrlint` (measured), so the
-  `ERR_INVALID_FREQUENCY` shadowing below is structurally invisible to tooling;
-  only the `tests/bundle.tcyr` assertion catches it.
+- **CI still has no fmt / lint / deny / fuzz step.** `.github/workflows/ci.yml`
+  runs the changelog gate, `cyrius deps`, `cyrius build`, the symbol-collision
+  and bundle-freshness gates, then `cyrius test`. A fmt or lint regression still
+  reaches `main` unchallenged even though `cyrius audit` covers both locally.
+  naad also has no `fuzz/` directory for `cyrius fuzz` to pick up, despite
+  `tests/naad.fcyr` existing.
+- **108 public fns have no caller outside their own definition** — almost all
+  accessors, correctly public but **untested**. Read it as a coverage signal,
+  not dead code: five of the eight fns documented in 2.1.3 were in that set, so
+  the same corners were missing both docs and tests. Entire accessor families
+  (`unison_*`, `subosc_*`, `wavetable_osc_*`, `wavetable_morph_*`, `physical_*`,
+  `modulation_lfo_*`, `hardsync_*`, `subtractive_*`, every `*_process_buffer`)
+  have zero assertions behind them.
+- **`FILTER_*` and `VOICE_NONE` are unprefixed** and collide by name with
+  `nidhi` and `garjan`, both co-linked with naad inside dhvani today. Inert —
+  every shared value currently agrees and nidhi's ids sit inside naad's valid
+  band — so this is forward risk, not a live defect. A breaking rename of 9
+  public symbols rippling into five vendored copies: 2.2.0, with the sibling
+  refreshes. The CI gate does not cover it (those are sibling bundles, not
+  naad's own deps); pass them as arguments to check locally.
+- **ADR-0001's residual hole.** The `fit_polynomial` cap closes the deterministic
+  cliff at `nx >= 5793`, not the `alloc`-failure path: `ganita_mat_new` also
+  returns 0 on plain allocation failure, so under a memory ceiling the 268 MB Q
+  can fail at a *lower* `nx` and land on the identical unchecked write. **Do not
+  read the guard as making `nx = 5792` safe by construction.** Closes when
+  ganita gains a failure return, or when `fit_polynomial` grows its own thin QR.
+- **`tuning_note_name` domain guard** (the parity-faithful fix; the 2.1.3 buffer
+  resize ships on inspection because no runtime assertion can discriminate it)
+  and **zero-alloc siblings** for ambisonics / binaural / panning, which today
+  have only the allocating per-sample form. Both change public behaviour or add
+  surface: 2.2.0.
 - Broaden benchmarks (more hot paths) + capture a Rust-vs-Cyrius comparison.
 - Consumer-green (dhvani/svara) once they port up the stack.

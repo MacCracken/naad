@@ -10,7 +10,7 @@ include "dist/naad.cyr"
 alloc_init();
 
 test_group("bundle: base + dsp_util");
-assert_eq(validate_frequency(f64_from(440), f64_from(44100)), ERR_NONE, "error base");
+assert_eq(validate_frequency(f64_from(440), f64_from(44100)), NAAD_ERR_NONE, "error base");
 assert_eq(flush_denormal(0), 0, "flush_denormal");
 assert(f64_lt(f64_abs(f64_sub(lerp(0, F64_ONE, F64_HALF), F64_HALF)), NAAD_EPSILON), "dsp_util lerp");
 
@@ -37,16 +37,25 @@ assert(naad_acoustics_material_by_name("concrete") != 0, "acoustics material bas
 assert_eq(naad_acoustics_material_by_name("nope"), 0, "unknown material -> None");
 
 test_group("bundle: naad/goonj error-code namespace");
-# naad's src/error.cyr and lib/goonj.cyr BOTH define a top-level
-# `ERR_INVALID_FREQUENCY` var (naad -1, goonj -3) in one flat namespace, and
-# duplicate top-level `var`s draw no diagnostic from cycc or cyrlint -- unlike
-# duplicate `fn`s. It is inert today (goonj never returns the code, and every
-# consumer includes goonj before naad, so naad's value wins), but nothing
-# would report it if that changed. These pin the values naad's own surface
-# depends on; a `naad_`/`GNJ_` prefix pass is the durable fix.
-assert_eq(ERR_NONE, 0, "ERR_NONE agrees across naad and goonj");
-assert_eq(ERR_INVALID_FREQUENCY, 0 - 1, "naad's ERR_INVALID_FREQUENCY wins over goonj's -3");
-assert(ERR_INVALID_FREQUENCY != ERR_COMPUTATION, "naad error codes stay distinct under the bundle");
+# Until 2.1.3 naad and goonj both defined bare `ERR_NONE`,
+# `ERR_INVALID_FREQUENCY` and `ERR_COMPUTATION` at top level, in one flat
+# namespace. Two agreed by value; `ERR_INVALID_FREQUENCY` did NOT (naad -1,
+# goonj -3), so which one you got depended on include order -- and duplicate
+# top-level `var`s draw no diagnostic from cycc or cyrlint, unlike duplicate
+# `fn`s, so nothing would have reported it. naad's six codes now carry the
+# `NAAD_ERR_` prefix and the intersection is empty by construction.
+#
+# This is the assertion that was IMPOSSIBLE before the rename: both libraries'
+# frequency codes are visible at once, each with its own distinct value. Under
+# the old names there was only ever one symbol here.
+assert_eq(NAAD_ERR_INVALID_FREQUENCY, 0 - 1, "naad's own frequency code is -1");
+assert_eq(ERR_INVALID_FREQUENCY, 0 - 3, "goonj's frequency code is -3 and no longer shadowed");
+assert(NAAD_ERR_INVALID_FREQUENCY != ERR_INVALID_FREQUENCY, "naad and goonj frequency codes are now distinct symbols");
+# The two that always agreed by value are now also distinct symbols, so a
+# future divergence on either side cannot silently rewrite the other.
+assert_eq(NAAD_ERR_NONE, 0, "naad success code");
+assert_eq(NAAD_ERR_COMPUTATION, 0 - 5, "naad computation code");
+assert_eq(ERR_COMPUTATION, 0 - 5, "goonj computation code, independently addressable");
 
 var rc = assert_summary();
 syscall(60, rc);

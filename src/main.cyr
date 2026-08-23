@@ -10,6 +10,10 @@ include "lib/hisab.cyr"
 include "lib/goonj.cyr"
 include "dist/naad.cyr"
 
+# Smoke entry point. Builds a 440 Hz sine oscillator, pulls 128 samples and
+# checks every one is finite. Returns 0 on success, 1 on init failure or a
+# non-finite sample. This proves dist/naad.cyr compiles and links as an
+# executable -- it is not a test suite; those live in tests/*.tcyr.
 fn main() {
     alloc_init();
 

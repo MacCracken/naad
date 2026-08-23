@@ -72,7 +72,7 @@ assert(subtractive_is_active(synth2) == 0, "should be idle after release");
 # ================================================================
 test_group("two oscillators");
 var synth3 = subtractive_new(WAVEFORM_SAW, f64_from(440), f64_from(3000), C0_707, f64_from(44100));
-assert_eq(subtractive_set_osc2(synth3, WAVEFORM_SQUARE, f64_from(441), F64_HALF), ERR_NONE, "set_osc2 ok");
+assert_eq(subtractive_set_osc2(synth3, WAVEFORM_SQUARE, f64_from(441), F64_HALF), NAAD_ERR_NONE, "set_osc2 ok");
 subtractive_note_on(synth3);
 var buf3 = vec_new();
 i = 0;

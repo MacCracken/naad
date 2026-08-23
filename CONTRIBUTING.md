@@ -149,7 +149,7 @@ before touching `src/`. The rules you will hit immediately:
   ```
 - **`enum` → integer `var` constants** (see `src/error.cyr`, `src/dsp_util.cyr`).
 - **`Result` / `Option` → error codes and sentinels.** Validators return
-  `ERR_NONE` (0) or a negative `ERR_*` from `src/error.cyr`; value-returning
+  `NAAD_ERR_NONE` (0) or a negative `NAAD_ERR_*` from `src/error.cyr`; value-returning
   functions use a NaN or documented sentinel. Reach for `lib/tagged.cyr` only when
   a real payload has to come back alongside the status. No panics in library
   code — return a code or a safe default.

@@ -332,7 +332,12 @@ fn granular_next_sample(e) {
             var read_pos = f64_add(Grain_source_position(grain), f64_mul(f64_from(cur), Grain_playback_rate(grain)));
             read_pos = granular_rem_euclid(read_pos, src_len_f);
             var floor_pos = f64_floor(read_pos);
+            # Rust's `as usize` SATURATES (NaN -> 0, negative -> 0); f64_to
+            # overflows to INT64_MIN. Note INT64_MIN % src_len is 0 only when
+            # src_len is a power of two -- which is why the suite never caught
+            # this. Saturate at the cast.
             var floor_i = f64_to(floor_pos);
+            if (floor_i < 0) { floor_i = 0; }
             var idx1 = floor_i % src_len;
             var idx0 = 0;
             if (idx1 == 0) {

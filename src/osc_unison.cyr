@@ -4,13 +4,13 @@
 # `[f32; 8]` phase and detune-ratio arrays become stdlib vecs of 8 f64; the
 # `bool ratios_dirty` becomes an i64 flag (1/0). The `(f32, f32)` stereo
 # tuple return becomes a `UnisonStereo` pair struct. serde derives/tests are
-# dropped; the constructor returns the struct pointer or a negative ERR_*.
+# dropped; the constructor returns the struct pointer or a negative NAAD_ERR_*.
 # Per-voice waveform generation reuses osc_stateless_waveform_sample from
 # osc_core.cyr, matching the oracle.
 #
 # Requires (from the build/test unit): stdlib alloc/vec + math/ganita
 # (F64_ONE/TWO/HALF/PI_2/FRAC_1_SQRT2, f64_pow/sin/cos/clamp/max) and
-# error.cyr (validate_*, naad_is_err, ERR_*), dsp_util.cyr
+# error.cyr (validate_*, naad_is_err, NAAD_ERR_*), dsp_util.cyr
 # (xorshift32_unit_f32), osc_core.cyr (osc_stateless_waveform_sample,
 # WAVEFORM_*). No `include` lines.
 
@@ -33,13 +33,17 @@ struct UnisonStereo { left; right; }
 #   ratios_dirty  : 1 if ratios need recomputing, else 0
 # ================================================================
 #derive(accessors)
+# scratch_l / scratch_r: one-slot scratch vecs for unison_next_sample_stereo,
+# allocated once. The oracle returns a stack tuple
+# (rust-old/src/oscillator/unison.rs:148); two vec_new() per sample is
+# 304 B/sample against a never-freeing bump allocator, ~14.6 MB/s at 48 kHz.
 struct UnisonOscillator { waveform; frequency; sample_rate; num_voices; detune_cents;
-    stereo_spread; phases; detune_ratios; ratios_dirty; }
+    stereo_spread; phases; detune_ratios; ratios_dirty; scratch_l; scratch_r; }
 
 # ================================================================
 # unison_new -- construct. Clamps num_voices to 1..8, randomizes initial
 # phases (xorshift32 seeded 12345), primes detune ratios. Returns the struct
-# pointer on success, or a negative ERR_* on invalid sample_rate/frequency.
+# pointer on success, or a negative NAAD_ERR_* on invalid sample_rate/frequency.
 # ================================================================
 #must_use
 fn unison_new(waveform, frequency, num_voices, detune_cents, sample_rate) {
@@ -83,6 +87,12 @@ fn unison_new(waveform, frequency, num_voices, detune_cents, sample_rate) {
     UnisonOscillator_set_phases(self, phases);
     UnisonOscillator_set_detune_ratios(self, detune_ratios);
     UnisonOscillator_set_ratios_dirty(self, 1);
+    var sl = vec_new();
+    vec_push(sl, 0);
+    var sr = vec_new();
+    vec_push(sr, 0);
+    UnisonOscillator_set_scratch_l(self, sl);
+    UnisonOscillator_set_scratch_r(self, sr);
     unison_recompute_ratios(self);
     return self;
 }
@@ -200,10 +210,8 @@ fn unison_advance_stereo(self, out_left, out_right, idx) {
 # ================================================================
 #must_use
 fn unison_next_sample_stereo(self) {
-    var scratch_l = vec_new();
-    vec_push(scratch_l, 0);
-    var scratch_r = vec_new();
-    vec_push(scratch_r, 0);
+    var scratch_l = UnisonOscillator_scratch_l(self);
+    var scratch_r = UnisonOscillator_scratch_r(self);
     unison_advance_stereo(self, scratch_l, scratch_r, 0);
     var out = alloc(sizeof(UnisonStereo));
     UnisonStereo_set_left(out, vec_get(scratch_l, 0));
@@ -253,22 +261,30 @@ fn unison_set_num_voices(self, n) {
     return 0;
 }
 
+# Set the unison detune spread in cents. Negative values clamp to 0, matching
+# the oracle's `cents.max(0.0)`. Marks the voice ratios dirty so they rebuild on
+# the next sample. Returns 0. Ports set_detune_cents().
 fn unison_set_detune_cents(self, cents) {
     UnisonOscillator_set_detune_cents(self, f64_max(cents, 0));
     UnisonOscillator_set_ratios_dirty(self, 1);
     return 0;
 }
 
+# Set the stereo spread, clamped to [0.0, 1.0] -- 0.0 is mono, 1.0 is full
+# width. Returns 0. Ports set_stereo_spread().
 fn unison_set_stereo_spread(self, spread) {
     UnisonOscillator_set_stereo_spread(self, f64_clamp(spread, 0, F64_ONE));
     return 0;
 }
 
+# Set the base frequency the unison voices detune around. Returns
+# NAAD_ERR_NONE, or a negative NAAD_ERR_* if the frequency is invalid for this
+# oscillator's sample rate. Ports set_frequency().
 fn unison_set_frequency(self, freq) {
     var e = validate_frequency(freq, UnisonOscillator_sample_rate(self));
     if (naad_is_err(e) == 1) { return e; }
     UnisonOscillator_set_frequency(self, freq);
-    return ERR_NONE;
+    return NAAD_ERR_NONE;
 }
 
 # ================================================================

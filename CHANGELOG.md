@@ -5,6 +5,240 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.3] - P-1 hardening: the negative-input sweep
+
+A P-1 audit / refactor / hardening / security sweep, plus the `ERR_*` →
+`NAAD_ERR_*` de-collision the roadmap had been carrying since 2.1.1.
+
+**The 505-assertion parity suite passed every one of these defects.** It had to:
+not one of its assertions passed an out-of-range enum id, a negative count, a
+NaN, or a non-power-of-two buffer length — which is the exact shape of all 22
+findings. Four lenses swept `src/` and every finding was adversarially
+re-derived before it was believed. **16 code defects fixed, 3 of which
+reproduce as SIGSEGV**, and every fix is pinned by a test verified to *fail*
+without it: each guard was reverted one at a time and the suite re-run, 19 times.
+
+The defects are not scattered. They cluster into two mechanical classes, both
+predictable from the port's semantics and now enumerated:
+
+1. **Rust `usize`/enum guarantees erased by Cyrius's signed `i64`.** Where the
+   oracle types a parameter `usize`, `u32` or an enum, a bad value is
+   *unrepresentable* in Rust — so the Rust body validates nothing, and a
+   transliterated guard is only **half a bound**.
+2. **`f64_to` truncating where Rust's `as` casts SATURATE.** Rust's `as usize`
+   maps NaN and negatives to 0; `f64_to` overflows to `INT64_MIN`, which is
+   neither `> MAX` nor `== 0`, so every one-sided clamp written in the Rust
+   idiom lets it straight through.
+
+`cyrius audit` **exits 0 for the first time** — fmt, lint, docs, tests and bench
+all clean. Suite: **40 suites / 557 assertions**.
+
+### Changed — `ERR_*` → `NAAD_ERR_*` (BREAKING for consumers)
+
+naad's six error constants were bare top-level `var`s sharing Cyrius's flat
+distlib namespace with goonj's. Two agreed by value; `ERR_INVALID_FREQUENCY` did
+**not** — naad `-1`, goonj `-3` — so which one a consumer got depended on
+include order.
+
+⚠ **Duplicate top-level `var`s emit NO diagnostic from `cycc` or `cyrlint`**,
+unlike duplicate `fn`s. 2.1.1's "benign last-wins warning" does not apply to this
+class, and the bundle's collision audit was fn-scoped and provably could not see
+it. That is how this survived three releases.
+
+- `ERR_NONE` → `NAAD_ERR_NONE`, `ERR_INVALID_FREQUENCY` →
+  `NAAD_ERR_INVALID_FREQUENCY`, `ERR_INVALID_SAMPLE_RATE` →
+  `NAAD_ERR_INVALID_SAMPLE_RATE`, `ERR_INVALID_PARAMETER` →
+  `NAAD_ERR_INVALID_PARAMETER`, `ERR_BUFFER_OVERFLOW` →
+  `NAAD_ERR_BUFFER_OVERFLOW`, `ERR_COMPUTATION` → `NAAD_ERR_COMPUTATION`.
+  Values unchanged; 221 references updated in lockstep.
+- The top-level symbol set of `dist/naad.cyr` (759 symbols) is now **disjoint
+  from hisab, goonj, sakshi, abaco and the whole 6.5.35 stdlib** — measured in
+  all five directions, `fn`/`var`/`const`/`struct` alike, not just `fn`.
+- `tests/bundle.tcyr` now makes the assertion that was **impossible** before the
+  rename: both libraries' frequency codes visible at once, each with its own
+  value.
+
+### Fixed — memory safety
+
+- **`osc_new` accepted any integer as `waveform`** — the library's most-used
+  constructor. Ids outside 0..7 left `noise_gen` null behind a **valid returned
+  pointer**, and the dispatch chain's bare `else` dereferenced it on the first
+  sample. The oracle matches an 8-variant enum exhaustively *and* carries an
+  `else { 0.0 }` arm, so both the constructor guard and the null-safe fallback
+  are parity-restoring. Reproduces as **SIGSEGV**. Also reached through
+  `modulation_ring_new`, `modulation_lfo_from_waveform`, `subtractive_new`,
+  `subtractive_set_osc2`, `hardsync_new` and `subosc_new`.
+- **`bspline_eval_1d` had no `degree < 0` guard.** A degree `<= -2` drives the
+  knot count to 0 while the interior count grows, so the knot loop writes past
+  its buffer — or through a null once `alloc` sees a non-positive size. Oracle
+  types `degree` as `usize`. Reproduces as **SIGSEGV**.
+- **`fit_polynomial` faulted at `nx >= 5793`.** 2.1.2 null-checked the matrix it
+  allocates itself, but `ganita_mat_least_squares` allocates an `nx × nx`
+  orthogonal Q *internally* and never checks it. Reproduces as **SIGSEGV**.
+  ⚠ The guard is a **deliberate divergence** — hisab 1.4.0 used a thin QR
+  (`Q` is `nx × cols`) and returns coefficients at every `nx`, verified by
+  reading the crate the oracle's `Cargo.lock` pins. Shipped with
+  [ADR-0001](docs/adr/0001-fit-polynomial-sample-cap.md), which also records the
+  residual `alloc`-failure path this does **not** close.
+- **`wavetable_from_harmonics` guarded `size == 0` but not `size < 0`**, leaving
+  an empty samples vec behind a valid pointer; the first read divided by zero
+  (**SIGFPE**). It also passed `wavetable_morph_new`'s equality-only length
+  check, so a MorphWavetable built from one faulted on its first sample.
+- **`fm_engine_new` guarded `num_operators == 0` but not negative**, leaving the
+  operator vec empty for a default algorithm that immediately indexes slot 0.
+- **`tuning_table_custom` never validated the ratio COUNT.** The oracle's
+  parameter is `[f32; 12]` — the length is a *type invariant*, which is why the
+  Rust body validates only values. Erasing the array to a vec dropped it, and
+  `tuning_note_to_freq` reads index 9 unconditionally.
+- **`mod_matrix` source/destination ids were unvalidated** where the oracle used
+  the `ModSource`/`ModDestination` enums; the scratch vecs hold exactly 8 slots.
+  Note the deliberate asymmetry: `mod_matrix_set_source` returns an error code,
+  while `mod_matrix_get_destination` returns an f64 and so reports an
+  out-of-range id as `+0.0` — the honest answer for a destination that does not
+  exist. A negative code is never smuggled through an f64 return.
+- **`tuning_note_name` formatted into a u8-era 16-byte buffer.** The oracle takes
+  `note: u8` (longest output `"C#10"`); the port widened the parameter to signed
+  `i64`, where the integer formatter can emit 20 characters. Now 32 bytes.
+  Honest note: this one ships **on inspection** — under the bump allocator the
+  overflow currently lands on already-consumed scratch, so no runtime assertion
+  can discriminate. The testable fix is a domain guard, which changes output for
+  `note > 127` and is therefore not patch-safe.
+
+### Fixed — wrong audio, no crash
+
+- **`filter_biquad`'s coefficient chain had no `else` arm.** An out-of-range
+  filter type left `a0` at `+0.0`, made `1/a0` `+Inf`, and every coefficient
+  `NaN` — then latched NaN into `z1`/`z2` **permanently**, since
+  `filter_biquad_reset` clears state but not coefficients. `eq_add_band`
+  forwarded the bad type and returned success, contradicting its own doc. Both
+  halves fixed: the constructor validates, and the chain closes with a unity
+  pass-through so the public `BiquadFilter_set_filter_type` accessor cannot
+  publish NaN either.
+- **The LFO `shape` was never validated.** The dispatch chain has no default and
+  fell through to the sample-and-hold slot — whose re-roll is itself gated on
+  `shape == SAMPLE_AND_HOLD` — so an out-of-range shape emitted a **frozen DC
+  value forever**. Every modulation destination got a constant bias instead of
+  movement, with no error at construction or set time. Harder to notice than the
+  NaN case: it produces plausible-looking, completely wrong audio.
+  `modulation_lfo_set_shape` now returns an error code where it previously
+  always returned 0. `modulation_lfo_set_mode` is deliberately **not** guarded —
+  an unknown mode falls through to bipolar, which is the oracle's own default.
+
+### Fixed — the `f64_to` truncation cluster
+
+Five index sites clamped in int space *after* the cast, each written in the Rust
+idiom and each inheriting a guarantee the cast no longer provides. All now
+saturate at the cast: `wavetable_read_interpolated`,
+`wavetable_morph_next_sample`, `wavetable_morph_next_sample_smooth`,
+`granular_next_sample`, and `db_to_amplitude_lut` (made two-sided). Rust returns
+a NaN sample and keeps running; naad aborted the process.
+
+⚠ **`INT64_MIN % 1024 == 0`.** With a power-of-two buffer the pre-fix code lands
+on index 0 and behaves correctly — and audio buffers are habitually
+power-of-two. That is precisely why the parity suite never caught this, and why
+the new tests deliberately use lengths of **100 and 1000**.
+
+Two proposed fixes were **rejected as themselves-divergent**: adding
+`naad_is_finite` rejection to `granular_set_position` / `wavetable_morph_set_morph`
+(the oracle has no finite gate there and stores NaN happily), and returning
+`table[0]` for a NaN in `db_to_amplitude_lut` (Rust computes
+`table[0]*(1-NaN) + table[1]*NaN` = **NaN**, so the two-sided clamp is exact
+parity). Saturation at the cast site only.
+
+### Fixed — unbounded heap growth
+
+`lib/alloc.cyr` is a **bump allocator with no individual free**, so a per-sample
+allocation is a permanent leak, not churn. Rust drops these at scope exit — each
+item below is a divergence created by the port's allocator, not by the
+algorithm. All four now reuse struct-owned scratch. No numeric output changes.
+
+| Path | Was | Rate at 48 kHz |
+|---|---|---|
+| `naad_convolution_process_block` | 3 × `fft_len × 16` **per block** | ~147 MB/s |
+| `wavetable_morph_next_sample_smooth` | ~464 B/sample | ~22 MB/s |
+| `unison_next_sample_stereo` | 304 B/sample | ~15 MB/s |
+| `envelope_catmull_rom_next_value` | 120 B/sample | ~5.8 MB/s |
+
+- The convolution fix also **null-checks each scratch allocation** and falls back
+  to direct convolution — the leak had made its own null-deref reachable. The
+  module header's claim that per-call allocation was "behaviourally identical"
+  is corrected: identical numerically, false for resource behaviour, which was
+  the entire point of the oracle's design.
+- `bspline_eval_1d` is split into an allocating wrapper and a scratch-taking
+  `_bspline_eval_1d_into` core, mirroring the existing
+  `naad_fdn_hadamard8` / `_into` split.
+- ⚠ **The smooth-morph path is NOT zero-alloc and must not be described as one.**
+  About 120 B/sample of it lives inside `lib/hisab.cyr`'s `calc_bspline`, which
+  naad may not patch. The new budget pins what naad controls.
+- **Correction to the 2.1.0 record**: "oscillator hot path — 0 bytes/sample,
+  verified" was true for `src/osc_core.cyr` and false for `src/osc_unison.cyr`'s
+  stereo path.
+
+### Added
+
+- **`tests/hardening.tcyr`** (41 assertions) — every negative case above. Kept in
+  its own file deliberately: most of these *abort the process* before the fix, so
+  in a shared suite a pre-fix run dies partway through and prints a confusing
+  partial result.
+- **`tests/allocbudget.tcyr`** (11 assertions) — `alloc_used()` sandwiches over
+  10 000-sample renders. This is the **first thing in the repo to pin the
+  "0 bytes/sample" claim** that had been load-bearing in the docs since 2.1.0:
+  `tests/hotpath.bcyr` benches four already-alloc-free functions and reports
+  nanoseconds, never bytes, so four *other* hot paths regressed unnoticed.
+  `alloc_used()` was referenced by nothing in this repo before now.
+- **`scripts/symbol-collision-check.sh`** + a CI step — intersects
+  `fn`/`var`/`const`/`struct` between `dist/naad.cyr` and every dependency
+  bundle and the pinned stdlib snapshot. Deliberately **not** fn-scoped, since
+  fn-scoping is what missed the `ERR_*` collision. Verified to fail when the
+  2.1.2 collision is reintroduced.
+- **A CI bundle-freshness gate** — `dist/naad.cyr` is a tracked artifact
+  consumers link directly; if `src/` changes without regenerating it, the bundle
+  on `main` is stale and `tests/bundle.tcyr` exercises last release's code.
+- **[ADR-0001](docs/adr/0001-fit-polynomial-sample-cap.md)** — the first ADR in
+  the repo; the index had claimed *"No ADRs yet"*.
+- Doc comments for the 8 undocumented public fns. Seven sat *second* under a
+  shared banner that already named them — none was genuinely undocumented, and
+  they were the sole reason `cyrius audit` exited 1.
+
+### Migration
+
+Consumers must rename six constants: `ERR_NONE` → `NAAD_ERR_NONE`,
+`ERR_INVALID_FREQUENCY` → `NAAD_ERR_INVALID_FREQUENCY`, `ERR_INVALID_SAMPLE_RATE`
+→ `NAAD_ERR_INVALID_SAMPLE_RATE`, `ERR_INVALID_PARAMETER` →
+`NAAD_ERR_INVALID_PARAMETER`, `ERR_BUFFER_OVERFLOW` → `NAAD_ERR_BUFFER_OVERFLOW`,
+`ERR_COMPUTATION` → `NAAD_ERR_COMPUTATION`. Values are unchanged, so a consumer
+comparing against literals is unaffected. `naad_is_err` is the recommended test
+and is unchanged.
+
+Constructors that previously accepted an out-of-range enum id now return a
+negative `NAAD_ERR_INVALID_PARAMETER`. Any consumer relying on that acceptance
+was building an object that would crash or emit NaN, so the failure surfaces
+earlier and more legibly — but it does surface where it previously did not.
+
+### Known — deliberately not in this release
+
+Each is real; none is patch-safe. All are 2.2.0 candidates.
+
+- **`FILTER_*` and `VOICE_NONE` are unprefixed** and collide by name with
+  `nidhi` and `garjan`, both co-linked with naad in dhvani today. Currently
+  harmless — every shared value agrees, and nidhi's ids sit inside naad's valid
+  band — so this is forward risk, not a live defect. A breaking rename of 9
+  public symbols rippling into five vendored copies.
+- **Zero-alloc siblings** for `naad_ambisonics_encode_sample`,
+  `naad_binaural_process_sample` and `panning_pan_mono`, which today have only
+  the allocating per-sample form with no escape hatch. New public functions.
+- **Thin-QR `fit_polynomial`** — restores full parity, removes the ADR-0001 cap
+  and the 268 MB Q. Different rounding for every currently-working input.
+- **`tuning_note_name` domain guard** — the parity-faithful fix, and the only
+  testable one; changes output for notes above 127.
+- **Prefixing the Tier-1 bare names** (`lerp`, `rms`, `peak`, `normalize`,
+  `chromagram`, `crossfade_equal_power`). Zero collisions today.
+- **Upstream on ganita**: give `ganita_mat_least_squares` a failure return, or
+  switch it to thin QR so no `nx × nx` Q is ever formed.
+- **108 public fns have no caller outside their own definition** — almost all
+  accessors, correctly public but **untested**. Five of the eight undocumented
+  fns were in that set: the same corners were missing both docs and tests.
+
 ## [2.1.2] - Toolchain + dependency catch-up
 
 Fifteen months of upstream in one bump — cyrius **6.3.19 → 6.5.35**, hisab

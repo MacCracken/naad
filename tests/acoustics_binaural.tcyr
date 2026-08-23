@@ -1,7 +1,7 @@
 # acoustics_binaural.tcyr -- parity tests for src/acoustics_binaural.cyr.
 # Ports the non-serde #[test] blocks from rust-old/src/acoustics/binaural.rs
 # (test_serde_roundtrip dropped -- no serde in Cyrius). f32 tolerances widened
-# to f64. Result<Self> is a struct pointer (success) or ERR_COMPUTATION; is_ok
+# to f64. Result<Self> is a struct pointer (success) or NAAD_ERR_COMPUTATION; is_ok
 # maps to naad_is_err == 0, is_err to naad_is_err == 1.
 
 include "lib/hisab.cyr"

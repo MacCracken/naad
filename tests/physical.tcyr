@@ -250,7 +250,7 @@ assert(f64_lt(f64_abs(physical_moog_resonance(fclamp)), NAAD_EPSILON), "resonanc
 # ================================================================
 test_group("moog survives an over-range sample");
 var mpoison = physical_moog_new(f64_from(1000), F64_HALF, f64_from(44100));
-physical_moog_process_sample(mpoison, f64_from(100000));
+var mp_discard = physical_moog_process_sample(mpoison, f64_from(100000));
 var mp_ok = 1;
 var mpi = 0;
 while (mpi < 64) {

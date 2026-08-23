@@ -7,11 +7,11 @@
 # xorshift32_signed_f32 (matching the noise.cyr idiom). The BiquadFilter
 # fields hold filter struct pointers; the fixed `[f32; 6]` phase/frequency
 # arrays become stdlib vecs. Constructors return the struct pointer on
-# success or a negative ERR_* (was Result<Self>). serde/Display tests dropped.
+# success or a negative NAAD_ERR_* (was Result<Self>). serde/Display tests dropped.
 #
 # Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE/TWO/
 # HALF/TAU, f64_add/sub/mul/div/neg/clamp/from/sin/floor), error.cyr
-# (validate_sample_rate, flush_denormal, naad_is_err, ERR_*), and filter.cyr
+# (validate_sample_rate, flush_denormal, naad_is_err, NAAD_ERR_*), and filter.cyr
 # (filter_biquad_new, filter_biquad_process_sample, FILTER_*). No `include`.
 
 # ================================================================
@@ -78,7 +78,7 @@ struct KickDrum {
 
 # ================================================================
 # drum_kick_new -- create a kick drum. Mirrors KickDrum::new. Returns the
-# struct pointer on success, or ERR_INVALID_SAMPLE_RATE on invalid sample_rate.
+# struct pointer on success, or NAAD_ERR_INVALID_SAMPLE_RATE on invalid sample_rate.
 # ================================================================
 #must_use
 fn drum_kick_new(start_freq, end_freq, body_decay_ms, click_level, sample_rate) {
@@ -216,7 +216,7 @@ struct SnareDrum {
 
 # ================================================================
 # drum_snare_new -- create a snare drum. Mirrors SnareDrum::new. Returns the
-# struct pointer on success, or a negative ERR_* on invalid sample_rate or an
+# struct pointer on success, or a negative NAAD_ERR_* on invalid sample_rate or an
 # invalid bandpass filter (propagated from filter_biquad_new).
 # ================================================================
 #must_use
@@ -335,7 +335,7 @@ var DRUM_HIHAT_OSCILLATORS = 6;
 
 # ================================================================
 # drum_hihat_new -- create a hi-hat. Mirrors HiHat::new. `open` (1/0) selects
-# a longer decay. Returns the struct pointer on success, or a negative ERR_*
+# a longer decay. Returns the struct pointer on success, or a negative NAAD_ERR_*
 # on invalid sample_rate or an invalid filter (propagated from the biquads).
 # ================================================================
 #must_use

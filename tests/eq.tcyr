@@ -23,7 +23,7 @@ assert(f64_lt(f64_abs(f64_sub(out, C0_5)), NAAD_EPSILON), "no bands -> passthrou
 # ================================================================
 test_group("parametric eq with band");
 var eq2 = eq_parametric_new(f64_from(SR));
-assert_eq(eq_add_band(eq2, FILTER_PEAK, f64_from(1000), F64_ONE, f64_from(6)), ERR_NONE, "add_band ok");
+assert_eq(eq_add_band(eq2, FILTER_PEAK, f64_from(1000), F64_ONE, f64_from(6)), NAAD_ERR_NONE, "add_band ok");
 assert_eq(eq_num_bands(eq2), 1, "num_bands == 1");
 var out2 = eq_process_sample(eq2, C0_5);
 assert(naad_is_finite(out2), "process_sample finite");
@@ -33,7 +33,7 @@ test_group("graphic eq");
 var geq = eq_graphic_new(f64_from(SR));
 assert_eq(eq_graphic_num_bands(geq), 10, "graphic num_bands == 10");
 # Set a boost: band 4 (500 Hz) +6 dB.
-assert_eq(eq_graphic_set_band_gain(geq, 4, f64_from(6)), ERR_NONE, "set_band_gain(4, 6) ok");
+assert_eq(eq_graphic_set_band_gain(geq, 4, f64_from(6)), NAAD_ERR_NONE, "set_band_gain(4, 6) ok");
 var out3 = eq_graphic_process_sample(geq, C0_5);
 assert(naad_is_finite(out3), "graphic process_sample finite");
 

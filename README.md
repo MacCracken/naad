@@ -124,7 +124,7 @@ var r = main();
 syscall(60, r);
 ```
 
-Constructors return either a struct pointer or a negative `ERR_*` code — check
+Constructors return either a struct pointer or a negative `NAAD_ERR_*` code — check
 with `naad_is_err` before use. `naad_err_name` maps a code to a string.
 Non-integer f64 arguments are built with `f64_from` / `f64_div` (or as IEEE-754
 bit patterns, the form the test suites use).
@@ -157,11 +157,15 @@ via hisab). The stdlib leaves the fold needs are listed in
 sakshi → hisab → goonj → naad
 ```
 
-The load-bearing part is **goonj before naad**: both define a top-level
-`ERR_INVALID_FREQUENCY` in Cyrius's flat namespace (naad `-1`, goonj `-3`), and
-duplicate top-level `var`s draw no diagnostic — unlike duplicate `fn`s. With
-goonj first, naad's value wins, which is what naad's surface returns.
-`tests/bundle.tcyr` pins this.
+Order still matters for type references (`dist/naad.cyr` does
+`alloc(sizeof(CoupledRooms))` on a goonj struct, so goonj must precede naad),
+but it is no longer load-bearing for *correctness*. Until 2.1.3 both libraries
+defined a bare top-level `ERR_INVALID_FREQUENCY` in Cyrius's flat namespace
+(naad `-1`, goonj `-3`) and duplicate top-level `var`s draw no diagnostic —
+unlike duplicate `fn`s — so which value you got depended on include order.
+naad's error constants now carry the `NAAD_ERR_` prefix and the two libraries'
+symbol sets are disjoint. `tests/bundle.tcyr` asserts both codes are visible at
+once with their own distinct values.
 
 naad's own builds include only hisab, goonj and naad (see `src/main.cyr:9-11`
 and `tests/bundle.tcyr`): naad calls nothing in sakshi, so goonj's sakshi

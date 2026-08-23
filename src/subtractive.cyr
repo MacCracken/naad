@@ -8,11 +8,11 @@
 #
 # Reuses the already-ported dep symbols: Oscillator (osc_*), the
 # StateVariableFilter (filter_svf_*), and Adsr (envelope_adsr_*). The
-# `Result<T>` / `Option<T>` returns become pointer-or-negative-ERR_* / null
+# `Result<T>` / `Option<T>` returns become pointer-or-negative-NAAD_ERR_* / null
 # (0) sentinels, exactly mirroring the oracle's fallible constructors.
 #
 # Requires (from the build/test unit): stdlib alloc/vec + math/ganita
-# (F64_ONE/TWO/HALF, f64_clamp/max/pow), error.cyr (naad_is_err, ERR_NONE),
+# (F64_ONE/TWO/HALF, f64_clamp/max/pow), error.cyr (naad_is_err, NAAD_ERR_NONE),
 # osc_core.cyr (osc_new/osc_next_sample/osc_set_frequency, WAVEFORM_*),
 # filter.cyr (filter_svf_new/filter_svf_set_params/filter_svf_q/
 # filter_svf_process_sample_lowpass), and envelope.cyr
@@ -58,7 +58,7 @@ struct SubtractiveSynth {
 
 # ================================================================
 # subtractive_new -- construct a voice. Returns the struct pointer on
-# success, or the first negative ERR_* encountered while building the
+# success, or the first negative NAAD_ERR_* encountered while building the
 # oscillator / filter / envelopes (mirrors the oracle's `?` propagation).
 # resonance is floored at 0.1 (resonance.max(0.1)); the two envelopes use
 # the oracle's fixed ADSR presets.
@@ -90,8 +90,8 @@ fn subtractive_new(waveform, frequency, cutoff, resonance, sample_rate) {
 }
 
 # ================================================================
-# subtractive_set_osc2 -- enable the second oscillator. Returns ERR_NONE on
-# success, or a negative ERR_* if the oscillator parameters are invalid.
+# subtractive_set_osc2 -- enable the second oscillator. Returns NAAD_ERR_NONE on
+# success, or a negative NAAD_ERR_* if the oscillator parameters are invalid.
 # The mix level is clamped to [0.0, 1.0].
 # ================================================================
 fn subtractive_set_osc2(self, waveform, frequency, mix) {
@@ -99,7 +99,7 @@ fn subtractive_set_osc2(self, waveform, frequency, mix) {
     if (naad_is_err(osc2) == 1) { return osc2; }
     SubtractiveSynth_set_osc2(self, osc2);
     SubtractiveSynth_set_osc2_mix(self, f64_clamp(mix, 0, F64_ONE));
-    return ERR_NONE;
+    return NAAD_ERR_NONE;
 }
 
 # ================================================================
@@ -129,8 +129,8 @@ fn subtractive_note_off(self) {
 }
 
 # ================================================================
-# subtractive_set_frequency -- retune both oscillators. Returns ERR_NONE on
-# success or a negative ERR_* if osc1's frequency is invalid; osc2's retune
+# subtractive_set_frequency -- retune both oscillators. Returns NAAD_ERR_NONE on
+# success or a negative NAAD_ERR_* if osc1's frequency is invalid; osc2's retune
 # result is ignored (mirrors the oracle's `let _ = osc2.set_frequency(..)`).
 # ================================================================
 fn subtractive_set_frequency(self, freq) {
@@ -140,7 +140,7 @@ fn subtractive_set_frequency(self, freq) {
     if (osc2 != 0) {
         osc_set_frequency(osc2, freq);
     }
-    return ERR_NONE;
+    return NAAD_ERR_NONE;
 }
 
 # ================================================================
@@ -154,7 +154,7 @@ fn subtractive_set_filter_env_depth(self, octaves) {
 
 # ================================================================
 # subtractive_set_cutoff -- set the base filter cutoff and reapply it to the
-# filter (preserving its current Q). Returns ERR_NONE or a negative ERR_*.
+# filter (preserving its current Q). Returns NAAD_ERR_NONE or a negative NAAD_ERR_*.
 # ================================================================
 fn subtractive_set_cutoff(self, cutoff) {
     SubtractiveSynth_set_base_cutoff(self, cutoff);
@@ -229,6 +229,11 @@ fn subtractive_amp_env(self) {
     return SubtractiveSynth_amp_env(self);
 }
 
+# The amplitude-envelope pointer. Ports amp_env_mut()
+# (rust-old/src/synth/subtractive.rs:182). Cyrius has no &/&mut distinction, so
+# this is an exact alias of subtractive_amp_env; both names are kept for oracle
+# surface parity -- do not delete either.
+#must_use
 fn subtractive_amp_env_mut(self) {
     return SubtractiveSynth_amp_env(self);
 }

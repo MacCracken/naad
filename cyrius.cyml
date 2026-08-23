@@ -17,13 +17,16 @@ output = "build/naad"
 # the flat namespace). Every module is self-contained (no `include` lines).
 # The bundle resolves stdlib + hisab (HVec3/HComplex/num_fft/calc_bspline/
 # ganita) + goonj (acoustics engine, which itself pulls sakshi) from the
-# CONSUMER's manifest. Cross-module symbol collisions audited to zero: all 446
-# top-level fns share one flat namespace once concatenated, and the bundle's fn
-# set is disjoint from hisab, goonj, sakshi, abaco and the stdlib. Re-measure
-# rather than trusting this number: `grep -c '^fn ' dist/naad.cyr`. NOTE the
-# audit is fn-scoped and provably cannot see top-level `var` collisions --
-# naad's ERR_INVALID_FREQUENCY (-1) still shadows goonj's (-3); see
-# tests/bundle.tcyr.
+# CONSUMER's manifest. Cross-library symbol collisions audited to zero, and
+# since 2.1.3 that audit covers top-level `var`s as well as `fn`s: the bundle's
+# whole top-level symbol set is disjoint from hisab, goonj, sakshi, abaco and
+# the stdlib, in all five directions. naad's six error constants carry the
+# `NAAD_ERR_` prefix precisely so the `var` class stays empty -- the bare names
+# used to shadow goonj's, and duplicate top-level `var`s draw NO diagnostic
+# from cycc or cyrlint. Re-measure rather than trusting any number here:
+#   grep -c '^fn ' dist/naad.cyr
+#   and intersect `^(fn|var) NAME` across dist/naad.cyr and each dep bundle.
+# `tests/bundle.tcyr` pins the de-collision.
 [lib]
 modules = [
     "src/error.cyr",

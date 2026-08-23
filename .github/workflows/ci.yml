@@ -59,6 +59,29 @@ jobs:
           mkdir -p build
           cyrius build src/main.cyr build/${{ github.event.repository.name }}
 
+      - name: Symbol-collision gate
+        # Cyrius has ONE FLAT NAMESPACE once distlib bundles are concatenated by
+        # a consumer. Duplicate top-level `fn`s warn; duplicate top-level `var`s
+        # emit NOTHING from cycc or cyrlint — which is how naad's
+        # ERR_INVALID_FREQUENCY (-1) shadowed goonj's (-3) for three releases.
+        # 2.1.3 renamed the error block to NAAD_ERR_*; this keeps it that way.
+        # Regenerates the bundle first so the check runs against current src/.
+        run: |
+          cyrius distlib
+          ./scripts/symbol-collision-check.sh
+
+      - name: Bundle is up to date
+        # dist/naad.cyr is a TRACKED artifact consumers link directly. If src/
+        # changed without regenerating it, the bundle on main is stale and
+        # tests/bundle.tcyr would be exercising last release's code.
+        run: |
+          if ! git diff --quiet -- dist/; then
+            echo "dist/ is stale — run 'cyrius distlib' and commit the result:"
+            git --no-pager diff --stat -- dist/
+            exit 1
+          fi
+          echo "dist/ matches src/"
+
       - name: Test
         # Bare `cyrius test` auto-discovers and runs every tests/**/*.tcyr
         # (recursively since 6.5.11; shallow but still automatic before that) —

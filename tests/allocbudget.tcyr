@@ -1,0 +1,146 @@
+# allocbudget.tcyr -- allocation-budget regression guard (2.1.3).
+#
+# naad 2.1.0 claimed "0 bytes/sample, verified" on four hot paths. Nothing in
+# the repo pinned it: tests/hotpath.bcyr benches those same four functions but
+# reports NANOSECONDS, never bytes, and all four were already alloc-free -- so
+# the claim was true and unguarded, and four OTHER hot paths regressed to
+# per-sample allocation without any test noticing.
+#
+# `lib/alloc.cyr` is a BUMP ALLOCATOR with no individual free (lib/alloc.cyr:12),
+# so a per-sample allocation is a permanent leak, not churn. Rust drops these at
+# scope exit, which is why the oracle has no equivalent problem and why these
+# are port defects rather than algorithm defects.
+#
+# `alloc_used()` is exported by the stdlib and was referenced by nothing in this
+# repo before this file existed.
+#
+# Budgets are ~2x the expected post-fix constant: loose enough not to flake on
+# an allocator implementation detail, tight enough that restoring any per-sample
+# allocation blows them by two to four orders of magnitude.
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "dist/naad.cyr"
+
+alloc_init();
+
+var AB_C0_5 = 0x3FE0000000000000;   # 0.5
+var AB_ONE  = 0x3FF0000000000000;   # 1.0
+var AB_N    = 10000;
+var ab_sink = 0;   # consumes #must_use results so the harness stays warning-clean
+
+# ================================================================
+# The four paths 2.1.0 verified. These are the regression guard for a claim
+# that has been load-bearing in the docs for three releases.
+# ================================================================
+test_group("alloc budget: oscillator core (2.1.0 claim)");
+var ab_osc = osc_new(WAVEFORM_SAW, f64_from(440), f64_from(44100));
+var ab_b0 = alloc_used();
+var ab_i = 0;
+while (ab_i < AB_N) { ab_sink = osc_next_sample(ab_osc); ab_i = ab_i + 1; }
+assert(alloc_used() - ab_b0 < 1024, "osc_next_sample allocates nothing per sample");
+
+test_group("alloc budget: biquad filter (2.1.0 claim)");
+var ab_f = filter_biquad_new(FILTER_LOWPASS, f64_from(44100), f64_from(1000), AB_ONE);
+var ab_b1 = alloc_used();
+ab_i = 0;
+while (ab_i < AB_N) { ab_sink = filter_biquad_process_sample(ab_f, AB_C0_5); ab_i = ab_i + 1; }
+assert(alloc_used() - ab_b1 < 1024, "filter_biquad_process_sample allocates nothing per sample");
+
+test_group("alloc budget: ADSR envelope (2.1.0 claim)");
+var ab_e = envelope_adsr_new(AB_C0_5, AB_C0_5, AB_C0_5, AB_C0_5);
+envelope_adsr_gate_on(ab_e);
+var ab_b2 = alloc_used();
+ab_i = 0;
+while (ab_i < AB_N) { ab_sink = envelope_adsr_next_value(ab_e); ab_i = ab_i + 1; }
+assert(alloc_used() - ab_b2 < 1024, "envelope_adsr_next_value allocates nothing per sample");
+
+test_group("alloc budget: pink noise (2.1.0 claim)");
+var ab_ng = noise_new(NOISE_PINK, 42);
+var ab_b3 = alloc_used();
+ab_i = 0;
+while (ab_i < AB_N) { ab_sink = noise_next_sample(ab_ng); ab_i = ab_i + 1; }
+assert(alloc_used() - ab_b3 < 1024, "noise_next_sample allocates nothing per sample");
+
+# ================================================================
+# The four paths fixed in 2.1.3. Each of these leaked before the fix; the
+# budget is what makes a regression visible.
+# ================================================================
+
+# B4 -- was two vec_new() per sample = 304 B/sample (~14.6 MB/s at 48 kHz).
+test_group("alloc budget: unison stereo (B4)");
+var ab_u = unison_new(WAVEFORM_SAW, f64_from(440), 4, f64_from(10), f64_from(44100));
+var ab_b4 = alloc_used();
+ab_i = 0;
+while (ab_i < AB_N) { ab_sink = unison_next_sample_stereo(ab_u); ab_i = ab_i + 1; }
+# UnisonStereo is a 16-byte struct return -- the idiom 2.1.0 accepted, and NOT
+# part of B4. Budget covers it; the 304 B of scratch vecs is what must not
+# return. Pre-fix delta was ~3.2 MB.
+assert(alloc_used() - ab_b4 < AB_N * 24, "unison_next_sample_stereo allocates only its result struct");
+
+# B3 -- was four hvec3_new per sample = 96 B/sample (~4.6 MB/s at 48 kHz).
+test_group("alloc budget: Catmull-Rom envelope (B3)");
+var ab_pts = vec_new();
+vec_push(ab_pts, envelope_point_new(0, 0));
+vec_push(ab_pts, envelope_point_new(AB_C0_5, AB_ONE));
+vec_push(ab_pts, envelope_point_new(AB_ONE, 0));
+var ab_cr = envelope_catmull_rom_new(ab_pts, f64_from(44100));
+envelope_catmull_rom_trigger(ab_cr);
+var ab_b5 = alloc_used();
+ab_i = 0;
+while (ab_i < AB_N) { ab_sink = envelope_catmull_rom_next_value(ab_cr); ab_i = ab_i + 1; }
+# calc_bspline's sibling calc_catmull_rom returns a fresh HVec3 (24 B) from
+# lib/hisab.cyr, which naad may not patch. The four LIFTS are what B3 recovered.
+assert(alloc_used() - ab_b5 < AB_N * 40, "envelope_catmull_rom_next_value reuses its HVec3 lifts");
+
+# B2 -- was ~464 B/sample (~22 MB/s at 48 kHz).
+test_group("alloc budget: smooth morph wavetable (B2)");
+var ab_amps = vec_new();
+vec_push(ab_amps, AB_ONE);
+var ab_tabs = vec_new();
+vec_push(ab_tabs, wavetable_from_harmonics(1, ab_amps, 256));
+vec_push(ab_tabs, wavetable_from_harmonics(2, ab_amps, 256));
+vec_push(ab_tabs, wavetable_from_harmonics(3, ab_amps, 256));
+vec_push(ab_tabs, wavetable_from_harmonics(4, ab_amps, 256));
+var ab_m = wavetable_morph_new(ab_tabs, f64_from(440), f64_from(44100));
+wavetable_morph_set_morph(ab_m, AB_C0_5);
+var ab_b6 = alloc_used();
+ab_i = 0;
+while (ab_i < AB_N) { ab_sink = wavetable_morph_next_sample_smooth(ab_m); ab_i = ab_i + 1; }
+# HONEST CEILING: ~120 B/sample of this path lives inside lib/hisab.cyr's
+# calc_bspline (its own scratch + result HVec3) and naad may not patch lib/.
+# This is NOT a zero-alloc path and must not be described as one. The budget
+# pins what naad controls; pre-fix the delta was ~4.6 MB.
+assert(alloc_used() - ab_b6 < AB_N * 160, "wavetable_morph_next_sample_smooth reuses its own scratch");
+
+# B1 -- was three alloc(fft_len * 16) per BLOCK (~147 MB/s at 48 kHz).
+test_group("alloc budget: convolution process_block (B1)");
+var ab_ir = vec_new();
+ab_i = 0;
+while (ab_i < 512) { vec_push(ab_ir, AB_C0_5); ab_i = ab_i + 1; }
+var ab_cv = naad_convolution_from_ir(ab_ir, AB_C0_5);
+var ab_in = vec_new();
+var ab_out = vec_new();
+ab_i = 0;
+while (ab_i < 512) { vec_push(ab_in, AB_C0_5); vec_push(ab_out, 0); ab_i = ab_i + 1; }
+# First call sizes the scratch; measure from AFTER it so the budget covers
+# steady state, which is what the leak was about.
+naad_convolution_process_block(ab_cv, ab_in, ab_out);
+var ab_b7 = alloc_used();
+ab_i = 0;
+while (ab_i < 64) { naad_convolution_process_block(ab_cv, ab_in, ab_out); ab_i = ab_i + 1; }
+# fft_len here is 1024, so pre-fix this was 64 * 3 * 1024 * 16 = 3 MiB.
+assert(alloc_used() - ab_b7 < 65536, "process_block reuses its FFT scratch across blocks");
+
+# Growth must still be possible when a longer IR needs a bigger transform.
+test_group("alloc budget: convolution scratch still grows on demand");
+var ab_ir2 = vec_new();
+ab_i = 0;
+while (ab_i < 4096) { vec_push(ab_ir2, AB_C0_5); ab_i = ab_i + 1; }
+assert_eq(naad_is_err(naad_convolution_rebuild_from_ir(ab_cv, ab_ir2)), 0, "rebuild with a longer IR succeeds");
+assert_eq(naad_is_finite(vec_get(ab_out, 0)), 1, "output stays finite after the scratch grows");
+naad_convolution_process_block(ab_cv, ab_in, ab_out);
+assert_eq(naad_is_finite(vec_get(ab_out, 0)), 1, "a larger fft_len reallocates rather than overrunning");
+
+var rc = assert_summary();
+syscall(60, rc);

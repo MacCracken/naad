@@ -73,7 +73,7 @@ assert(naad_is_err(osc_new(WAVEFORM_SINE, f64_from(440), f64_neg(F64_ONE))), "sr
 # ================================================================
 test_group("core: set frequency");
 var setf = osc_new(WAVEFORM_SINE, f64_from(440), f64_from(44100));
-assert_eq(osc_set_frequency(setf, f64_from(880)), ERR_NONE, "set_frequency(880) ok");
+assert_eq(osc_set_frequency(setf, f64_from(880)), NAAD_ERR_NONE, "set_frequency(880) ok");
 assert(naad_is_err(osc_set_frequency(setf, 0)), "set_frequency(0) err");
 
 # ================================================================

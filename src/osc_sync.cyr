@@ -2,7 +2,7 @@
 #
 # Ports rust-old/src/oscillator/sync.rs. f32 -> f64 throughout. serde
 # derives/tests are dropped; the constructor returns the struct pointer or a
-# negative ERR_*. HardSync embeds two Oscillator pointers (master always a
+# negative NAAD_ERR_*. HardSync embeds two Oscillator pointers (master always a
 # Saw, slave the caller-chosen waveform), both built via osc_new.
 #
 # Requires (from the build/test unit): stdlib alloc/vec + math (f64_lt) and
@@ -17,7 +17,7 @@ struct HardSync { master; slave; }
 
 # ================================================================
 # hardsync_new -- construct a master (Saw) / slave pair. Returns the struct
-# pointer on success, or a negative ERR_* if either oscillator failed.
+# pointer on success, or a negative NAAD_ERR_* if either oscillator failed.
 # ================================================================
 #must_use
 fn hardsync_new(master_freq, slave_freq, slave_waveform, sample_rate) {
@@ -84,12 +84,15 @@ fn hardsync_slave(self) {
 
 # ================================================================
 # hardsync_set_master_freq / hardsync_set_slave_freq -- delegate to the inner
-# oscillators. Return ERR_NONE or a negative ERR_*.
+# oscillators. Return NAAD_ERR_NONE or a negative NAAD_ERR_*.
 # ================================================================
 fn hardsync_set_master_freq(self, freq) {
     return osc_set_frequency(HardSync_master(self), freq);
 }
 
+# Set the slave (synced) oscillator's frequency; delegates to
+# osc_set_frequency. Returns NAAD_ERR_NONE, or a negative NAAD_ERR_* if the
+# frequency is invalid for the sample rate. Ports set_slave_freq().
 fn hardsync_set_slave_freq(self, freq) {
     return osc_set_frequency(HardSync_slave(self), freq);
 }

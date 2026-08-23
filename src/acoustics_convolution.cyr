@@ -5,8 +5,12 @@
 # or FFT convolution (per block, through hisab num_fft/num_ifft). An IR can be
 # supplied raw or generated from a goonj shoebox-room simulation. f32 -> f64
 # throughout. Rust's serde derives and the reusable Complex scratch vectors are
-# dropped -- process_block allocates its interleaved complex buffers per call,
-# which is behaviourally identical.
+# dropped, but the scratch vectors are NOT: process_block reuses struct-owned
+# interleaved complex buffers, growing them only when fft_len exceeds the
+# largest seen so far, exactly as the oracle does. Allocating them per call was
+# behaviourally identical NUMERICALLY and wrong for resource behaviour -- under
+# lib/alloc.cyr's bump allocator (no individual free) it leaked 3 * fft_len * 16
+# bytes per block, ~147 MB/s for a 0.5 s IR at 48 kHz in 512-sample blocks.
 #
 # Cross-crate mapping (discovered from lib/goonj.cyr + goonj src/tests, and
 # reused from the already-green src/acoustics_room.cyr wrapper):
@@ -22,7 +26,7 @@
 #                                           +i*16, im at +i*16+8.
 # The wall material name resolves through naad_acoustics_material_by_name
 # (src/acoustics.cyr). Result<Self> -> struct pointer on success, or a negative
-# ERR_COMPUTATION on unknown material / non-positive dimensions. Reuses
+# NAAD_ERR_COMPUTATION on unknown material / non-positive dimensions. Reuses
 # RoomReverbConfig + its accessors from src/acoustics_room.cyr. No `include`.
 
 # ================================================================
@@ -31,8 +35,11 @@
 #   input_buffer  : ring-buffer of recent inputs (len == max(ir_len, 1))
 #   position      : current write position in the ring buffer
 #   mix           : wet/dry mix in [0, 1] (0 = fully dry, 1 = fully wet)
-# The Rust scratch_ir / scratch_in / scratch_product Complex vectors are a
-# performance cache only; the Cyrius port allocates them per process_block.
+#   scratch_ir / scratch_in / scratch_product : interleaved complex FFT scratch
+#                   (re at +i*16, im at +i*16+8), mirroring the oracle's
+#                   #[serde(skip)] Vec<Complex> fields
+#   scratch_cap   : the fft_len the three buffers are currently sized for; 0
+#                   until the first process_block
 # ================================================================
 #derive(accessors)
 struct ConvolutionReverb {
@@ -40,6 +47,10 @@ struct ConvolutionReverb {
     input_buffer;
     position;
     mix;
+    scratch_ir;
+    scratch_in;
+    scratch_product;
+    scratch_cap;
 }
 
 # ================================================================
@@ -66,6 +77,11 @@ fn naad_convolution_from_ir(ir, mix) {
     ConvolutionReverb_set_input_buffer(self, input_buffer);
     ConvolutionReverb_set_position(self, 0);
     ConvolutionReverb_set_mix(self, f64_clamp(mix, 0, F64_ONE));
+    # Scratch grows lazily on the first process_block (see scratch_cap).
+    ConvolutionReverb_set_scratch_ir(self, 0);
+    ConvolutionReverb_set_scratch_in(self, 0);
+    ConvolutionReverb_set_scratch_product(self, 0);
+    ConvolutionReverb_set_scratch_cap(self, 0);
     return self;
 }
 
@@ -74,7 +90,7 @@ fn naad_convolution_from_ir(ir, mix) {
 # simulation. Builds a shoebox room, generates a broadband impulse response via
 # image-source + diffuse rain (order 3, 2000 diffuse rays, 30 bounces, 1.0 s,
 # seed 42 -- the Rust IrConfig literal), and loads it fully wet (mix 1.0).
-# Returns the struct pointer on success, or a negative ERR_COMPUTATION if the
+# Returns the struct pointer on success, or a negative NAAD_ERR_COMPUTATION if the
 # wall material name is unknown or the room dimensions are not positive.
 # Ports ConvolutionReverb::from_room. Reuses RoomReverbConfig from
 # src/acoustics_room.cyr.
@@ -82,11 +98,11 @@ fn naad_convolution_from_ir(ir, mix) {
 #must_use
 fn naad_convolution_from_room(config) {
     var material = naad_acoustics_material_by_name(RoomReverbConfig_wall_material_name(config));
-    if (material == 0) { return ERR_COMPUTATION; }
+    if (material == 0) { return NAAD_ERR_COMPUTATION; }
 
-    if (f64_le(RoomReverbConfig_length(config), 0) == 1) { return ERR_COMPUTATION; }
-    if (f64_le(RoomReverbConfig_width(config), 0) == 1) { return ERR_COMPUTATION; }
-    if (f64_le(RoomReverbConfig_height(config), 0) == 1) { return ERR_COMPUTATION; }
+    if (f64_le(RoomReverbConfig_length(config), 0) == 1) { return NAAD_ERR_COMPUTATION; }
+    if (f64_le(RoomReverbConfig_width(config), 0) == 1) { return NAAD_ERR_COMPUTATION; }
+    if (f64_le(RoomReverbConfig_height(config), 0) == 1) { return NAAD_ERR_COMPUTATION; }
 
     var room = acoustic_room_shoebox(RoomReverbConfig_length(config),
       RoomReverbConfig_width(config), RoomReverbConfig_height(config), material);
@@ -211,9 +227,25 @@ fn naad_convolution_process_block(self, input, output) {
     var span = ir_len + block_len - 1;
     var fft_len = naad_convolution_next_pow2(span);
 
-    # Interleaved complex scratch: re at +i*16, im at +i*16+8.
-    var ir_buf = alloc(fft_len * 16);
-    var in_buf = alloc(fft_len * 16);
+    # Interleaved complex scratch: re at +i*16, im at +i*16+8. Struct-owned and
+    # reused; reallocated only when fft_len exceeds the largest seen so far, the
+    # same policy as the oracle's "resize keeps capacity" comment. A failed
+    # allocation falls back to direct convolution rather than storing through a
+    # null -- the leak used to make its own null-deref reachable.
+    if (fft_len > ConvolutionReverb_scratch_cap(self)) {
+        var nir = alloc(fft_len * 16);
+        var nin = alloc(fft_len * 16);
+        var npr = alloc(fft_len * 16);
+        if (nir == 0) { return naad_convolution_process_block_direct(self, input, output); }
+        if (nin == 0) { return naad_convolution_process_block_direct(self, input, output); }
+        if (npr == 0) { return naad_convolution_process_block_direct(self, input, output); }
+        ConvolutionReverb_set_scratch_ir(self, nir);
+        ConvolutionReverb_set_scratch_in(self, nin);
+        ConvolutionReverb_set_scratch_product(self, npr);
+        ConvolutionReverb_set_scratch_cap(self, fft_len);
+    }
+    var ir_buf = ConvolutionReverb_scratch_ir(self);
+    var in_buf = ConvolutionReverb_scratch_in(self);
 
     # IR -> ir_buf (real = sample for i < ir_len, else 0; im = 0).
     var i = 0;
@@ -241,8 +273,8 @@ fn naad_convolution_process_block(self, input, output) {
     var e2 = num_fft(in_buf, fft_len);
     if (e2 != 0) { return naad_convolution_process_block_direct(self, input, output); }
 
-    # Pointwise multiply in the frequency domain into prod.
-    var prod = alloc(fft_len * 16);
+    # Pointwise multiply in the frequency domain into prod (struct-owned).
+    var prod = ConvolutionReverb_scratch_product(self);
     var m = 0;
     while (m < fft_len) {
         var ar = load64(ir_buf + m * 16);

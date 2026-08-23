@@ -9,14 +9,14 @@
 # `(f32, f32)` tuple returned by process_sample becomes a BinauralStereo struct
 # (naad-distinct name; goonj owns BinauralIr/BinauralAngles/HrtfPair). Vec<f32>
 # IRs and ring buffers become stdlib vecs (f64 stored directly). Result<Self>
-# collapses to the struct pointer on success or ERR_COMPUTATION (sample_rate
+# collapses to the struct pointer on success or NAAD_ERR_COMPUTATION (sample_rate
 # not positive).
 #
 # Requires (from the build/test unit): lib/hisab.cyr (hvec3_new), lib/goonj.cyr
 # (acoustic_room_shoebox, acoustic_material_concrete, ir_config_new,
 # hrtf_pair_new, hrtf_dataset_from_pairs, generate_binaural_ir, BinauralIr_*,
 # math constants F64_ONE/HALF/ONE_HALF/PI/PI_2, f64_*), src/error.cyr
-# (ERR_COMPUTATION). No `include` lines.
+# (NAAD_ERR_COMPUTATION). No `include` lines.
 
 # ================================================================
 # Float literals (IEEE-754 bit patterns).
@@ -99,13 +99,13 @@ fn naad_binaural_build_minimal_hrtf(azimuth, elevation, sample_rate) {
 # ================================================================
 # naad_binaural_new -- create a binaural processor for a source direction.
 # Builds a 6x4x3 concrete shoebox, a minimal HRTF dataset, and generates the
-# stereo IR via goonj. Returns the struct pointer on success or ERR_COMPUTATION
+# stereo IR via goonj. Returns the struct pointer on success or NAAD_ERR_COMPUTATION
 # when sample_rate is not positive. Ports BinauralProcessor::new. (Oracle types
 # sample_rate `u32`; the signed Cyrius port must reject negatives explicitly.)
 # ================================================================
 #must_use
 fn naad_binaural_new(azimuth, elevation, sample_rate) {
-    if (sample_rate <= 0) { return ERR_COMPUTATION; }
+    if (sample_rate <= 0) { return NAAD_ERR_COMPUTATION; }
 
     var room = acoustic_room_shoebox(
       f64_from(6), f64_from(4), f64_from(3), acoustic_material_concrete());
@@ -206,7 +206,7 @@ fn naad_binaural_process_sample(self, input) {
 # ================================================================
 # naad_binaural_rebuild -- regenerate IRs and buffers from the stored
 # azimuth/elevation/sample_rate (IRs are transient across a serde boundary in
-# Rust). Returns ERR_NONE on success or a negative ERR_* if regeneration fails.
+# Rust). Returns NAAD_ERR_NONE on success or a negative NAAD_ERR_* if regeneration fails.
 # Ports BinauralProcessor::rebuild.
 # ================================================================
 #must_use
@@ -220,7 +220,7 @@ fn naad_binaural_rebuild(self) {
     BinauralProcessor_set_left_buffer(self, BinauralProcessor_left_buffer(fresh));
     BinauralProcessor_set_right_buffer(self, BinauralProcessor_right_buffer(fresh));
     BinauralProcessor_set_position(self, 0);
-    return ERR_NONE;
+    return NAAD_ERR_NONE;
 }
 
 # ================================================================

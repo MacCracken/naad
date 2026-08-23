@@ -6,13 +6,13 @@
 # enum becomes integer constants; the `TuningTable` struct's fixed
 # `[f32; 12]` ratio array becomes a stdlib `vec` of 12 f64 slots. Rust's
 # `Result<T>` constructors return the pointer on success or a negative
-# `ERR_*` code on the error path (same validation predicates as Rust).
+# `NAAD_ERR_*` code on the error path (same validation predicates as Rust).
 # Serde round-trip test dropped (no serde). Methods become free
 # `tuning_*` functions taking the struct pointer.
 #
 # Requires (from the build/test unit): stdlib alloc/vec, math/ganita
 # (F64_ONE/TWO/LN2, f64_pow/ln/round/clamp/...), string/fmt (strlen,
-# memcpy, fmt_int_buf for note_name), and error.cyr (ERR_INVALID_PARAMETER,
+# memcpy, fmt_int_buf for note_name), and error.cyr (NAAD_ERR_INVALID_PARAMETER,
 # naad_is_finite). The module file itself has no `include` lines.
 
 # ================================================================
@@ -131,19 +131,24 @@ fn tuning_table_from_system(system, a4_hz) {
 
 # ================================================================
 # tuning_table_custom -- build a custom table with validation.
-# Returns ERR_INVALID_PARAMETER if a4_hz <= 0 / non-finite, or if any
+# Returns NAAD_ERR_INVALID_PARAMETER if a4_hz <= 0 / non-finite, or if any
 # ratio is <= 0 / non-finite; otherwise returns the table pointer.
 # ================================================================
 #must_use
 fn tuning_table_custom(name, ratios, a4_hz) {
-    if (f64_le(a4_hz, 0) == 1) { return ERR_INVALID_PARAMETER; }
-    if (naad_is_finite(a4_hz) == 0) { return ERR_INVALID_PARAMETER; }
+    if (f64_le(a4_hz, 0) == 1) { return NAAD_ERR_INVALID_PARAMETER; }
+    if (naad_is_finite(a4_hz) == 0) { return NAAD_ERR_INVALID_PARAMETER; }
+    # The oracle's parameter is `[f32; 12]` (rust-old/src/tuning.rs:141), so the
+    # length is a TYPE invariant and its body validates only values. Erasing the
+    # array to a vec dropped that: tuning_note_to_freq reads index 9
+    # unconditionally, so a shorter table aborts on the first lookup.
     var n = vec_len(ratios);
+    if (n != 12) { return NAAD_ERR_INVALID_PARAMETER; }
     var i = 0;
     while (i < n) {
         var r = vec_get(ratios, i);
-        if (f64_le(r, 0) == 1) { return ERR_INVALID_PARAMETER; }
-        if (naad_is_finite(r) == 0) { return ERR_INVALID_PARAMETER; }
+        if (f64_le(r, 0) == 1) { return NAAD_ERR_INVALID_PARAMETER; }
+        if (naad_is_finite(r) == 0) { return NAAD_ERR_INVALID_PARAMETER; }
         i = i + 1;
     }
     var t = alloc(sizeof(TuningTable));
@@ -185,7 +190,11 @@ fn tuning_note_to_freq(self, note) {
 fn tuning_note_name(note) {
     var name = tuning_note_name_str(note % 12);
     var octave = (note / 12) - 1;
-    var buf = alloc(16);
+    # 32, not 16: the oracle takes `note: u8` (rust-old/src/tuning.rs:189) so the
+    # longest output is "C#10" -- 5 bytes. The port widened the parameter to a
+    # signed i64, where fmt_int_buf can emit 20 characters, so the u8-era size
+    # was 2 bytes short of the widened domain. nl <= 2 + ol <= 20 + NUL = 23.
+    var buf = alloc(32);
     var nl = strlen(name);
     memcpy(buf, name, nl);
     var tmp = alloc(24);

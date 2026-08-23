@@ -6,18 +6,18 @@
 # validate_sample_rate) AND the two crate-root helpers from lib.rs that
 # the whole crate leans on: flush_denormal + the finite/epsilon tolerances.
 # Rust carried a String/f32 payload per error variant; Cyrius uses integer
-# codes -- validators return ERR_NONE (0) on success or a negative code on
+# codes -- validators return NAAD_ERR_NONE (0) on success or a negative code on
 # failure. Diagnostic strings come from naad_err_name().
 
 # ================================================================
 # Error codes (was `enum NaadError`). One per Rust variant.
 # ================================================================
-var ERR_NONE                = 0;
-var ERR_INVALID_FREQUENCY   = (0 - 1);   # frequency out of (0, Nyquist)
-var ERR_INVALID_SAMPLE_RATE = (0 - 2);   # sample rate <= 0 or non-finite
-var ERR_INVALID_PARAMETER   = (0 - 3);   # a named parameter out of range
-var ERR_BUFFER_OVERFLOW     = (0 - 4);   # buffer op exceeded capacity
-var ERR_COMPUTATION         = (0 - 5);   # computation produced invalid result
+var NAAD_ERR_NONE                = 0;
+var NAAD_ERR_INVALID_FREQUENCY   = (0 - 1);   # frequency out of (0, Nyquist)
+var NAAD_ERR_INVALID_SAMPLE_RATE = (0 - 2);   # sample rate <= 0 or non-finite
+var NAAD_ERR_INVALID_PARAMETER   = (0 - 3);   # a named parameter out of range
+var NAAD_ERR_BUFFER_OVERFLOW     = (0 - 4);   # buffer op exceeded capacity
+var NAAD_ERR_COMPUTATION         = (0 - 5);   # computation produced invalid result
 
 # ================================================================
 # Shared f64 tolerances / sentinels (IEEE-754 bit patterns).
@@ -40,12 +40,12 @@ fn naad_is_err(code) {
 # Static name for an error code (for diagnostics / logging).
 #must_use
 fn naad_err_name(code) {
-    if (code == ERR_NONE) { return "none"; }
-    if (code == ERR_INVALID_FREQUENCY) { return "invalid frequency"; }
-    if (code == ERR_INVALID_SAMPLE_RATE) { return "invalid sample rate"; }
-    if (code == ERR_INVALID_PARAMETER) { return "invalid parameter"; }
-    if (code == ERR_BUFFER_OVERFLOW) { return "buffer overflow"; }
-    if (code == ERR_COMPUTATION) { return "computation error"; }
+    if (code == NAAD_ERR_NONE) { return "none"; }
+    if (code == NAAD_ERR_INVALID_FREQUENCY) { return "invalid frequency"; }
+    if (code == NAAD_ERR_INVALID_SAMPLE_RATE) { return "invalid sample rate"; }
+    if (code == NAAD_ERR_INVALID_PARAMETER) { return "invalid parameter"; }
+    if (code == NAAD_ERR_BUFFER_OVERFLOW) { return "buffer overflow"; }
+    if (code == NAAD_ERR_COMPUTATION) { return "computation error"; }
     return "unknown error";
 }
 
@@ -58,28 +58,28 @@ fn naad_is_finite(x) {
 }
 
 # ================================================================
-# validate_frequency -- ERR_NONE if in (0, Nyquist) and finite, else
-# ERR_INVALID_FREQUENCY. Ports validate_frequency (returns Option<Error>);
+# validate_frequency -- NAAD_ERR_NONE if in (0, Nyquist) and finite, else
+# NAAD_ERR_INVALID_FREQUENCY. Ports validate_frequency (returns Option<Error>);
 # the Rust `warn!` diagnostic is dropped (logging is a separate module).
 # ================================================================
 #must_use
 fn validate_frequency(frequency, sample_rate) {
     var nyquist = f64_mul(sample_rate, F64_HALF);
-    if (f64_le(frequency, 0) == 1) { return ERR_INVALID_FREQUENCY; }
-    if (f64_ge(frequency, nyquist) == 1) { return ERR_INVALID_FREQUENCY; }
-    if (naad_is_finite(frequency) == 0) { return ERR_INVALID_FREQUENCY; }
-    return ERR_NONE;
+    if (f64_le(frequency, 0) == 1) { return NAAD_ERR_INVALID_FREQUENCY; }
+    if (f64_ge(frequency, nyquist) == 1) { return NAAD_ERR_INVALID_FREQUENCY; }
+    if (naad_is_finite(frequency) == 0) { return NAAD_ERR_INVALID_FREQUENCY; }
+    return NAAD_ERR_NONE;
 }
 
 # ================================================================
-# validate_sample_rate -- ERR_NONE if positive and finite, else
-# ERR_INVALID_SAMPLE_RATE. Ports validate_sample_rate.
+# validate_sample_rate -- NAAD_ERR_NONE if positive and finite, else
+# NAAD_ERR_INVALID_SAMPLE_RATE. Ports validate_sample_rate.
 # ================================================================
 #must_use
 fn validate_sample_rate(sample_rate) {
-    if (f64_le(sample_rate, 0) == 1) { return ERR_INVALID_SAMPLE_RATE; }
-    if (naad_is_finite(sample_rate) == 0) { return ERR_INVALID_SAMPLE_RATE; }
-    return ERR_NONE;
+    if (f64_le(sample_rate, 0) == 1) { return NAAD_ERR_INVALID_SAMPLE_RATE; }
+    if (naad_is_finite(sample_rate) == 0) { return NAAD_ERR_INVALID_SAMPLE_RATE; }
+    return NAAD_ERR_NONE;
 }
 
 # ================================================================
