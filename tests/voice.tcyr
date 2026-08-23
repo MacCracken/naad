@@ -39,7 +39,7 @@ assert_eq(voice_manager_active_count(vm2), 2, "still two active after steal");
 test_group("steal none");
 var vm3 = voice_manager_new(1, POLY_MODE_POLY, STEAL_MODE_NONE);
 var _on3 = voice_manager_note_on(vm3, 60, C0_8);
-assert_eq(voice_manager_note_on(vm3, 64, C0_7), VOICE_NONE, "note_on returns None when full");
+assert_eq(voice_manager_note_on(vm3, 64, C0_7), NAAD_VOICE_NONE, "note_on returns None when full");
 
 # ================================================================
 test_group("mono mode");

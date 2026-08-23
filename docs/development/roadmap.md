@@ -16,19 +16,18 @@ committed to — nothing here is speculative, and no milestone is invented.
 
 ### Release engineering
 
-- [~] **Clean gate enforced in CI.** `cyrius audit` (fmt · lint · docs · tests ·
-      bench) exits 0 locally as of 2.1.3. CI enforces the changelog gate, the
-      symbol-collision gate, the bundle-freshness gate and `cyrius test` — but
-      still not fmt, lint or deny. Wire the rest in: `cyrius fmt <file> --check`,
-      `cyrius lint <file>`, `cyrius deny src/main.cyr`, and `cyrius bench` over
-      `tests/hotpath.bcyr` / `tests/naad.bcyr`. Until then those three are
-      available, not enforced — a fmt or lint regression reaches `main`
-      unchallenged.
-      (Use `--check`: bare `cyrius fmt <file>` **rewrites the file in place**.)
-- [ ] **Fuzz harnesses.** `cyrius fuzz` runs `fuzz/*.fcyr`; naad has no `fuzz/`
-      directory yet. Harnesses first, then a CI step. The natural first targets
-      are the parsers-of-untrusted-numbers on the DSP boundary — buffer-length
-      and sample-rate validation, and the spectral entry points.
+- [x] **Clean gate enforced in CI** — shipped in 2.2.0. CI runs the changelog
+      gate, the symbol-collision gate, the bundle-freshness gate, `cyrius audit`
+      (fmt · lint · docs · tests · bench), `cyrius deny` and `cyrius fuzz`
+      before `cyrius test`. Enforcing `audit` only became possible once it
+      started exiting 0 in 2.1.3.
+      (When running fmt by hand use `--check`: bare `cyrius fmt <file>`
+      **rewrites the file in place**.)
+- [x] **Fuzz harness** — shipped in 2.2.0. `cyrius fuzz` discovers
+      `tests/*.fcyr` (no `fuzz/` directory is required — the earlier note here
+      was wrong). `tests/naad.fcyr` drives the DSP boundary with the values that
+      actually break Cyrius ports and is verified to fail when any of the 2.1.3
+      id guards is reverted. 1273 checks, wired into CI.
 
 ### Surface polish
 
@@ -48,21 +47,29 @@ committed to — nothing here is speculative, and no milestone is invented.
       from hisab, goonj, sakshi, abaco and the stdlib in all five directions.
       Breaking for consumers — see the 2.1.3 migration note.
 
-- [ ] **Prefix the remaining bare public names.** 2.1.1 took the dB helpers,
-      2.1.3 took the error block; `FILTER_LOWPASS`..`FILTER_PEAK` and
-      `VOICE_NONE` still collide by name with `nidhi` and `garjan`, both
-      co-linked with naad inside dhvani today. Inert — every shared value agrees
-      and nidhi's ids sit inside naad's valid band — so this is forward risk,
-      not a live defect. The Tier-1 bare names (`lerp`, `rms`, `peak`,
-      `normalize`, `chromagram`, `crossfade_equal_power`) have zero collisions
-      today but are the most likely future ones. Breaking: a 2.2.0 wave landed
-      with the sibling refreshes, not a patch.
-- [ ] **Retire ADR-0001.** `fit_polynomial`'s sample cap is a knowing divergence
-      forced by ganita materialising a full `nx × nx` Q. A thin QR over the
-      Vandermonde `fit_polynomial` already builds restores parity, drops peak
-      allocation to `nx × cols` and removes the cap — but changes rounding for
-      every currently-working input, so it is a minor release. Either that, or
-      the upstream fix: give `ganita_mat_least_squares` a failure return.
+- [x] **Prefix the remaining bare public names** — shipped in 2.2.0. 2.1.1 took
+      the dB helpers, 2.1.3 the error block, 2.2.0 the `FILTER_*` and `VOICE_*`
+      constants and the six Tier-1 function names. Ecosystem-wide top-level
+      symbol intersection is **zero** across all 126 sibling bundles and the
+      pinned stdlib. The compound-prefixed families (`WAVEFORM_*`, `NOISE_*`,
+      `MODULATION_LFO_*`, …) were deliberately left alone — measured at zero
+      risk, and prefixing them buys verbosity, not safety.
+- [x] **Retire ADR-0001** — shipped in 2.2.0. `fit_polynomial` ports hisab
+      1.4.0's thin QR in-tree; no square Q is formed, the cap is gone, and large
+      inputs succeed as they do in Rust. Superseded by ADR-0002.
+- [ ] **File the ganita bug upstream.** `ganita_mat_least_squares` still forms an
+      `m × m` Q and still has no failure return. naad is no longer exposed to it
+      after 2.2.0, but the defect is real and the next consumer will hit it.
+
+- [ ] **Accessor test coverage.** 108 public fns have no caller outside their own
+      definition — entire families (`unison_*`, `subosc_*`, `wavetable_osc_*`,
+      `wavetable_morph_*`, `physical_*`, `modulation_lfo_*`, `hardsync_*`,
+      `subtractive_*`, every `*_process_buffer`) have zero assertions behind
+      them. This is the largest remaining gap in the project and it is a
+      coverage problem, not a code problem: five of the eight fns documented in
+      2.1.3 were in that set, so the same corners were missing both docs and
+      tests. `cyrius coverage` reports file-level reference coverage, which does
+      not see it.
 
 ### Downstream
 
@@ -101,10 +108,11 @@ committed to — nothing here is speculative, and no milestone is invented.
 - [x] CHANGELOG complete; `VERSION` bumped to **2.0.0**
 - [x] deps pinned git+tag — hisab and goonj are both git+tag pinned in
       `cyrius.cyml`, with the resolved commits recorded in `cyrius.lock`
-- [~] Clean gate: fmt + lint + tests + bench all green locally under
-      `cyrius audit` — whose sweep *does* auto-discover the `tests/**/*.tcyr`
-      suites. Still partial because CI enforces only the test step; see
-      [Open gates](#release-engineering).
+- [x] Clean gate: fmt + lint + tests + bench all green under `cyrius audit` —
+      whose sweep *does* auto-discover the `tests/**/*.tcyr` suites. Was partial
+      at the 2.0.0 tag (CI enforced only the test step) and stayed partial until
+      the docs gate closed in 2.1.3; CI has enforced the full sweep plus `deny`
+      and `fuzz` since 2.2.0.
 
 ### M0 — Port scaffold — ✅ shipped 2026-06-30
 

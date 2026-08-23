@@ -41,7 +41,7 @@ while (ab_i < AB_N) { ab_sink = osc_next_sample(ab_osc); ab_i = ab_i + 1; }
 assert(alloc_used() - ab_b0 < 1024, "osc_next_sample allocates nothing per sample");
 
 test_group("alloc budget: biquad filter (2.1.0 claim)");
-var ab_f = filter_biquad_new(FILTER_LOWPASS, f64_from(44100), f64_from(1000), AB_ONE);
+var ab_f = filter_biquad_new(NAAD_FILTER_LOWPASS, f64_from(44100), f64_from(1000), AB_ONE);
 var ab_b1 = alloc_used();
 ab_i = 0;
 while (ab_i < AB_N) { ab_sink = filter_biquad_process_sample(ab_f, AB_C0_5); ab_i = ab_i + 1; }
@@ -141,6 +141,54 @@ assert_eq(naad_is_err(naad_convolution_rebuild_from_ir(ab_cv, ab_ir2)), 0, "rebu
 assert_eq(naad_is_finite(vec_get(ab_out, 0)), 1, "output stays finite after the scratch grows");
 naad_convolution_process_block(ab_cv, ab_in, ab_out);
 assert_eq(naad_is_finite(vec_get(ab_out, 0)), 1, "a larger fft_len reallocates rather than overrunning");
+
+# ================================================================
+# 2.2.0 -- the zero-alloc siblings. Each of these three modules previously had
+# ONLY the allocating per-sample form, with no escape hatch for a caller in a
+# render loop. The one-shot forms still allocate (that is their contract); what
+# these budgets pin is that the _into / _buffer forms do not.
+# ================================================================
+test_group("alloc budget: panning_pan_mono_into (D2)");
+var ab_pp = alloc(16);
+var ab_b8 = alloc_used();
+ab_i = 0;
+while (ab_i < AB_N) { ab_sink = panning_pan_mono_into(AB_C0_5, AB_C0_5, PAN_LAW_EQUAL_POWER, ab_pp); ab_i = ab_i + 1; }
+assert(alloc_used() - ab_b8 < 1024, "panning_pan_mono_into allocates nothing per sample");
+# Control: the one-shot form still allocates, so the budget is measuring
+# something real rather than an inlined no-op.
+var ab_b9 = alloc_used();
+ab_i = 0;
+while (ab_i < AB_N) { ab_sink = panning_pan_mono(AB_C0_5, AB_C0_5, PAN_LAW_EQUAL_POWER); ab_i = ab_i + 1; }
+assert(alloc_used() - ab_b9 > AB_N * 8, "control: the one-shot form does allocate per sample");
+
+test_group("alloc budget: panning_pan_buffer (D2)");
+var ab_pin = vec_new();
+var ab_pl = vec_new();
+var ab_pr = vec_new();
+ab_i = 0;
+while (ab_i < 512) { vec_push(ab_pin, AB_C0_5); vec_push(ab_pl, 0); vec_push(ab_pr, 0); ab_i = ab_i + 1; }
+var ab_b10 = alloc_used();
+ab_i = 0;
+while (ab_i < 64) { ab_sink = panning_pan_buffer(ab_pin, AB_C0_5, PAN_LAW_EQUAL_POWER, ab_pl, ab_pr); ab_i = ab_i + 1; }
+assert(alloc_used() - ab_b10 < 64 * 32, "panning_pan_buffer allocates once per buffer, not per sample");
+assert(naad_is_finite(vec_get(ab_pl, 0)), "panned left output is finite");
+
+test_group("alloc budget: ambisonics encode (D2)");
+var ab_enc = naad_ambisonics_encoder_new(AB_C0_5, 0);
+var ab_bf = alloc(32);
+var ab_b11 = alloc_used();
+ab_i = 0;
+while (ab_i < AB_N) { ab_sink = naad_ambisonics_encode_sample_into(ab_enc, AB_C0_5, ab_bf); ab_i = ab_i + 1; }
+assert(alloc_used() - ab_b11 < 1024, "naad_ambisonics_encode_sample_into allocates nothing per sample");
+
+test_group("alloc budget: binaural process (D2)");
+var ab_bp = naad_binaural_new(AB_C0_5, 0, 48000);
+var ab_bs = alloc(16);
+var ab_b12 = alloc_used();
+ab_i = 0;
+while (ab_i < AB_N) { ab_sink = naad_binaural_process_sample_into(ab_bp, AB_C0_5, ab_bs); ab_i = ab_i + 1; }
+assert(alloc_used() - ab_b12 < 1024, "naad_binaural_process_sample_into allocates nothing per sample");
+assert(naad_is_finite(BinauralStereo_left(ab_bs)), "binaural left output is finite");
 
 var rc = assert_summary();
 syscall(60, rc);

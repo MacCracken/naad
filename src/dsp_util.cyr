@@ -56,7 +56,7 @@ fn naad_db_to_amplitude(db) {
 # ================================================================
 
 # Scale a buffer so its peak absolute value is 1.0. No-op if all zeros.
-fn normalize(buffer) {
+fn naad_normalize(buffer) {
     var n = vec_len(buffer);
     var peak = 0;
     var i = 0;
@@ -79,7 +79,7 @@ fn normalize(buffer) {
 # Root mean square of a buffer (0.0 if empty).
 #inline
 #must_use
-fn rms(buffer) {
+fn naad_rms(buffer) {
     var n = vec_len(buffer);
     if (n == 0) { return 0; }
     var sum_sq = 0;
@@ -95,7 +95,7 @@ fn rms(buffer) {
 # Peak absolute value of a buffer.
 #inline
 #must_use
-fn peak(buffer) {
+fn naad_peak(buffer) {
     var n = vec_len(buffer);
     var p = 0;
     var i = 0;
@@ -128,7 +128,7 @@ fn soft_clip_tanh(sample, drive) {
 # Linear interpolation: a + (b - a) * t.
 #inline
 #must_use
-fn lerp(a, b, t) {
+fn naad_lerp(a, b, t) {
     return f64_add(a, f64_mul(f64_sub(b, a), t));
 }
 
@@ -153,7 +153,7 @@ fn hermite_interpolate(y0, y1, y2, y3, t) {
 # Equal-power crossfade: mix 0.0 = full dry, 1.0 = full wet.
 #inline
 #must_use
-fn crossfade_equal_power(dry, wet, mix) {
+fn naad_crossfade_equal_power(dry, wet, mix) {
     var angle = f64_mul(mix, F64_PI_2);
     return f64_add(f64_mul(dry, f64_cos(angle)), f64_mul(wet, f64_sin(angle)));
 }
@@ -274,7 +274,6 @@ fn db_to_amplitude_lut(db) {
 # loop forever). Returns the new state (== the raw output).
 # ================================================================
 var U32_MASK = 0xFFFFFFFF;
-var U32_MAXF = 0x41EFFFFFFFE00000;   # not used; kept for reference (u32::MAX as f64)
 
 # Advance the xorshift32 PRNG one step and return the new state, which is also
 # the raw output. `sp` is a POINTER to a 64-bit slot holding the u32 state --
@@ -307,8 +306,3 @@ fn xorshift32_unit_f32(sp) {
     return f64_div(f64_from(raw), f64_from(4294967295));
 }
 
-# Single white-noise sample from a state slot (convenience; == signed step).
-#must_use
-fn white_noise_sample(sp) {
-    return xorshift32_signed_f32(sp);
-}

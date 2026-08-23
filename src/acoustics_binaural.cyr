@@ -151,16 +151,29 @@ fn naad_binaural_new(azimuth, elevation, sample_rate) {
 #inline
 #must_use
 fn naad_binaural_process_sample(self, input) {
+    var res = alloc(sizeof(BinauralStereo));
+    naad_binaural_process_sample_into(self, input, res);
+    return res;
+}
+
+# ================================================================
+# naad_binaural_process_sample_into -- the allocation-free core. Writes into a
+# caller-owned BinauralStereo and returns 0. The one-shot form above costs 16
+# permanently-resident bytes per call under lib/alloc.cyr's bump allocator (no
+# individual free), so a per-sample caller should hoist one BinauralStereo and
+# use this. Same split as reverb_process_core / reverb_process_sample.
+# ================================================================
+#inline
+fn naad_binaural_process_sample_into(self, input, res) {
     var left_ir = BinauralProcessor_left_ir(self);
     var right_ir = BinauralProcessor_right_ir(self);
     var left_len = vec_len(left_ir);
     var right_len = vec_len(right_ir);
 
-    var res = alloc(sizeof(BinauralStereo));
     if (left_len == 0 && right_len == 0) {
         BinauralStereo_set_left(res, input);
         BinauralStereo_set_right(res, input);
-        return res;
+        return 0;
     }
 
     var left_buffer = BinauralProcessor_left_buffer(self);
@@ -169,7 +182,7 @@ fn naad_binaural_process_sample(self, input) {
     if (buf_len == 0) {
         BinauralStereo_set_left(res, input);
         BinauralStereo_set_right(res, input);
-        return res;
+        return 0;
     }
 
     var position = BinauralProcessor_position(self);
@@ -200,7 +213,28 @@ fn naad_binaural_process_sample(self, input) {
 
     BinauralStereo_set_left(res, left_out);
     BinauralStereo_set_right(res, right_out);
-    return res;
+    return 0;
+}
+
+# ================================================================
+# naad_binaural_process_buffer -- spatialise a whole mono `input` vec into
+# `left`/`right` vecs with ONE BinauralStereo allocation for the entire buffer.
+# Writes min(len) samples; extra capacity in the outputs is left untouched.
+# Returns 0.
+# ================================================================
+fn naad_binaural_process_buffer(self, input, left, right) {
+    var n = vec_len(input);
+    var ll = vec_len(left);
+    var rl = vec_len(right);
+    var res = alloc(sizeof(BinauralStereo));
+    var i = 0;
+    while (i < n) {
+        naad_binaural_process_sample_into(self, vec_get(input, i), res);
+        if (i < ll) { vec_set(left, i, BinauralStereo_left(res)); }
+        if (i < rl) { vec_set(right, i, BinauralStereo_right(res)); }
+        i = i + 1;
+    }
+    return 0;
 }
 
 # ================================================================

@@ -227,7 +227,7 @@ fn stft_magnitudes(signal, window_size, hop_size, window) {
 # = C .. bin 11 = B). Ports chromagram.
 # ================================================================
 #must_use
-fn chromagram(magnitudes, window_size, sample_rate) {
+fn naad_chromagram(magnitudes, window_size, sample_rate) {
     var chroma_frames = vec_new();
     if (window_size == 0) { return chroma_frames; }
     if (f64_le(sample_rate, 0) == 1) { return chroma_frames; }
@@ -550,85 +550,156 @@ fn _bspline_eval_1d_into(degree, control_points, t, knots, cps, lifts) {
 
 # ================================================================
 # fit_polynomial -- least-squares polynomial fit of `degree` to (xs, ys), both
-# vecs of f64. Returns the ascending-order coefficients [c0..c_degree] as a
-# vec, or an empty vec for the Rust `None`: len(xs) != len(ys) or fewer than
-# degree+1 samples. Builds the Vandermonde by incremental multiplication
-# (robust for negative/zero xs, unlike exp/ln pow) and solves via ganita's QR
-# least squares. Ports fit_polynomial.
+# vecs of f64. Returns the ascending-order coefficients [c0..c_degree] as a vec,
+# or an empty vec for the Rust `None`: len(xs) != len(ys), fewer than degree+1
+# samples, a negative degree, or linearly dependent columns (duplicate x values).
+# Ports fit_polynomial.
 #
-# `degree` is `usize` in the oracle but signed here, so a negative degree is a
-# state Rust cannot express; it maps to the same empty vec. The
-# `ganita_mat_new` null check is load-bearing but NOT sufficient on its own:
-# ganita 1.1.4 (cyrius 6.5.35) gave the constructor failure returns
-# (non-positive dims, designs over GANITA_MAT_MAX_ELEMS, alloc failure) where it
-# previously always returned a usable header, and `ganita_mat_least_squares`
-# dereferences its argument immediately. It also allocates its OWN nx x nx Q
-# internally and never checks that one -- which naad cannot see and cannot
-# patch. Hence the sample cap below.
+# Solved by a THIN modified-Gram-Schmidt QR over the Vandermonde, ported
+# line-for-line from hisab 1.4.0's `qr_decompose` + `least_squares_poly`
+# (src/num/linalg.rs) -- the crate rust-old/Cargo.lock actually pins. Q is
+# n_samples x (degree+1); no square Q is ever formed.
+#
+# 2.2.0 replaced a `ganita_mat_least_squares` call that materialised a full
+# n_samples x n_samples orthogonal Q, never checked its own allocation, and
+# therefore faulted at 5793 samples. That forced the sample cap ADR-0001
+# recorded as a knowing divergence; both the cap and the ADR are retired --
+# large inputs now succeed as they do in Rust. `degree` is `usize` in the
+# oracle, so a negative degree remains a state Rust cannot express; it maps to
+# the same empty vec.
 # ================================================================
 #must_use
 fn fit_polynomial(xs, ys, degree) {
     var out = vec_new();
-    var nx = vec_len(xs);
+    var m = vec_len(xs);
     var ny = vec_len(ys);
-    if (nx != ny) { return out; }
+    if (m != ny) { return out; }
     if (degree < 0) { return out; }
-    if (nx <= degree) { return out; }
+    if (m <= degree) { return out; }        # oracle's `m < n`, n = degree + 1
 
-    # DIVERGENCE FROM THE ORACLE -- see docs/adr/0001-fit-polynomial-sample-cap.md.
-    # ganita_mat_least_squares allocates an nx x nx orthogonal Q internally
-    # (lib/ganita.cyr:834) and never checks it; GANITA_MAT_MAX_ELEMS makes that
-    # return 0 from nx = 5793 up, after which ganita_mat_qr stores through the
-    # null. naad cannot patch lib/. hisab 1.4.0's least_squares_poly used a THIN
-    # QR (Q is nx x cols) and returns Some(coeffs) at every nx, so Rust succeeds
-    # where this returns the empty vec. Rejecting is strictly better than
-    # faulting, and it reuses the same empty-vec channel every other rejected
-    # input already uses. Derived from the upstream constant, not hardcoded, so
-    # it tracks a ganita bump. nx >= 1 here (degree >= 0 and nx > degree), so
-    # the division is safe.
-    if (nx > GANITA_MAT_MAX_ELEMS / nx) { return out; }
+    var n = degree + 1;
 
-    var cols = degree + 1;
-    # Vandermonde A: nx x cols, A[i][j] = xs[i]^j (built incrementally).
-    var a = ganita_mat_new(nx, cols);
-    if (a == 0) { return out; }
-    var i = 0;
-    while (i < nx) {
-        var xi = vec_get(xs, i);
-        var p = F64_ONE;
+    # Q: n columns of m rows, column-major -- q[j][k] at qbuf + (j*m + k)*8.
+    # This is the THIN factor: n*m, not the m*m ganita_mat_least_squares used to
+    # form. At nx = 100000, degree = 2 that is 2.4 MB instead of 80 TB.
+    var qbuf = alloc(n * m * 8);
+    if (qbuf == 0) { return out; }
+    # R: n x n, stored r[col][row] exactly as the oracle stores it, so the
+    # back-substitution indexing below can be read against it line for line.
+    var rbuf = alloc(n * n * 8);
+    if (rbuf == 0) { return out; }
+
+    # Vandermonde, column-major: column j is xs[k]^j. Built incrementally rather
+    # than via powi -- retained from the original port for the reason its comment
+    # gave (robust for negative and zero xs, unlike an exp/ln pow).
+    var k = 0;
+    while (k < m) {
+        var xk = vec_get(xs, k);
+        var pw = F64_ONE;
         var j = 0;
-        while (j < cols) {
-            ganita_mat_set(a, i, j, p);
-            p = f64_mul(p, xi);
+        while (j < n) {
+            store64(qbuf + (j * m + k) * 8, pw);
+            pw = f64_mul(pw, xk);
             j = j + 1;
         }
-        i = i + 1;
-    }
-
-    # b = ys as a flat f64 array (length nx); out_x = flat f64 array (length cols).
-    var bvec = alloc(nx * 8);
-    i = 0;
-    while (i < nx) {
-        store64(bvec + i * 8, vec_get(ys, i));
-        i = i + 1;
-    }
-    var xarr = alloc(cols * 8);
-    ganita_mat_least_squares(a, bvec, xarr);
-
-    # Singular / rank-deficient design (e.g. duplicate x values) makes QR
-    # back-substitution divide by a ~0 R diagonal, yielding non-finite coeffs.
-    # Rust's least_squares_poly returns Err (mapped to None); mirror that with
-    # the empty vec instead of emitting poisoned NaN/inf coefficients.
-    var k = 0;
-    while (k < cols) {
-        if (naad_is_finite(load64(xarr + k * 8)) == 0) { return out; }
         k = k + 1;
     }
 
-    var j = 0;
-    while (j < cols) {
-        vec_push(out, load64(xarr + j * 8));
-        j = j + 1;
+    var z = 0;
+    while (z < n * n) {
+        store64(rbuf + z * 8, 0);
+        z = z + 1;
+    }
+
+    # Modified Gram-Schmidt over the columns of Q, in place.
+    var jj = 0;
+    while (jj < n) {
+        var ii = 0;
+        while (ii < jj) {
+            var dot = 0;
+            var kd = 0;
+            while (kd < m) {
+                dot = f64_add(dot, f64_mul(load64(qbuf + (ii * m + kd) * 8),
+                    load64(qbuf + (jj * m + kd) * 8)));
+                kd = kd + 1;
+            }
+            store64(rbuf + (jj * n + ii) * 8, dot);
+            kd = 0;
+            while (kd < m) {
+                var qv = load64(qbuf + (jj * m + kd) * 8);
+                store64(qbuf + (jj * m + kd) * 8,
+                  f64_sub(qv, f64_mul(dot, load64(qbuf + (ii * m + kd) * 8))));
+                kd = kd + 1;
+            }
+            ii = ii + 1;
+        }
+        var ss = 0;
+        var kn = 0;
+        while (kn < m) {
+            var qn = load64(qbuf + (jj * m + kn) * 8);
+            ss = f64_add(ss, f64_mul(qn, qn));
+            kn = kn + 1;
+        }
+        var norm = f64_sqrt(ss);
+        # Linearly dependent columns -- e.g. duplicate x values. The oracle
+        # returns Err here (mapped to None); SPEC_C1E12 is hisab's EPSILON_F64.
+        if (f64_lt(norm, SPEC_C1E12) == 1) { return out; }
+        store64(rbuf + (jj * n + jj) * 8, norm);
+        kn = 0;
+        while (kn < m) {
+            store64(qbuf + (jj * m + kn) * 8,
+              f64_div(load64(qbuf + (jj * m + kn) * 8), norm));
+            kn = kn + 1;
+        }
+        jj = jj + 1;
+    }
+
+    # qty[j] = sum_k q[j][k] * ys[k]
+    var qty = alloc(n * 8);
+    if (qty == 0) { return out; }
+    var jq = 0;
+    while (jq < n) {
+        var sq = 0;
+        var kq = 0;
+        while (kq < m) {
+            sq = f64_add(sq, f64_mul(load64(qbuf + (jq * m + kq) * 8), vec_get(ys, kq)));
+            kq = kq + 1;
+        }
+        store64(qty + jq * 8, sq);
+        jq = jq + 1;
+    }
+
+    # Back substitution: R * coeffs = Q^T y, where R[i][j] is r[j][i].
+    var co = alloc(n * 8);
+    if (co == 0) { return out; }
+    var ib = n - 1;
+    while (ib >= 0) {
+        var sum = load64(qty + ib * 8);
+        var jb = ib + 1;
+        while (jb < n) {
+            sum = f64_sub(sum, f64_mul(load64(rbuf + (jb * n + ib) * 8),
+                load64(co + jb * 8)));
+            jb = jb + 1;
+        }
+        store64(co + ib * 8, f64_div(sum, load64(rbuf + (ib * n + ib) * 8)));
+        ib = ib - 1;
+    }
+
+    # RETAINED DIVERGENCE (predates 2.2.0; added in 2.1.0). A non-finite INPUT
+    # gives a NaN norm, which passes the `< EPSILON` test above, so the oracle
+    # would return Ok with NaN coefficients. naad returns the empty vec instead
+    # -- the same None channel, rather than poisoned coefficients a caller has
+    # no obvious way to notice. The singular case above IS now exact parity.
+    var c = 0;
+    while (c < n) {
+        if (naad_is_finite(load64(co + c * 8)) == 0) { return out; }
+        c = c + 1;
+    }
+
+    var cp = 0;
+    while (cp < n) {
+        vec_push(out, load64(co + cp * 8));
+        cp = cp + 1;
     }
     return out;
 }

@@ -1,7 +1,15 @@
 # 0001 — `fit_polynomial` caps its sample count, diverging from the oracle
 
-**Status**: Accepted
+**Status**: Superseded by [0002](0002-port-thin-qr-in-tree.md)
 **Date**: 2026-08-23
+**Superseded**: 2026-08-23 (2.2.0)
+
+> The cap this ADR accepted was removed in 2.2.0. `fit_polynomial` now ports
+> hisab 1.4.0's thin QR directly, so the square Q that forced the cap is never
+> formed and large inputs succeed exactly as they do in Rust. The divergence
+> recorded below no longer exists. The context is kept because it is the
+> measurement that justified 0002 — in particular the reading of the pinned
+> crate that proved Rust succeeds at every `nx`.
 
 ## Context
 

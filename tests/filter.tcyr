@@ -16,7 +16,7 @@ var FREQ_1K = 1000;
 
 # ================================================================
 test_group("lowpass basic (DC passes)");
-var lp = filter_biquad_new(FILTER_LOWPASS, f64_from(SR), f64_from(FREQ_1K), C0_707);
+var lp = filter_biquad_new(NAAD_FILTER_LOWPASS, f64_from(SR), f64_from(FREQ_1K), C0_707);
 var lp_out = 0;
 var i = 0;
 while (i < 1000) {
@@ -27,7 +27,7 @@ assert(f64_lt(f64_abs(f64_sub(lp_out, F64_ONE)), C0_01), "DC should pass through
 
 # ================================================================
 test_group("highpass blocks DC");
-var hp = filter_biquad_new(FILTER_HIGHPASS, f64_from(SR), f64_from(FREQ_1K), C0_707);
+var hp = filter_biquad_new(NAAD_FILTER_HIGHPASS, f64_from(SR), f64_from(FREQ_1K), C0_707);
 var hp_out = 0;
 i = 0;
 while (i < 1000) {
@@ -38,14 +38,14 @@ assert(f64_lt(f64_abs(hp_out), C0_01), "HP should block DC");
 
 # ================================================================
 test_group("invalid params");
-assert(naad_is_err(filter_biquad_new(FILTER_LOWPASS, 0, f64_from(FREQ_1K), C0_7)), "zero sample rate err");
-assert(naad_is_err(filter_biquad_new(FILTER_LOWPASS, f64_from(SR), 0, C0_7)), "zero frequency err");
-assert(naad_is_err(filter_biquad_new(FILTER_LOWPASS, f64_from(SR), f64_from(FREQ_1K), 0)), "zero q err");
-assert(naad_is_err(filter_biquad_new(FILTER_LOWPASS, f64_from(SR), f64_from(30000), C0_7)), "above nyquist err");
+assert(naad_is_err(filter_biquad_new(NAAD_FILTER_LOWPASS, 0, f64_from(FREQ_1K), C0_7)), "zero sample rate err");
+assert(naad_is_err(filter_biquad_new(NAAD_FILTER_LOWPASS, f64_from(SR), 0, C0_7)), "zero frequency err");
+assert(naad_is_err(filter_biquad_new(NAAD_FILTER_LOWPASS, f64_from(SR), f64_from(FREQ_1K), 0)), "zero q err");
+assert(naad_is_err(filter_biquad_new(NAAD_FILTER_LOWPASS, f64_from(SR), f64_from(30000), C0_7)), "above nyquist err");
 
 # ================================================================
 test_group("set params");
-var sp = filter_biquad_new(FILTER_LOWPASS, f64_from(SR), f64_from(FREQ_1K), C0_707);
+var sp = filter_biquad_new(NAAD_FILTER_LOWPASS, f64_from(SR), f64_from(FREQ_1K), C0_707);
 assert_eq(filter_biquad_set_params(sp, f64_from(2000), F64_ONE, 0), NAAD_ERR_NONE, "set_params(2000,1,0) ok");
 assert(naad_is_err(filter_biquad_set_params(sp, 0, F64_ONE, 0)), "set_params(0,1,0) err");
 
@@ -60,7 +60,7 @@ assert(naad_is_finite(SvfOutput_notch(out)), "svf notch finite");
 
 # ================================================================
 test_group("process buffer (all finite)");
-var pf = filter_biquad_new(FILTER_LOWPASS, f64_from(SR), f64_from(FREQ_1K), C0_707);
+var pf = filter_biquad_new(NAAD_FILTER_LOWPASS, f64_from(SR), f64_from(FREQ_1K), C0_707);
 var buf = vec_new();
 var bi = 0;
 while (bi < 256) { vec_push(buf, F64_ONE); bi = bi + 1; }

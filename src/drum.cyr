@@ -227,7 +227,7 @@ fn drum_snare_new(sample_rate) {
     var tone_decay = _drum_decay_coeff(f64_mul(DRUM_C0_1, sample_rate));     # 100ms
     var noise_decay = _drum_decay_coeff(f64_mul(DRUM_C0_15, sample_rate));   # 150ms
 
-    var noise_filter = filter_biquad_new(FILTER_BANDPASS, sample_rate, f64_from(1500), DRUM_C1_5);
+    var noise_filter = filter_biquad_new(NAAD_FILTER_BANDPASS, sample_rate, f64_from(1500), DRUM_C1_5);
     if (naad_is_err(noise_filter) == 1) { return noise_filter; }
 
     var rng = alloc(8);
@@ -364,9 +364,9 @@ fn drum_hihat_new(open, sample_rate) {
         i = i + 1;
     }
 
-    var highpass = filter_biquad_new(FILTER_HIGHPASS, sample_rate, f64_from(6000), DRUM_C0_707);
+    var highpass = filter_biquad_new(NAAD_FILTER_HIGHPASS, sample_rate, f64_from(6000), DRUM_C0_707);
     if (naad_is_err(highpass) == 1) { return highpass; }
-    var bandpass = filter_biquad_new(FILTER_BANDPASS, sample_rate, f64_from(10000), F64_ONE);
+    var bandpass = filter_biquad_new(NAAD_FILTER_BANDPASS, sample_rate, f64_from(10000), F64_ONE);
     if (naad_is_err(bandpass) == 1) { return bandpass; }
 
     var self = alloc(sizeof(HiHat));

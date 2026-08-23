@@ -28,13 +28,13 @@ var STEAL_MODE_LOWEST   = 2;   # steal the voice with the lowest note
 var STEAL_MODE_NONE     = 3;   # do not steal -- ignore new notes when full
 
 # None sentinel for Option<usize> returns (valid indices are >= 0).
-var VOICE_NONE = (0 - 1);
+var NAAD_VOICE_NONE = (0 - 1);
 
 # Default brightness (MIDI 2.0 CC74) = 0.5.
-var VOICE_DEFAULT_BRIGHTNESS = 0x3FE0000000000000;   # 0.5
+var NAAD_VOICE_DEFAULT_BRIGHTNESS = 0x3FE0000000000000;   # 0.5
 
 # u64::MAX sentinel for the saturating age counter.
-var VOICE_AGE_MAX = (0 - 1);
+var NAAD_VOICE_AGE_MAX = (0 - 1);
 
 # ================================================================
 # Voice -- state of a single voice.
@@ -61,7 +61,7 @@ fn voice_default() {
     Voice_set_amplitude(v, 0);
     Voice_set_pitch_bend(v, 0);
     Voice_set_pressure(v, 0);
-    Voice_set_brightness(v, VOICE_DEFAULT_BRIGHTNESS);
+    Voice_set_brightness(v, NAAD_VOICE_DEFAULT_BRIGHTNESS);
     return v;
 }
 
@@ -102,7 +102,7 @@ fn voice_manager_new(max_voices, poly_mode, steal_mode) {
     return vm;
 }
 
-# Allocate a voice for a new note. Returns the voice index, or VOICE_NONE.
+# Allocate a voice for a new note. Returns the voice index, or NAAD_VOICE_NONE.
 #
 # Poly mode: find a free voice or steal one. Mono/Legato: always voice 0.
 #must_use
@@ -135,7 +135,7 @@ fn voice_manager_note_on(vm, note, velocity) {
 
     # All voices busy -- steal.
     var idx = voice_manager_find_steal_target(vm);
-    if (idx == VOICE_NONE) { return VOICE_NONE; }
+    if (idx == NAAD_VOICE_NONE) { return NAAD_VOICE_NONE; }
     var vs = vec_get(voices, idx);
     Voice_set_active(vs, 1);
     Voice_set_note(vs, note);
@@ -144,7 +144,7 @@ fn voice_manager_note_on(vm, note, velocity) {
     return idx;
 }
 
-# Release a voice by note number. Returns the released index, or VOICE_NONE.
+# Release a voice by note number. Returns the released index, or NAAD_VOICE_NONE.
 fn voice_manager_note_off(vm, note) {
     var voices = VoiceManager_voices(vm);
     var n = vec_len(voices);
@@ -157,11 +157,11 @@ fn voice_manager_note_off(vm, note) {
         }
         i = i + 1;
     }
-    return VOICE_NONE;
+    return NAAD_VOICE_NONE;
 }
 
 # Find a voice to steal based on the current steal mode.
-# Returns the target index, or VOICE_NONE when no target exists.
+# Returns the target index, or NAAD_VOICE_NONE when no target exists.
 #
 # Tie-breaking mirrors Rust's iterator adaptors exactly:
 #   Oldest   -> max_by_key(age): last element on ties.
@@ -173,10 +173,10 @@ fn voice_manager_find_steal_target(vm) {
     var voices = VoiceManager_voices(vm);
     var n = vec_len(voices);
 
-    if (mode == STEAL_MODE_NONE) { return VOICE_NONE; }
+    if (mode == STEAL_MODE_NONE) { return NAAD_VOICE_NONE; }
 
     if (mode == STEAL_MODE_OLDEST) {
-        var best = VOICE_NONE;
+        var best = NAAD_VOICE_NONE;
         var best_age = 0;
         var i = 0;
         while (i < n) {
@@ -184,7 +184,7 @@ fn voice_manager_find_steal_target(vm) {
             if (Voice_active(v) == 1) {
                 var a = Voice_age(v);
                 # >= keeps updating on ties -> last maximum, per max_by_key.
-                if (best == VOICE_NONE || a >= best_age) {
+                if (best == NAAD_VOICE_NONE || a >= best_age) {
                     best = i;
                     best_age = a;
                 }
@@ -195,7 +195,7 @@ fn voice_manager_find_steal_target(vm) {
     }
 
     if (mode == STEAL_MODE_QUIETEST) {
-        var best = VOICE_NONE;
+        var best = NAAD_VOICE_NONE;
         var best_amp = 0;
         var i = 0;
         while (i < n) {
@@ -203,7 +203,7 @@ fn voice_manager_find_steal_target(vm) {
             if (Voice_active(v) == 1) {
                 var amp = Voice_amplitude(v);
                 # strictly-less keeps the first minimum, per min_by.
-                if (best == VOICE_NONE || f64_lt(amp, best_amp) == 1) {
+                if (best == NAAD_VOICE_NONE || f64_lt(amp, best_amp) == 1) {
                     best = i;
                     best_amp = amp;
                 }
@@ -214,14 +214,14 @@ fn voice_manager_find_steal_target(vm) {
     }
 
     # STEAL_MODE_LOWEST: min_by_key(note), first minimum on ties.
-    var best = VOICE_NONE;
+    var best = NAAD_VOICE_NONE;
     var best_note = 0;
     var i = 0;
     while (i < n) {
         var v = vec_get(voices, i);
         if (Voice_active(v) == 1) {
             var note = Voice_note(v);
-            if (best == VOICE_NONE || note < best_note) {
+            if (best == NAAD_VOICE_NONE || note < best_note) {
                 best = i;
                 best_note = note;
             }
@@ -241,7 +241,7 @@ fn voice_manager_tick(vm) {
         var v = vec_get(voices, i);
         if (Voice_active(v) == 1) {
             var a = Voice_age(v);
-            if (a != VOICE_AGE_MAX) { Voice_set_age(v, a + 1); }
+            if (a != NAAD_VOICE_AGE_MAX) { Voice_set_age(v, a + 1); }
         }
         i = i + 1;
     }

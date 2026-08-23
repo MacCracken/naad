@@ -21,4 +21,5 @@ Decisions about naad — what we chose, the context, and the consequences we acc
 
 | ADR | Title | Status |
 |---|---|---|
-| [0001](0001-fit-polynomial-sample-cap.md) | `fit_polynomial` caps its sample count, diverging from the oracle | Accepted |
+| [0001](0001-fit-polynomial-sample-cap.md) | `fit_polynomial` caps its sample count, diverging from the oracle | Superseded by 0002 |
+| [0002](0002-port-thin-qr-in-tree.md) | Port hisab's thin QR into `fit_polynomial` rather than call ganita | Accepted |

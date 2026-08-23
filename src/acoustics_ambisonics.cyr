@@ -67,16 +67,49 @@ fn naad_ambisonics_set_position(enc, azimuth, elevation) {
 #inline
 #must_use
 fn naad_ambisonics_encode_sample(enc, input) {
+    var s = alloc(sizeof(BFormatSample));
+    naad_ambisonics_encode_sample_into(enc, input, s);
+    return s;
+}
+
+# ================================================================
+# naad_ambisonics_encode_sample_into -- the allocation-free core. Writes into a
+# caller-owned BFormatSample and returns 0. The one-shot form above costs 32
+# permanently-resident bytes per call under the bump allocator; a per-sample
+# caller should hoist one BFormatSample and use this.
+# ================================================================
+#inline
+fn naad_ambisonics_encode_sample_into(enc, input, s) {
     var cos_el = AmbisonicsEncoder_cos_el(enc);
     var sin_el = AmbisonicsEncoder_sin_el(enc);
     var cos_az = AmbisonicsEncoder_cos_az(enc);
     var sin_az = AmbisonicsEncoder_sin_az(enc);
-    var s = alloc(sizeof(BFormatSample));
     BFormatSample_set_w(s, input);
     BFormatSample_set_x(s, f64_mul(f64_mul(input, cos_az), cos_el));
     BFormatSample_set_y(s, f64_mul(f64_mul(input, sin_az), cos_el));
     BFormatSample_set_z(s, f64_mul(input, sin_el));
-    return s;
+    return 0;
+}
+
+# ================================================================
+# naad_ambisonics_encode_buffer -- encode a whole mono `input` vec into the four
+# B-format channel vecs with ONE BFormatSample allocation for the entire buffer.
+# Writes min(len) samples per channel; extra capacity is left untouched.
+# Returns 0.
+# ================================================================
+fn naad_ambisonics_encode_buffer(enc, input, w, x, y, z) {
+    var n = vec_len(input);
+    var s = alloc(sizeof(BFormatSample));
+    var i = 0;
+    while (i < n) {
+        naad_ambisonics_encode_sample_into(enc, vec_get(input, i), s);
+        if (i < vec_len(w)) { vec_set(w, i, BFormatSample_w(s)); }
+        if (i < vec_len(x)) { vec_set(x, i, BFormatSample_x(s)); }
+        if (i < vec_len(y)) { vec_set(y, i, BFormatSample_y(s)); }
+        if (i < vec_len(z)) { vec_set(z, i, BFormatSample_z(s)); }
+        i = i + 1;
+    }
+    return 0;
 }
 
 # Current azimuth in radians.

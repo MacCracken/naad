@@ -104,7 +104,7 @@ fn main() {
     if (naad_is_err(env) == 1) { return 1; }
 
     # 2 kHz lowpass, Q = 0.707.
-    var lp = filter_biquad_new(FILTER_LOWPASS, sr, f64_from(2000),
+    var lp = filter_biquad_new(NAAD_FILTER_LOWPASS, sr, f64_from(2000),
                                f64_div(f64_from(707), f64_from(1000)));
     if (naad_is_err(lp) == 1) { return 1; }
 
@@ -123,6 +123,12 @@ fn main() {
 var r = main();
 syscall(60, r);
 ```
+
+Public constants and the more generic helper names carry a `NAAD_`/`naad_`
+prefix — `NAAD_ERR_*`, `NAAD_FILTER_*`, `NAAD_VOICE_*`, `naad_lerp`, `naad_rms`
+— because Cyrius has one flat namespace once distlib bundles are concatenated.
+Domain-specific families (`WAVEFORM_*`, `NOISE_*`, `MODULATION_LFO_*`, …) are
+already namespaced by their own compound prefix and are left bare.
 
 Constructors return either a struct pointer or a negative `NAAD_ERR_*` code — check
 with `naad_is_err` before use. `naad_err_name` maps a code to a string.

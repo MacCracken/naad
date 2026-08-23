@@ -124,7 +124,7 @@ fn formant_filter_new(formants, sample_rate) {
         var band = vec_get(formants, i);
         var freq = FormantBand_freq(band);
         var bw = FormantBand_bw(band);
-        var f = filter_biquad_new(FILTER_BANDPASS, sample_rate, freq, formant_q(freq, bw));
+        var f = filter_biquad_new(NAAD_FILTER_BANDPASS, sample_rate, freq, formant_q(freq, bw));
         if (naad_is_err(f) == 1) { return f; }
         vec_push(filters, f);
         vec_push(amplitudes, FormantBand_amp(band));
@@ -177,7 +177,7 @@ fn formant_synth_new(vowel, sample_rate) {
         var band = vec_get(params, i);
         var freq = FormantBand_freq(band);
         var bw = FormantBand_bw(band);
-        var f = filter_biquad_new(FILTER_BANDPASS, sample_rate, freq, f64_div(freq, bw));
+        var f = filter_biquad_new(NAAD_FILTER_BANDPASS, sample_rate, freq, f64_div(freq, bw));
         if (naad_is_err(f) == 1) { return f; }
         vec_push(filters, f);
         vec_push(amplitudes, FormantBand_amp(band));

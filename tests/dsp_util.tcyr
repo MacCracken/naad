@@ -39,24 +39,24 @@ assert_eq(naad_db_to_amplitude(NAAD_NEG_INF), 0, "db_to_amp(-inf) = 0");
 test_group("normalize / rms / peak");
 var buf = vec_new();
 vec_push(buf, C0_5); vec_push(buf, f64_neg(F64_ONE)); vec_push(buf, C0_25);
-normalize(buf);
+naad_normalize(buf);
 assert(f64_lt(f64_abs(f64_sub(f64_abs(vec_get(buf, 1)), F64_ONE)), NAAD_EPSILON), "normalize peak -> 1");
 # silence stays silent
 var sil = vec_new();
 vec_push(sil, 0); vec_push(sil, 0); vec_push(sil, 0);
-normalize(sil);
+naad_normalize(sil);
 assert_eq(vec_get(sil, 0), 0, "normalize silence stays 0");
 # rms of [1;100] == 1, rms empty == 0
 var ones = vec_new();
 var oi = 0;
 while (oi < 100) { vec_push(ones, F64_ONE); oi = oi + 1; }
-assert(f64_lt(f64_abs(f64_sub(rms(ones), F64_ONE)), NAAD_EPSILON), "rms ones = 1");
+assert(f64_lt(f64_abs(f64_sub(naad_rms(ones), F64_ONE)), NAAD_EPSILON), "rms ones = 1");
 var empty = vec_new();
-assert_eq(rms(empty), 0, "rms empty = 0");
+assert_eq(naad_rms(empty), 0, "rms empty = 0");
 # peak of [0.5,-0.8,0.3] == 0.8
 var pk = vec_new();
 vec_push(pk, C0_5); vec_push(pk, f64_neg(C0_8)); vec_push(pk, C0_3);
-assert(f64_lt(f64_abs(f64_sub(peak(pk), C0_8)), NAAD_EPSILON), "peak = 0.8");
+assert(f64_lt(f64_abs(f64_sub(naad_peak(pk), C0_8)), NAAD_EPSILON), "peak = 0.8");
 
 # ================================================================
 test_group("clip / interp / crossfade");
@@ -64,11 +64,11 @@ assert_eq(hard_limit(F64_TWO, F64_ONE), F64_ONE, "hard_limit(2,1)=1");
 assert_eq(hard_limit(f64_neg(F64_TWO), F64_ONE), f64_neg(F64_ONE), "hard_limit(-2,1)=-1");
 assert_eq(hard_limit(C0_5, F64_ONE), C0_5, "hard_limit(0.5,1)=0.5");
 assert(f64_lt(f64_abs(f64_sub(soft_clip_tanh(f64_from(10), F64_ONE), F64_ONE)), C0_01), "soft_clip tanh(10)~1");
-assert(f64_lt(f64_abs(f64_sub(lerp(0, F64_ONE, C0_5), C0_5)), NAAD_EPSILON), "lerp midpoint");
+assert(f64_lt(f64_abs(f64_sub(naad_lerp(0, F64_ONE, C0_5), C0_5)), NAAD_EPSILON), "lerp midpoint");
 # hermite on straight line 0,1,2,3 at t=0.5 -> 1.5
 assert(f64_lt(f64_abs(f64_sub(hermite_interpolate(0, F64_ONE, F64_TWO, f64_from(3), C0_5), DSP_C1_5)), C0_01), "hermite linear -> 1.5");
-assert(f64_lt(f64_abs(f64_sub(crossfade_equal_power(F64_ONE, 0, 0), F64_ONE)), C0_01), "crossfade dry");
-assert(f64_lt(f64_abs(f64_sub(crossfade_equal_power(0, F64_ONE, F64_ONE), F64_ONE)), C0_01), "crossfade wet");
+assert(f64_lt(f64_abs(f64_sub(naad_crossfade_equal_power(F64_ONE, 0, 0), F64_ONE)), C0_01), "crossfade dry");
+assert(f64_lt(f64_abs(f64_sub(naad_crossfade_equal_power(0, F64_ONE, F64_ONE), F64_ONE)), C0_01), "crossfade wet");
 
 # ================================================================
 test_group("windows");

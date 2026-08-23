@@ -58,9 +58,23 @@ fn panning_pan_gains(pan, law) {
 #inline
 #must_use
 fn panning_pan_mono(sample, pan, law) {
+    var out = alloc(sizeof(PanPair));
+    panning_pan_mono_into(sample, pan, law, out);
+    return out;
+}
+
+# ================================================================
+# panning_pan_mono_into -- the allocation-free core. Writes into a caller-owned
+# PanPair and returns 0. `lib/alloc.cyr` is a bump allocator with no individual
+# free, so the one-shot form above costs 16 permanently-resident bytes per call;
+# a caller in a per-sample loop should hoist one PanPair and use this. Same
+# split as reverb_process_core / reverb_process_sample.
+# ================================================================
+#inline
+fn panning_pan_mono_into(sample, pan, law, out) {
     # Gains computed into locals (no intermediate PanGains alloc — this is a
-    # per-sample path and Cyrius has no free). Only the PanPair result is
-    # allocated. Numerically identical to panning_pan_gains.
+    # per-sample path and Cyrius has no free). Numerically identical to
+    # panning_pan_gains.
     var p = f64_clamp(pan, f64_neg(F64_ONE), F64_ONE);
     var t = f64_mul(f64_add(p, F64_ONE), F64_HALF);
     var gl = 0;
@@ -73,10 +87,29 @@ fn panning_pan_mono(sample, pan, law) {
         gl = f64_sub(F64_ONE, t);
         gr = t;
     }
-    var out = alloc(sizeof(PanPair));
     PanPair_set_left(out, f64_mul(sample, gl));
     PanPair_set_right(out, f64_mul(sample, gr));
-    return out;
+    return 0;
+}
+
+# ================================================================
+# panning_pan_buffer -- pan a whole mono `input` vec into `left`/`right` vecs
+# with ONE PanPair allocation for the entire buffer. Writes min(len) samples;
+# extra capacity in the outputs is left untouched. Returns 0.
+# ================================================================
+fn panning_pan_buffer(input, pan, law, left, right) {
+    var n = vec_len(input);
+    var ll = vec_len(left);
+    var rl = vec_len(right);
+    var res = alloc(sizeof(PanPair));
+    var i = 0;
+    while (i < n) {
+        panning_pan_mono_into(vec_get(input, i), pan, law, res);
+        if (i < ll) { vec_set(left, i, PanPair_left(res)); }
+        if (i < rl) { vec_set(right, i, PanPair_right(res)); }
+        i = i + 1;
+    }
+    return 0;
 }
 
 # ================================================================

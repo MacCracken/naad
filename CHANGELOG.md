@@ -5,6 +5,171 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - The namespace wave, and parity restored on `fit_polynomial`
+
+The deferred minor-release work from 2.1.3: everything that was real but not
+patch-safe. Three breaking renames, one algorithm replacement that retires an
+ADR, two deletions, six new public functions, and the CI gates that were
+available but not enforced.
+
+**`dist/naad.cyr` now collides with nothing.** Measured against **all 126
+sibling bundles** on this machine plus the pinned stdlib: zero shared top-level
+symbols, `fn`/`var`/`const`/`struct` alike. Before this release there were five.
+
+Suite: **40 suites / 579 assertions**, `cyrius audit` exits 0, and the fuzz
+harness runs **1273 adversarial checks**.
+
+### Changed — BREAKING
+
+**Error constants** were renamed in 2.1.3; **these are the rest of the
+namespace wave.** All values are unchanged — only the names move.
+
+- **`FILTER_*` → `NAAD_FILTER_*`** (all 8: `LOWPASS`, `HIGHPASS`, `BANDPASS`,
+  `NOTCH`, `ALLPASS`, `LOWSHELF`, `HIGHSHELF`, `PEAK`).
+  `nidhi` defines `FILTER_LOWPASS`..`FILTER_NOTCH` as 0..3 — **identical values**
+  to naad's — and is co-linked with naad inside dhvani today. Nothing
+  misbehaved, which is exactly the problem: a flat-namespace collision between
+  two enums that happen to agree is invisible until one side renumbers. All
+  eight are renamed rather than the four that collide, because a half-prefixed
+  enum is worse than either alternative.
+- **`VOICE_*` → `NAAD_VOICE_*`** (`NONE`, `DEFAULT_BRIGHTNESS`, `AGE_MAX`).
+  `garjan` defines `VOICE_NONE = -1`, again identical.
+- **Six bare function names → `naad_*`**: `lerp`, `rms`, `peak`, `normalize`,
+  `chromagram`, `crossfade_equal_power`. Zero collisions today — these are
+  forward risk, and `lerp` in particular is the single most likely name for any
+  future geometry or animation sibling. The 2.1.1 CHANGELOG logged them as a
+  known deferred cleanup; this closes it.
+
+**Deliberately NOT renamed**, and the reasoning, so nobody re-opens it: the
+compound-prefixed families (`WAVEFORM_*`, `NOISE_*`, `DISTORTION_*`,
+`MOD_DEST_*`, `TUNING_*`, `GRAIN_WINDOW_*`, `POLY_MODE_*`, `STEAL_MODE_*`,
+`MODULATION_LFO_*`, `PAN_LAW_*`, `FM_ALGO_*`) and the ~400 already-prefixed
+function families. They are effectively namespaced by their own compound
+prefix, measured at zero collision risk across the whole ecosystem, and
+renaming them would add verbosity to the public API and ripple through five
+vendored copies for nothing.
+
+### Changed — `fit_polynomial` now ports the oracle's thin QR
+
+`fit_polynomial` called `ganita_mat_least_squares`, which materialises a **full
+`m × m` orthogonal Q** that polynomial least-squares does not need, never checks
+its own allocation, and therefore faulted from 5793 samples upward. 2.1.3 capped
+the input and recorded the cap as a knowing divergence in ADR-0001.
+
+2.2.0 ports hisab 1.4.0's `qr_decompose` + `least_squares_poly` directly
+(modified Gram-Schmidt over the Vandermonde, then back-substitution, with `R`
+stored `r[col][row]` exactly as the oracle stores it). **Q is `m × n`.** For a
+degree-2 fit over 100 000 samples that is **2.4 MB instead of 80 TB**.
+
+- The cap is gone; large inputs succeed as they do in Rust. `tests/hardening.tcyr`
+  asserts a 20 000-sample fit.
+- naad no longer references `ganita_mat_*` at all, so ADR-0001's residual
+  allocation-failure hole — which the cap did *not* close — is gone with it.
+- **[ADR-0001](docs/adr/0001-fit-polynomial-sample-cap.md) is superseded by
+  [ADR-0002](docs/adr/0002-port-thin-qr-in-tree.md).**
+
+⚠ **This changes floating-point rounding for every input that already worked.**
+Gram-Schmidt over the Vandermonde is not the same arithmetic as ganita's path,
+so coefficients move in the last few ulps. Nothing in naad asserts bit-exact
+coefficients and every tolerance-based assertion passes unchanged — but a
+consumer comparing against stored coefficients will see a difference. This is
+the reason it is a minor release.
+
+One divergence is **retained and now documented precisely**: a non-finite
+*input* yields a NaN norm, which passes the oracle's `< EPSILON` singularity
+test, so Rust returns `Ok` with NaN coefficients. naad returns the empty vec —
+the same `None` channel, rather than poisoned coefficients a caller has no
+obvious way to notice. It predates this release (2.1.0). The *singular* case —
+duplicate x values — is now exact parity via the ported norm check.
+
+### Changed — `tuning_note_name` domain guard
+
+The oracle takes `note: u8`, so 0..255 is its entire domain and it needs no
+guard. The port widened the parameter to a signed `i64` and formatted a nonsense
+octave for values Rust could never receive. Notes outside 0..127 now return `""`.
+`tuning_note_name_str` gains the same treatment: a negative pitch class used to
+fall through every equality test and silently return `"B"`.
+
+2.1.3 widened the output buffer from 16 to 32 bytes for the same underlying
+reason; that stays as defence in depth, but with this guard the real bound is
+5 bytes.
+
+### Added
+
+- **Zero-alloc siblings** for the three modules that had only an allocating
+  per-sample form and no escape hatch. Same `_into` / `_buffer` split as the
+  existing `reverb_process_core` / `reverb_process_buffer`:
+  `panning_pan_mono_into` · `panning_pan_buffer` ·
+  `naad_ambisonics_encode_sample_into` · `naad_ambisonics_encode_buffer` ·
+  `naad_binaural_process_sample_into` · `naad_binaural_process_buffer`.
+  The one-shot forms are unchanged and still allocate — that is their contract.
+  `tests/allocbudget.tcyr` pins the new forms at zero per-sample bytes, with a
+  control asserting the one-shot form *does* still allocate, so the budget is
+  measuring something real rather than an inlined no-op.
+- **A real fuzz harness.** `tests/naad.fcyr` was a stub that called one function
+  with a fixed string and printed "ok". It now drives the public boundary with
+  the values that actually break Cyrius ports — `INT64_MIN`, NaN, ±inf,
+  subnormals, `f64::MAX`, the 709/710 `f64_exp` boundary, and non-power-of-two
+  lengths — across 1273 checks.
+  ⚠ **The first version of this harness was worthless and measuring caught it.**
+  Driving the enum id and the numeric parameters from one loop index correlated
+  them, so an out-of-range id only ever paired with an already-invalid sample
+  rate and was rejected before the id guard was reached: reverting all three id
+  guards produced a *clean run*. The sweeps are now separated — ids swept at
+  known-valid parameters, values swept at a known-valid id — and reverting any
+  of the three guards now fails the harness.
+- **CI enforces the quality gates it previously only had available**:
+  `cyrius audit` (fmt · lint · docs · tests · bench), `cyrius deny`, and
+  `cyrius fuzz`. Possible because `cyrius audit` started exiting 0 in 2.1.3.
+
+### Removed — BREAKING
+
+- **`white_noise_sample`** (`src/dsp_util.cyr`). Byte-identical to
+  `noise_white_noise_sample` and **port-invented**: the oracle has exactly one
+  such function, in `noise.rs`, which the port already placed in `src/noise.cyr`.
+  It had no caller, and it was the copy occupying the dangerous bare name.
+  Use `noise_white_noise_sample`.
+- **`U32_MAXF`** (`src/dsp_util.cyr`). Self-labelled `# not used; kept for
+  reference`, with zero references anywhere.
+
+### Migration
+
+Mechanical, and all of it is a rename. Values and behaviour are unchanged except
+where noted above.
+
+```
+ERR_*                    -> NAAD_ERR_*                    (2.1.3)
+FILTER_*                 -> NAAD_FILTER_*
+VOICE_*                  -> NAAD_VOICE_*
+lerp                     -> naad_lerp
+rms                      -> naad_rms
+peak                     -> naad_peak
+normalize                -> naad_normalize
+chromagram               -> naad_chromagram
+crossfade_equal_power    -> naad_crossfade_equal_power
+white_noise_sample       -> noise_white_noise_sample      (removed)
+U32_MAXF                 -> (removed, was unused)
+```
+
+Two behavioural changes to check for:
+
+- `tuning_note_name` / `tuning_note_name_str` return `""` outside their MIDI
+  ranges instead of a formatted nonsense value.
+- `fit_polynomial` coefficients move in the last few ulps, and inputs above
+  ~5 800 samples now **succeed** where 2.1.3 returned the empty vec.
+
+### Known — still open
+
+- **108 public fns have no caller outside their own definition** — almost all
+  accessors, correctly public but **untested**. This is the largest remaining
+  gap and it is a coverage problem, not a code problem.
+- **Upstream on ganita**: `ganita_mat_least_squares` still forms a square Q and
+  still has no failure return. naad is no longer exposed to it, but the bug is
+  real and belongs upstream.
+- **Consumer-green (dhvani / svara)** — and note that this release's renames
+  require a coordinated refresh of the five vendored `lib/naad.cyr` copies
+  (dhvani, garjan, ghurni, nidhi, prani).
+
 ## [2.1.3] - P-1 hardening: the negative-input sweep
 
 A P-1 audit / refactor / hardening / security sweep, plus the `ERR_*` →

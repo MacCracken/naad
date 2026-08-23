@@ -12,7 +12,7 @@ alloc_init();
 test_group("bundle: base + dsp_util");
 assert_eq(validate_frequency(f64_from(440), f64_from(44100)), NAAD_ERR_NONE, "error base");
 assert_eq(flush_denormal(0), 0, "flush_denormal");
-assert(f64_lt(f64_abs(f64_sub(lerp(0, F64_ONE, F64_HALF), F64_HALF)), NAAD_EPSILON), "dsp_util lerp");
+assert(f64_lt(f64_abs(f64_sub(naad_lerp(0, F64_ONE, F64_HALF), F64_HALF)), NAAD_EPSILON), "dsp_util lerp");
 
 test_group("bundle: noise + oscillator");
 var ng = noise_new(NOISE_WHITE, 42);

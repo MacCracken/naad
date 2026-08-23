@@ -106,7 +106,7 @@ assert_eq(naad_is_err(eq_add_band(a6eq, 8, f64_from(1000), H_ONE, 0)), 1, "eq_ad
 
 # The half that matters: the public setter can still reach the chain.
 test_group("A6: coefficient chain never publishes NaN");
-var a6f = filter_biquad_new(FILTER_LOWPASS, f64_from(44100), f64_from(1000), H_ONE);
+var a6f = filter_biquad_new(NAAD_FILTER_LOWPASS, f64_from(44100), f64_from(1000), H_ONE);
 BiquadFilter_set_filter_type(a6f, 8);
 filter_biquad_compute_coefficients(a6f);
 assert_eq(naad_is_finite(filter_biquad_process_sample(a6f, H_C0_5)), 1, "unknown type -> unity pass-through, not NaN");
@@ -221,27 +221,42 @@ assert_eq(naad_is_err(mod_matrix_routing_new(0, 8, H_C0_5)), 1, "routing destina
 assert_eq(naad_is_err(mod_matrix_routing_new(0, 0, H_C0_5)), 0, "control: valid routing still builds");
 
 # ================================================================
-# A5 -- fit_polynomial's sample cap. ganita_mat_least_squares allocates an
-# nx x nx Q internally and never checks it; GANITA_MAT_MAX_ELEMS makes that
-# return 0 from nx = 5793 up, after which ganita_mat_qr stores through the null.
+# A5 -- fit_polynomial at large sample counts. Through 2.1.3 this faulted at
+# nx = 5793: ganita_mat_least_squares materialised a full nx x nx orthogonal Q
+# and never checked its own allocation, so 2.1.3 capped the input and recorded
+# the cap as a knowing divergence (ADR-0001). 2.2.0 ports hisab 1.4.0's THIN QR
+# directly (Q is nx x (degree+1)), so the square Q is never formed, the cap is
+# gone, and these inputs SUCCEED exactly as they do in Rust.
 #
-# This is a DELIBERATE DIVERGENCE -- hisab 1.4.0 used a thin QR and returns
-# coefficients here. See docs/adr/0001-fit-polynomial-sample-cap.md.
-#
-# No positive control at nx = 5792: that allocates a 268 MB Q from a
-# never-freeing bump arena.
+# 5793 is kept as the boundary value precisely because it was the first failing
+# length; 20000 is well past anything the old code could reach.
 # ================================================================
-test_group("A5: fit_polynomial caps its sample count");
+test_group("A5: fit_polynomial handles large inputs (ADR-0001 retired)");
 var a5xs = vec_new();
 var a5ys = vec_new();
 var a5i = 0;
 while (a5i < 5793) {
     vec_push(a5xs, f64_from(a5i));
-    vec_push(a5ys, f64_from(a5i));
+    vec_push(a5ys, f64_from(2 * a5i + 1));
     a5i = a5i + 1;
 }
-assert_eq(vec_len(fit_polynomial(a5xs, a5ys, 2)), 0, "nx = 5793 returns the empty vec, not a SIGSEGV");
+var a5c = fit_polynomial(a5xs, a5ys, 1);
+assert_eq(vec_len(a5c), 2, "nx = 5793 now fits (was the exact SIGSEGV boundary)");
+# y = 2x + 1 recovered from 5793 points: c0 ~ 1, c1 ~ 2.
+assert(f64_lt(f64_abs(f64_sub(vec_get(a5c, 0), H_ONE)), H_C0_5), "large fit recovers the intercept");
+assert(f64_lt(f64_abs(f64_sub(vec_get(a5c, 1), H_TWO)), H_C0_5), "large fit recovers the slope");
 
+var a5bx = vec_new();
+var a5by = vec_new();
+a5i = 0;
+while (a5i < 20000) {
+    vec_push(a5bx, f64_from(a5i));
+    vec_push(a5by, f64_from(2 * a5i + 1));
+    a5i = a5i + 1;
+}
+assert_eq(vec_len(fit_polynomial(a5bx, a5by, 1)), 2, "nx = 20000 fits -- no square Q is ever formed");
+
+# Controls: the small-input path and the rejections are unchanged.
 var a5sx = vec_new();
 var a5sy = vec_new();
 a5i = 0;
@@ -250,7 +265,10 @@ while (a5i < 64) {
     vec_push(a5sy, f64_from(a5i));
     a5i = a5i + 1;
 }
-assert_eq(vec_len(fit_polynomial(a5sx, a5sy, 2)), 3, "control: the cap does not over-reject small inputs");
+assert_eq(vec_len(fit_polynomial(a5sx, a5sy, 2)), 3, "control: small inputs still fit");
+assert_eq(vec_len(fit_polynomial(a5sx, a5sy, 0 - 1)), 0, "control: negative degree still rejected");
+assert_eq(vec_len(fit_polynomial(a5sx, a5sy, 64)), 0, "control: fewer samples than coefficients still rejected");
+
 
 var rc = assert_summary();
 syscall(60, rc);

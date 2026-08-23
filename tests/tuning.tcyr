@@ -81,5 +81,28 @@ vec_set(bad, 3, f64_neg(F64_ONE));
 var res = tuning_table_custom("bad", bad, f64_from(440));
 assert(naad_is_err(res) == 1, "custom rejects negative ratio");
 
+# ================================================================
+# 2.2.0 -- tuning_note_name domain guard. The oracle takes `note: u8`
+# (rust-old/src/tuning.rs:189), so 0..255 is its whole domain and it needs no
+# guard; the port widened the parameter to a signed i64 and formatted a nonsense
+# octave for values Rust could never have received. A negative note additionally
+# fell through every equality test in tuning_note_name_str and silently
+# returned "B".
+# ================================================================
+test_group("note_name rejects notes outside the MIDI range");
+assert_streq(tuning_note_name(128), "", "note 128 is out of range");
+assert_streq(tuning_note_name(0 - 1), "", "a negative note is out of range");
+assert_streq(tuning_note_name(1000000), "", "a far out-of-range note is rejected");
+# Controls: the whole valid MIDI range still names correctly, including both ends.
+assert_streq(tuning_note_name(0), "C-1", "note 0 = C-1");
+assert_streq(tuning_note_name(127), "G9", "note 127 = G9");
+assert_streq(tuning_note_name(69), "A4", "control: A4 unchanged");
+
+test_group("note_name_str range");
+assert_streq(tuning_note_name_str(0 - 1), "", "negative pitch class -> empty, not a silent B");
+assert_streq(tuning_note_name_str(12), "", "pitch class 12 -> empty");
+assert_streq(tuning_note_name_str(11), "B", "control: pitch class 11 is B");
+assert_streq(tuning_note_name_str(0), "C", "control: pitch class 0 is C");
+
 var rc = assert_summary();
 syscall(60, rc);

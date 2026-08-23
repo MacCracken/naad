@@ -15,14 +15,14 @@
 # ================================================================
 # FilterType -> integer constants (was `enum FilterType`).
 # ================================================================
-var FILTER_LOWPASS   = 0;
-var FILTER_HIGHPASS  = 1;
-var FILTER_BANDPASS  = 2;
-var FILTER_NOTCH     = 3;
-var FILTER_ALLPASS   = 4;
-var FILTER_LOWSHELF  = 5;
-var FILTER_HIGHSHELF = 6;
-var FILTER_PEAK      = 7;
+var NAAD_FILTER_LOWPASS   = 0;
+var NAAD_FILTER_HIGHPASS  = 1;
+var NAAD_FILTER_BANDPASS  = 2;
+var NAAD_FILTER_NOTCH     = 3;
+var NAAD_FILTER_ALLPASS   = 4;
+var NAAD_FILTER_LOWSHELF  = 5;
+var NAAD_FILTER_HIGHSHELF = 6;
+var NAAD_FILTER_PEAK      = 7;
 
 # ================================================================
 # BiquadFilter -- Direct Form II Transposed biquad.
@@ -70,8 +70,8 @@ fn filter_biquad_with_gain(filter_type, sample_rate, frequency, q, gain_db) {
     # out-of-range type cannot occur there. Unvalidated here it falls off the
     # end of the coefficient chain with a0 still +0.0, making every coefficient
     # NaN and latching NaN into z1/z2 forever.
-    if (filter_type < FILTER_LOWPASS) { return NAAD_ERR_INVALID_PARAMETER; }
-    if (filter_type > FILTER_PEAK) { return NAAD_ERR_INVALID_PARAMETER; }
+    if (filter_type < NAAD_FILTER_LOWPASS) { return NAAD_ERR_INVALID_PARAMETER; }
+    if (filter_type > NAAD_FILTER_PEAK) { return NAAD_ERR_INVALID_PARAMETER; }
 
     var self = alloc(sizeof(BiquadFilter));
     BiquadFilter_set_b0(self, F64_ONE);
@@ -119,14 +119,14 @@ fn filter_biquad_compute_coefficients(self) {
     var a1 = 0;
     var a2 = 0;
 
-    if (ft == FILTER_LOWPASS) {
+    if (ft == NAAD_FILTER_LOWPASS) {
         b1 = f64_sub(F64_ONE, cos_w0);
         b0 = f64_div(b1, F64_TWO);
         b2 = b0;
         a0 = f64_add(F64_ONE, alpha);
         a1 = f64_mul(neg2, cos_w0);
         a2 = f64_sub(F64_ONE, alpha);
-    } elif (ft == FILTER_HIGHPASS) {
+    } elif (ft == NAAD_FILTER_HIGHPASS) {
         var onepc = f64_add(F64_ONE, cos_w0);
         b0 = f64_div(onepc, F64_TWO);
         b1 = f64_neg(onepc);
@@ -134,28 +134,28 @@ fn filter_biquad_compute_coefficients(self) {
         a0 = f64_add(F64_ONE, alpha);
         a1 = f64_mul(neg2, cos_w0);
         a2 = f64_sub(F64_ONE, alpha);
-    } elif (ft == FILTER_BANDPASS) {
+    } elif (ft == NAAD_FILTER_BANDPASS) {
         b0 = alpha;
         b1 = 0;
         b2 = f64_neg(alpha);
         a0 = f64_add(F64_ONE, alpha);
         a1 = f64_mul(neg2, cos_w0);
         a2 = f64_sub(F64_ONE, alpha);
-    } elif (ft == FILTER_NOTCH) {
+    } elif (ft == NAAD_FILTER_NOTCH) {
         b0 = F64_ONE;
         b1 = f64_mul(neg2, cos_w0);
         b2 = F64_ONE;
         a0 = f64_add(F64_ONE, alpha);
         a1 = f64_mul(neg2, cos_w0);
         a2 = f64_sub(F64_ONE, alpha);
-    } elif (ft == FILTER_ALLPASS) {
+    } elif (ft == NAAD_FILTER_ALLPASS) {
         b0 = f64_sub(F64_ONE, alpha);
         b1 = f64_mul(neg2, cos_w0);
         b2 = f64_add(F64_ONE, alpha);
         a0 = f64_add(F64_ONE, alpha);
         a1 = f64_mul(neg2, cos_w0);
         a2 = f64_sub(F64_ONE, alpha);
-    } elif (ft == FILTER_LOWSHELF) {
+    } elif (ft == NAAD_FILTER_LOWSHELF) {
         # Distinct names per branch: Cyrius shares one scope across all elif
         # bodies, so a repeated `var` name across branches is a duplicate.
         var ls_a = f64_pow(f64_from(10), f64_div(gain_db, f64_from(40)));
@@ -170,7 +170,7 @@ fn filter_biquad_compute_coefficients(self) {
         a0 = f64_add(f64_add(ls_ap1, ls_am1c), ls_ts);
         a1 = f64_mul(neg2, f64_add(ls_am1, ls_ap1c));
         a2 = f64_sub(f64_add(ls_ap1, ls_am1c), ls_ts);
-    } elif (ft == FILTER_HIGHSHELF) {
+    } elif (ft == NAAD_FILTER_HIGHSHELF) {
         var hs_a = f64_pow(f64_from(10), f64_div(gain_db, f64_from(40)));
         var hs_ts = f64_mul(f64_mul(F64_TWO, f64_sqrt(hs_a)), alpha);
         var hs_ap1 = f64_add(hs_a, F64_ONE);
@@ -183,7 +183,7 @@ fn filter_biquad_compute_coefficients(self) {
         a0 = f64_add(f64_sub(hs_ap1, hs_am1c), hs_ts);
         a1 = f64_mul(F64_TWO, f64_sub(hs_am1, hs_ap1c));
         a2 = f64_sub(f64_sub(hs_ap1, hs_am1c), hs_ts);
-    } elif (ft == FILTER_PEAK) {
+    } elif (ft == NAAD_FILTER_PEAK) {
         var pk_a = f64_pow(f64_from(10), f64_div(gain_db, f64_from(40)));
         var pk_aa = f64_mul(alpha, pk_a);
         var pk_ad = f64_div(alpha, pk_a);

@@ -116,9 +116,9 @@ fn vocoder_new(num_bands, low_freq, high_freq, sample_rate) {
             q = f64_clamp(f64_div(F64_ONE, f64_sub(f64_exp(step), F64_ONE)), F64_ONE, f64_from(20));
         }
 
-        var analysis_filter = filter_biquad_new(FILTER_BANDPASS, sample_rate, center, q);
+        var analysis_filter = filter_biquad_new(NAAD_FILTER_BANDPASS, sample_rate, center, q);
         if (naad_is_err(analysis_filter) == 1) { return analysis_filter; }
-        var synthesis_filter = filter_biquad_new(FILTER_BANDPASS, sample_rate, center, q);
+        var synthesis_filter = filter_biquad_new(NAAD_FILTER_BANDPASS, sample_rate, center, q);
         if (naad_is_err(synthesis_filter) == 1) { return synthesis_filter; }
 
         var band = alloc(sizeof(VocoderBand));

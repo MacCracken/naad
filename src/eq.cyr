@@ -172,7 +172,7 @@ fn eq_graphic_new(sample_rate) {
     while (i < 10) {
         var freq = vec_get(freqs, i);
         if (f64_lt(freq, nyquist) == 1) {
-            var e = eq_add_band(eq, FILTER_PEAK, freq, EQ_C1_4, 0);
+            var e = eq_add_band(eq, NAAD_FILTER_PEAK, freq, EQ_C1_4, 0);
             if (naad_is_err(e) == 1) { return e; }
             vec_push(active, freq);
         }
@@ -226,7 +226,7 @@ fn eq_graphic_num_bands(self) {
 # struct pointer on success, or a negative NAAD_ERR_* on invalid parameters.
 # Ports new().
 fn eq_deesser_new(center_freq, threshold_db, sample_rate) {
-    var detector_filter = filter_biquad_new(FILTER_BANDPASS, sample_rate, center_freq, F64_TWO);
+    var detector_filter = filter_biquad_new(NAAD_FILTER_BANDPASS, sample_rate, center_freq, F64_TWO);
     if (naad_is_err(detector_filter) == 1) { return detector_filter; }
     # smooth_coeff = 1.0 - (-1.0 / (0.002 * sample_rate)).exp()  -- ~2ms
     var tau = f64_mul(EQ_C0_002, sample_rate);

@@ -1,15 +1,294 @@
-# naad fuzz harness
+# naad.fcyr -- adversarial numeric sweep over the public boundary.
+#
+# naad has no I/O and no parsers, so the only untrusted input it can receive is
+# NUMBERS a consumer forwarded from somewhere less trusted. This harness drives
+# the guarded surface with the values that actually break Cyrius ports, drawn
+# from a fixed table plus a deterministic PRNG so a failure is reproducible.
+#
+# The value table is not arbitrary. Each entry is a value that has caused a real
+# defect in this project or a sibling:
+#   0, -1                 -- the half-bound class: guards written `== 0` where
+#                            the oracle's unsigned type made that complete
+#   INT64_MIN             -- what `f64_to` produces on overflow, where Rust's
+#                            `as` saturates to 0
+#   NaN, +/-inf           -- pass through f64_clamp (matching Rust), then reach
+#                            a cast site or poison persistent filter state
+#   709 / 710             -- the exact f64_exp overflow boundary that used to
+#                            make f64_tanh return NaN
+#   non-power-of-two      -- 100, 1000: INT64_MIN % 1024 == 0, so power-of-two
+#                            buffers MASK the truncation class entirely
+#
+# The harness asserts two contracts:
+#   1. the process survives -- every abort (SIGSEGV/SIGFPE/_vec_die) is a
+#      failure, and that is most of the value here
+#   2. a constructor either reports an error or returns a usable object; it
+#      never returns success on an input it cannot honour
 
-fn fuzz_main(data, len) {
-    if (len == 0) { return 0; }
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "dist/naad.cyr"
+
+var FZ_NAN   = 0x7FF8000000000000;
+var FZ_PINF  = 0x7FF0000000000000;
+var FZ_NINF  = 0xFFF0000000000000;
+var FZ_TINY  = 0x0000000000000001;   # smallest subnormal
+var FZ_HUGE  = 0x7FEFFFFFFFFFFFFF;   # f64::MAX
+var FZ_HALF  = 0x3FE0000000000000;   # 0.5
+var FZ_ONE   = 0x3FF0000000000000;
+var FZ_NEG1  = 0xBFF0000000000000;
+
+var fz_fail = 0;
+var fz_checks = 0;
+
+# Interesting f64 values, by index.
+fn fz_val(i) {
+    var k = i % 12;
+    if (k == 0) { return 0; }
+    if (k == 1) { return FZ_ONE; }
+    if (k == 2) { return FZ_NEG1; }
+    if (k == 3) { return FZ_NAN; }
+    if (k == 4) { return FZ_PINF; }
+    if (k == 5) { return FZ_NINF; }
+    if (k == 6) { return FZ_TINY; }
+    if (k == 7) { return FZ_HUGE; }
+    if (k == 8) { return FZ_HALF; }
+    if (k == 9) { return f64_from(44100); }
+    if (k == 10) { return f64_from(710); }
+    return f64_from(0 - 710);
+}
+
+# Interesting integers, by index.
+fn fz_int(i) {
+    var k = i % 10;
+    if (k == 0) { return 0; }
+    if (k == 1) { return 1; }
+    if (k == 2) { return 0 - 1; }
+    if (k == 3) { return 8; }
+    if (k == 4) { return 0 - 48000; }
+    if (k == 5) { return 48000; }
+    if (k == 6) { return 100; }
+    if (k == 7) { return 1000; }
+    if (k == 8) { return 0 - 9223372036854775807 - 1; }   # INT64_MIN
+    return 127;
+}
+
+fn fz_check(cond, what) {
+    fz_checks = fz_checks + 1;
+    if (cond == 0) {
+        print(what, strlen(what));
+        println("");
+        fz_fail = fz_fail + 1;
+    }
     return 0;
 }
 
-fn main() {
-    alloc_init();
-    fuzz_main("test", 4);
-    println("fuzz: ok");
+# A constructor must either report an error or hand back something usable.
+# Anything else -- a "successful" object that faults on first use -- is the
+# exact shape of the 2.1.3 osc_new defect.
+fn fz_ctor(p, what) {
+    fz_check(naad_is_err(p) == 1 || p > 0, what);
     return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+
+    # --- oscillators ---
+    # TWO sweeps, deliberately separated. Driving the id and the numeric
+    # parameters from one loop index correlates them: an out-of-range id then
+    # only ever pairs with an already-invalid sample rate, so the id guard is
+    # never actually reached and the harness proves nothing. Measured — with
+    # the guards reverted, the correlated version reported a clean run.
+    var i = 0;
+    while (i < 30) {
+        var wf = i - 8;                        # -8 .. 21, straddling 0..7
+        var o = osc_new(wf, f64_from(440), f64_from(44100));   # both VALID
+        fz_ctor(o, "osc_new returned neither an error nor a usable pointer");
+        fz_check(naad_is_err(o) == 1 || (wf >= 0 && wf <= 7),
+          "osc_new accepted an out-of-range waveform");
+        if (naad_is_err(o) == 0) {
+            fz_check(naad_is_finite(osc_next_sample(o)) == 1,
+              "a validated oscillator emitted a non-finite sample");
+        }
+        i = i + 1;
+    }
+    # Now sweep the numeric parameters with a valid id.
+    i = 0;
+    while (i < 144) {
+        var o2 = osc_new(i % 8, fz_val(i), fz_val(i / 12));
+        fz_ctor(o2, "osc_new returned neither an error nor a usable pointer");
+        if (naad_is_err(o2) == 0) {
+            var s2 = osc_next_sample(o2);
+            fz_check(1, "unreachable");
+        }
+        i = i + 1;
+    }
+
+    # --- biquad filters: id sweep at valid parameters, then a value sweep ---
+    i = 0;
+    while (i < 30) {
+        var ft = i - 8;                        # -8 .. 21, straddling 0..7
+        var f = filter_biquad_new(ft, f64_from(44100), f64_from(1000), FZ_ONE);
+        fz_ctor(f, "filter_biquad_new returned neither an error nor a usable pointer");
+        fz_check(naad_is_err(f) == 1 || (ft >= 0 && ft <= 7),
+          "filter_biquad_new accepted an out-of-range type");
+        if (naad_is_err(f) == 0) {
+            fz_check(naad_is_finite(filter_biquad_process_sample(f, FZ_HALF)) == 1,
+              "a validated biquad emitted a non-finite sample");
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < 144) {
+        var f2 = filter_biquad_new(i % 8, fz_val(i / 12), fz_val(i), fz_val(i + 4));
+        fz_ctor(f2, "filter_biquad_new returned neither an error nor a usable pointer");
+        if (naad_is_err(f2) == 0) {
+            fz_check(naad_is_finite(filter_biquad_process_sample(f2, FZ_HALF)) == 1,
+              "a validated biquad emitted a non-finite sample");
+        }
+        i = i + 1;
+    }
+
+    # --- LFOs: shape sweep at valid parameters, then a value sweep ---
+    i = 0;
+    while (i < 30) {
+        var sh = i - 8;                        # -8 .. 21, straddling 0..5
+        var l = modulation_lfo_new(sh, f64_from(2), f64_from(44100));
+        fz_ctor(l, "modulation_lfo_new returned neither an error nor a usable pointer");
+        fz_check(naad_is_err(l) == 1 || (sh >= 0 && sh <= 5),
+          "modulation_lfo_new accepted an out-of-range shape");
+        if (naad_is_err(l) == 0) {
+            fz_check(naad_is_finite(modulation_lfo_next_value(l)) == 1,
+              "a validated LFO emitted a non-finite value");
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < 144) {
+        var l2 = modulation_lfo_new(i % 6, fz_val(i), fz_val(i / 12));
+        fz_ctor(l2, "modulation_lfo_new returned neither an error nor a usable pointer");
+        if (naad_is_err(l2) == 0) {
+            var v2 = modulation_lfo_next_value(l2);
+            fz_check(1, "unreachable");
+        }
+        i = i + 1;
+    }
+
+    # --- wavetables + morph: adversarial sizes, then NaN phase/position ---
+    var amps = vec_new();
+    vec_push(amps, FZ_ONE);
+    vec_push(amps, FZ_HALF);
+    i = 0;
+    while (i < 100) {
+        var sz = fz_int(i);
+        var wt = wavetable_from_harmonics(fz_int(i / 10), amps, sz);
+        fz_ctor(wt, "wavetable_from_harmonics returned neither an error nor a usable pointer");
+        if (naad_is_err(wt) == 0) {
+            fz_check(sz > 0, "wavetable_from_harmonics accepted a non-positive size");
+            # Reading at an adversarial phase must not abort.
+            var r = wavetable_read_interpolated(wt, fz_val(i));
+            fz_check(1, "unreachable");
+        }
+        i = i + 1;
+    }
+
+    # Non-power-of-two source, NaN grain position: the case a power-of-two
+    # buffer masks entirely.
+    var src = vec_new();
+    i = 0;
+    while (i < 1000) { vec_push(src, FZ_HALF); i = i + 1; }
+    var g = granular_new(f64_from(44100));
+    granular_set_source(g, src);
+    i = 0;
+    while (i < 60) {
+        granular_set_position(g, fz_val(i));
+        var k = 0;
+        while (k < 64) { var gs = granular_next_sample(g); k = k + 1; }
+        i = i + 1;
+    }
+
+    # --- spectral: empty, tiny and adversarial-length inputs ---
+    i = 0;
+    while (i < 40) {
+        var sig = vec_new();
+        var n = i % 9;                          # 0..8, including empty
+        var j = 0;
+        while (j < n) { vec_push(sig, fz_val(i + j)); j = j + 1; }
+        var mags = fft_magnitudes(sig);
+        fz_check(vec_len(mags) >= 0, "fft_magnitudes returned a negative length");
+        var ps = power_spectrum(sig);
+        fz_check(vec_len(ps) >= 0, "power_spectrum returned a negative length");
+        i = i + 1;
+    }
+
+    # --- fit_polynomial: degrees around the boundary, adversarial data ---
+    i = 0;
+    while (i < 60) {
+        var fx = vec_new();
+        var fy = vec_new();
+        var m = i % 12;
+        var j2 = 0;
+        while (j2 < m) {
+            vec_push(fx, f64_from(j2));
+            vec_push(fy, fz_val(i + j2));
+            j2 = j2 + 1;
+        }
+        var deg = (i % 7) - 2;                  # -2 .. 4
+        var co = fit_polynomial(fx, fy, deg);
+        # Either the None channel, or exactly degree+1 finite coefficients.
+        fz_check(vec_len(co) == 0 || vec_len(co) == deg + 1,
+          "fit_polynomial returned a coefficient count that is neither 0 nor degree+1");
+        var c = 0;
+        while (c < vec_len(co)) {
+            fz_check(naad_is_finite(vec_get(co, c)) == 1,
+              "fit_polynomial returned a non-finite coefficient");
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+
+    # --- bspline: adversarial degree against a fixed control set ---
+    var cps = vec_new();
+    vec_push(cps, FZ_ONE);
+    vec_push(cps, FZ_HALF);
+    vec_push(cps, FZ_ONE);
+    vec_push(cps, FZ_HALF);
+    i = 0;
+    while (i < 60) {
+        var bd = (i % 12) - 5;                  # -5 .. 6
+        var bv = bspline_eval_1d(bd, cps, fz_val(i));
+        fz_check(1, "unreachable");
+        i = i + 1;
+    }
+
+    # --- mod matrix: ids well outside the 8-slot scratch ---
+    var mm = mod_matrix_new();
+    i = 0;
+    while (i < 60) {
+        var id = fz_int(i);
+        var e = mod_matrix_set_source(mm, id, FZ_HALF);
+        fz_check(naad_is_err(e) == 1 || (id >= 0 && id < MOD_MATRIX_NUM_SOURCES),
+          "mod_matrix_set_source accepted an out-of-range id");
+        var d = mod_matrix_get_destination(mm, id);
+        fz_check(1, "unreachable");
+        i = i + 1;
+    }
+
+    # --- tuning: note names across and beyond the MIDI domain ---
+    i = 0;
+    while (i < 60) {
+        var nn = tuning_note_name(fz_int(i));
+        fz_check(strlen(nn) <= 4, "tuning_note_name produced an over-long name");
+        i = i + 1;
+    }
+
+    fmt_int(fz_checks);
+    if (fz_fail == 0) {
+        println("fuzz: ok");
+        return 0;
+    }
+    println("fuzz: FAILURES above");
+    return 1;
 }
 
 var r = main();

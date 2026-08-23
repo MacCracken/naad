@@ -184,16 +184,23 @@ fn tuning_note_to_freq(self, note) {
 # ================================================================
 # tuning_note_name -- MIDI note number to a name string ("A4", "C#5").
 # octave = note / 12 - 1; name index = note % 12. Returns a freshly
-# allocated null-terminated cstring.
+# allocated null-terminated cstring, or the empty string "" for a note outside
+# the MIDI range.
+#
+# The oracle takes `note: u8` (rust-old/src/tuning.rs:189), so 0..255 is its
+# whole domain and it needs no guard. The port widened the parameter to a signed
+# i64; this restores the oracle's domain explicitly rather than formatting a
+# nonsense octave for a value Rust could never have received. 2.1.3 widened the
+# buffer from 16 to 32 bytes to survive the widened domain -- that stays as
+# defence in depth, but with this guard `nl <= 2 + ol <= 3 + NUL` is the real
+# bound.
 # ================================================================
 #must_use
 fn tuning_note_name(note) {
+    if (note < 0) { return ""; }
+    if (note > 127) { return ""; }
     var name = tuning_note_name_str(note % 12);
     var octave = (note / 12) - 1;
-    # 32, not 16: the oracle takes `note: u8` (rust-old/src/tuning.rs:189) so the
-    # longest output is "C#10" -- 5 bytes. The port widened the parameter to a
-    # signed i64, where fmt_int_buf can emit 20 characters, so the u8-era size
-    # was 2 bytes short of the widened domain. nl <= 2 + ol <= 20 + NUL = 23.
     var buf = alloc(32);
     var nl = strlen(name);
     memcpy(buf, name, nl);
@@ -204,9 +211,15 @@ fn tuning_note_name(note) {
     return buf;
 }
 
-# Pitch-class name for a semitone index 0..11 (C, C#, D, ...).
+# Pitch-class name for a semitone index 0..11 (C, C#, D, ...), or "" if the
+# index is outside that range. The oracle indexes a `[&str; 12]` with
+# `(note % 12) as usize`, which cannot be out of range; here a negative index
+# would fall through every equality test and silently return "B", so the range
+# is checked explicitly.
 #must_use
 fn tuning_note_name_str(idx) {
+    if (idx < 0) { return ""; }
+    if (idx > 11) { return ""; }
     if (idx == 0) { return "C"; }
     if (idx == 1) { return "C#"; }
     if (idx == 2) { return "D"; }

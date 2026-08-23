@@ -8,6 +8,43 @@
 `VERSION` at the repo root is the source of truth for the current number. The
 entries below are the release record.
 
+**2.2.0** — the namespace wave, and parity restored on `fit_polynomial`.
+
+Everything 2.1.3 identified as real but not patch-safe. Three breaking renames,
+one algorithm replacement that retires an ADR, two deletions, six new public
+functions, and the CI gates that had been available but unenforced.
+
+**`dist/naad.cyr` now collides with nothing.** Measured against all 126 sibling
+bundles on this machine plus the pinned stdlib snapshot: zero shared top-level
+symbols, `fn`/`var`/`const`/`struct` alike. There were five before this release
+(`FILTER_LOWPASS`..`FILTER_NOTCH` against nidhi, `VOICE_NONE` against garjan) —
+all with *identical values*, which is precisely why nothing misbehaved and why
+nothing would have until one side renumbered. Re-measure with
+`./scripts/symbol-collision-check.sh` plus any sibling bundles as arguments.
+
+`fit_polynomial` no longer calls `ganita_mat_least_squares`, which materialised
+a full `m × m` orthogonal Q that polynomial least-squares does not need. It ports
+hisab 1.4.0's thin QR directly (Q is `m × n`) — 2.4 MB instead of 80 TB for a
+degree-2 fit over 100 000 samples. The ADR-0001 cap is gone, large inputs succeed
+as they do in Rust, and ADR-0001's residual allocation-failure hole goes with it.
+⚠ Coefficients move in the last few ulps for every input that already worked;
+that is why it needed a minor release. [ADR-0001](../adr/0001-fit-polynomial-sample-cap.md)
+is superseded by [ADR-0002](../adr/0002-port-thin-qr-in-tree.md).
+
+`tests/naad.fcyr` became a real fuzz harness — it was a stub that called one
+function with a fixed string. ⚠ **Its first version was worthless and only
+measuring caught it**: driving the enum id and the numeric parameters from one
+loop index correlated them, so an out-of-range id only ever paired with an
+already-invalid sample rate and never reached the id guard. Reverting all three
+2.1.3 id guards produced a clean run. The sweeps are now separated and reverting
+any of them fails the harness. 1273 checks.
+
+CI now enforces `cyrius audit`, `cyrius deny` and `cyrius fuzz` alongside the
+changelog, symbol-collision and bundle-freshness gates — possible only because
+`cyrius audit` started exiting 0 in 2.1.3.
+
+Suite: **40 suites / 579 assertions, 0 failed.**
+
 **2.1.3** — P-1 hardening sweep, and the `ERR_*` → `NAAD_ERR_*` de-collision
 the roadmap had carried since 2.1.1.
 
@@ -191,7 +228,7 @@ consumed.
 
 Per-module parity tracked in [`port-audit.md`](port-audit.md). Summary:
 
-**41 / 41 modules ported — PORT COMPLETE** · **557 assertions green across 40
+**41 / 41 modules ported — PORT COMPLETE** · **579 assertions green across 40
 suites** · `dist/naad.cyr` bundle assembled and collision-audited to zero across
 all **759** top-level symbols — `fn`, `var`, `const` and `struct` alike, against
 hisab, goonj, sakshi, abaco and the whole pinned stdlib. The audit was fn-scoped
@@ -292,12 +329,11 @@ scoped — verified to fail when the 2.1.2 collision is reintroduced).
 
 **Carried forward:**
 
-- **CI still has no fmt / lint / deny / fuzz step.** `.github/workflows/ci.yml`
-  runs the changelog gate, `cyrius deps`, `cyrius build`, the symbol-collision
-  and bundle-freshness gates, then `cyrius test`. A fmt or lint regression still
-  reaches `main` unchallenged even though `cyrius audit` covers both locally.
-  naad also has no `fuzz/` directory for `cyrius fuzz` to pick up, despite
-  `tests/naad.fcyr` existing.
+- ~~CI has no fmt / lint / deny / fuzz step~~ — **closed in 2.2.0.** CI now runs
+  the changelog gate, `cyrius deps`, `cyrius build`, the symbol-collision and
+  bundle-freshness gates, `cyrius audit`, `cyrius deny`, `cyrius fuzz` and
+  `cyrius test`. (`cyrius fuzz` discovers `tests/*.fcyr`; no `fuzz/` directory
+  is needed, which is what the earlier note got wrong.)
 - **108 public fns have no caller outside their own definition** — almost all
   accessors, correctly public but **untested**. Read it as a coverage signal,
   not dead code: five of the eight fns documented in 2.1.3 were in that set, so
@@ -305,23 +341,23 @@ scoped — verified to fail when the 2.1.2 collision is reintroduced).
   (`unison_*`, `subosc_*`, `wavetable_osc_*`, `wavetable_morph_*`, `physical_*`,
   `modulation_lfo_*`, `hardsync_*`, `subtractive_*`, every `*_process_buffer`)
   have zero assertions behind them.
-- **`FILTER_*` and `VOICE_NONE` are unprefixed** and collide by name with
-  `nidhi` and `garjan`, both co-linked with naad inside dhvani today. Inert —
-  every shared value currently agrees and nidhi's ids sit inside naad's valid
-  band — so this is forward risk, not a live defect. A breaking rename of 9
-  public symbols rippling into five vendored copies: 2.2.0, with the sibling
-  refreshes. The CI gate does not cover it (those are sibling bundles, not
-  naad's own deps); pass them as arguments to check locally.
-- **ADR-0001's residual hole.** The `fit_polynomial` cap closes the deterministic
-  cliff at `nx >= 5793`, not the `alloc`-failure path: `ganita_mat_new` also
-  returns 0 on plain allocation failure, so under a memory ceiling the 268 MB Q
-  can fail at a *lower* `nx` and land on the identical unchecked write. **Do not
-  read the guard as making `nx = 5792` safe by construction.** Closes when
-  ganita gains a failure return, or when `fit_polynomial` grows its own thin QR.
-- **`tuning_note_name` domain guard** (the parity-faithful fix; the 2.1.3 buffer
-  resize ships on inspection because no runtime assertion can discriminate it)
-  and **zero-alloc siblings** for ambisonics / binaural / panning, which today
-  have only the allocating per-sample form. Both change public behaviour or add
-  surface: 2.2.0.
+- ~~`FILTER_*` and `VOICE_NONE` are unprefixed~~ — **closed in 2.2.0**, along
+  with the six Tier-1 bare function names. Ecosystem-wide intersection is now
+  zero. ⚠ The CI gate still only covers naad's own dependency bundles and the
+  stdlib; sibling bundles must be passed to
+  `./scripts/symbol-collision-check.sh` as arguments, so a NEW sibling collision
+  would not be caught automatically.
+- ~~ADR-0001's residual hole~~ — **closed in 2.2.0** by the thin-QR port; naad
+  no longer references `ganita_mat_*` at all. The upstream bug is still real
+  and unreported: `ganita_mat_least_squares` forms a square Q and has no failure
+  return. naad is simply no longer exposed to it. **Worth filing against
+  ganita.**
+- ~~`tuning_note_name` domain guard~~ and ~~zero-alloc siblings for ambisonics /
+  binaural / panning~~ — **both closed in 2.2.0.**
+- **Coordinated consumer refresh.** 2.1.3 and 2.2.0 together rename the error
+  block, the filter and voice constants, and six bare function names. Five
+  vendored `lib/naad.cyr` copies (dhvani, garjan, ghurni, nidhi, prani) need a
+  refresh, and dhvani/svara need their call sites updated — see the 2.2.0
+  migration table.
 - Broaden benchmarks (more hot paths) + capture a Rust-vs-Cyrius comparison.
 - Consumer-green (dhvani/svara) once they port up the stack.

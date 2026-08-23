@@ -287,7 +287,7 @@ assert_eq(vec_len(stft_magnitudes(si_short, 1024, 256, WINDOW_HANN)), 0, "signal
 test_group("chromagram concentrates on pitch class A (9)");
 var ch_sig = synth_sine(f64_from(440), f64_from(44100), 16384);
 var ch_stft = stft_magnitudes(ch_sig, 4096, 1024, WINDOW_HANN);
-var ch_chroma = chromagram(ch_stft, 4096, f64_from(44100));
+var ch_chroma = naad_chromagram(ch_stft, 4096, f64_from(44100));
 assert(vec_len(ch_chroma) > 0, "chromagram produced frames");
 var ch_ok = 1;
 var ch_f = 0;

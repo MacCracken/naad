@@ -17,6 +17,17 @@ dependency pins, `cyrius.cyml` and `cyrius.lock`. Open work is tracked in
 The Rust oracle is frozen at `rust-old/`, and the correctness bar was — and
 still is, for any change to a ported module — "matches what Rust did".
 
+> **Names in this ledger are as of the 2.0.0 port.** Several public symbols
+> have been prefixed since, to de-collide Cyrius's flat namespace: the `ERR_*`
+> block became `NAAD_ERR_*` in 2.1.3, and `FILTER_*`, `VOICE_*` and six bare
+> helper names (`lerp`, `rms`, `peak`, `normalize`, `chromagram`,
+> `crossfade_equal_power`) became `NAAD_*`/`naad_*` in 2.2.0. `fit_polynomial`
+> no longer uses `ganita_mat_least_squares` — it ports hisab's thin QR in-tree
+> (see [ADR-0002](../adr/0002-port-thin-qr-in-tree.md)), and
+> `white_noise_sample` was removed as a port-invented duplicate. The rows below
+> are a record of what was ported, not a current symbol index; the CHANGELOG
+> migration tables are authoritative for names.
+
 **Status:** ✅ ported & tested · 🟡 partial · ⬜ pending
 **LOC** = Rust lines (incl. tests) at `rust-old/src/`.
 
