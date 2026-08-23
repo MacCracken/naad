@@ -86,5 +86,115 @@ assert_eq(NoiseGenerator_noise_type(wg), NOISE_WHITE, "white type");
 assert_eq(NoiseGenerator_noise_type(pg), NOISE_PINK, "pink type");
 assert_eq(NoiseGenerator_noise_type(bg), NOISE_BROWN, "brown type");
 
+# ================================================================
+# Exact-value coverage for the generator functions themselves
+# (noise_white / noise_pink / noise_brown / noise_white_noise_sample).
+#
+# The expected values are the xorshift32 stream from seed 42 pushed through
+# the SAME formulas the oracle uses -- rust-old/src/dsp_util.rs:664
+# (xorshift32) and :679 (`(raw as f32 / u32::MAX as f32) * 2.0 - 1.0`) -- but
+# evaluated in f64, which is exactly what this port's f32 -> f64 widening
+# means. The raw u32 draws (11355432, 2836018348, 476557059, ...) are
+# bit-identical between the two, so any divergence here is a real port bug.
+var NW_S1 = 0xbfefd4aeb5ffd4af;   # -0.9947122149157134   (raw 11355432)
+var NW_S2 = 0x3fd4851a5654851c;   #  0.3206239550655299   (raw 2836018348)
+var NW_S3 = 0xbfe8e6143f38e614;   # -0.7780858263788013   (raw 476557059)
+var NW_RAW1 = 11355432;
+
+# noise_brown: prev = clamp(prev + white * 0.02, -1, 1) * 0.999.
+var NB_S1 = 0xbf9459f10e0b8643;   # -0.019874350054015954
+var NB_S2 = 0xbf8b8ad6e983cd9e;   # -0.013448409081752651
+var NB_S3 = 0xbf9dad39bcd112f1;   # -0.028981115483719348
+
+# noise_pink: 16 primed octaves, octave 0 re-rolled on counter 0 -> 1,
+# plus a white term, all divided by 17.
+var NP_S1 = 0x3f712400e2e3f6bc;   #  0.004184726202081709
+var NP_S2 = 0x3fc5a151970e19c9;   #  0.16898555637108206
+var NP_S3 = 0x3fbdf2b24f5a2eec;   #  0.11698450505553709
+
+# xorshift32 seed 0 is guarded to 1 (rust-old/src/dsp_util.rs:665), whose
+# first draw is 270369.
+var NW_Z1 = 0xbfeffef7f7bffef8;   # -0.9998740996233826   (raw 270369)
+
+# ================================================================
+test_group("noise_white_noise_sample exact + advances the state slot");
+var nsp = alloc(8);
+store64(nsp, 42);
+assert_eq(noise_white_noise_sample(nsp), NW_S1, "white_noise_sample(seed 42) == first signed xorshift draw");
+assert_eq(load64(nsp), NW_RAW1, "white_noise_sample left the raw draw in the state slot");
+assert_eq(noise_white_noise_sample(nsp), NW_S2, "white_noise_sample continues the stream");
+assert_eq(noise_white_noise_sample(nsp), NW_S3, "white_noise_sample third draw");
+
+var nzp = alloc(8);
+store64(nzp, 0);
+assert_eq(noise_white_noise_sample(nzp), NW_Z1, "a zero state is guarded to 1, not left on the dead fixed point");
+assert_neq(load64(nzp), 0, "the guarded state advanced off zero");
+
+# ================================================================
+test_group("noise_white exact stream");
+var nwg = noise_new(NOISE_WHITE, 42);
+assert_eq(noise_white(nwg), NW_S1, "noise_white sample 0");
+assert_eq(noise_white(nwg), NW_S2, "noise_white sample 1");
+assert_eq(noise_white(nwg), NW_S3, "noise_white sample 2");
+# next_sample must dispatch to noise_white for NOISE_WHITE.
+var nwd = noise_new(NOISE_WHITE, 42);
+assert_eq(noise_next_sample(nwd), NW_S1, "next_sample dispatches to noise_white");
+# The constructor's 0 -> 1 seed guard is the same guard as the PRNG's.
+var nwz = noise_new(NOISE_WHITE, 0);
+assert_eq(noise_white(nwz), NW_Z1, "noise_new(.., 0) seeds the PRNG at 1");
+
+# ================================================================
+test_group("noise_brown exact stream + integrator state");
+var nbg = noise_new(NOISE_BROWN, 42);
+assert_eq(NoiseGenerator_brown_prev(nbg), 0, "fresh brown generator starts at +0.0");
+assert_eq(noise_brown(nbg), NB_S1, "noise_brown sample 0");
+assert_eq(noise_brown(nbg), NB_S2, "noise_brown sample 1");
+assert_eq(noise_brown(nbg), NB_S3, "noise_brown sample 2");
+assert_eq(NoiseGenerator_brown_prev(nbg), NB_S3, "brown_prev carries the last output forward");
+var nbd = noise_new(NOISE_BROWN, 42);
+assert_eq(noise_next_sample(nbd), NB_S1, "next_sample dispatches to noise_brown");
+
+# ================================================================
+test_group("noise_pink exact stream + octave bookkeeping");
+var npg = noise_new(NOISE_PINK, 42);
+assert_eq(NoiseGenerator_pink_counter(npg), 0, "fresh pink counter is 0");
+assert_neq(NoiseGenerator_pink_running_sum(npg), 0, "the constructor primes the 16 octaves and their running sum");
+assert_eq(vec_len(NoiseGenerator_pink_octaves(npg)), NOISE_PINK_OCTAVES, "16 octave slots allocated");
+assert_eq(noise_pink(npg), NP_S1, "noise_pink sample 0");
+assert_eq(NoiseGenerator_pink_counter(npg), 1, "noise_pink advanced the octave counter");
+assert_eq(noise_pink(npg), NP_S2, "noise_pink sample 1");
+assert_eq(noise_pink(npg), NP_S3, "noise_pink sample 2");
+assert_eq(NoiseGenerator_pink_counter(npg), 3, "counter tracks the sample index");
+var npd = noise_new(NOISE_PINK, 42);
+assert_eq(noise_next_sample(npd), NP_S1, "next_sample dispatches to noise_pink");
+# Only NOISE_PINK pays for the octave priming.
+var npw = noise_new(NOISE_WHITE, 42);
+assert_eq(NoiseGenerator_pink_running_sum(npw), 0, "a non-pink generator leaves the running sum at +0.0");
+
+# ================================================================
+test_group("the three generators differ from the same seed");
+var gw = noise_new(NOISE_WHITE, 42);
+var gp = noise_new(NOISE_PINK, 42);
+var gb = noise_new(NOISE_BROWN, 42);
+var gw1 = noise_next_sample(gw);
+var gp1 = noise_next_sample(gp);
+var gb1 = noise_next_sample(gb);
+assert_neq(gw1, gp1, "white[0] != pink[0] from seed 42");
+assert_neq(gw1, gb1, "white[0] != brown[0] from seed 42");
+assert_neq(gp1, gb1, "pink[0] != brown[0] from seed 42");
+# ... and stay different across a run, not just on the first sample.
+var g_all_diff = 1;
+var gi = 0;
+while (gi < 64) {
+    var gwn = noise_next_sample(gw);
+    var gpn = noise_next_sample(gp);
+    var gbn = noise_next_sample(gb);
+    if (gwn == gpn) { g_all_diff = 0; }
+    if (gwn == gbn) { g_all_diff = 0; }
+    if (gpn == gbn) { g_all_diff = 0; }
+    gi = gi + 1;
+}
+assert(g_all_diff, "white/pink/brown stay distinct for 64 samples from one seed");
+
 var rc = assert_summary();
 syscall(60, rc);

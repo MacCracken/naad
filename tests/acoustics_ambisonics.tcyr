@@ -9,6 +9,12 @@ include "src/error.cyr"
 include "src/acoustics_ambisonics.cyr"
 
 var TOL_1E2 = 0x3F847AE147AE147B;   # 0.01
+var TOL_1E12 = 0x3d719799812dea11;  # 1e-12
+var AMB_0_7 = 0x3fe6666666666666;   # 0.7
+var AMB_0_25 = 0x3fd0000000000000;  # 0.25
+var AMB_NEG_HALF = 0xbfe0000000000000;  # -0.5
+var AMB_SENTINEL = 0xc08f380000000000;  # -999.0 (unwritten-slot marker)
+var AMB_CANARY = 0x400e000000000000;     # 3.75  (overrun canary)
 
 # |a - b| < tol  ->  1
 fn approx(a, b, tol) {
@@ -69,6 +75,131 @@ test_group("getters_echo_construction");
 var enc_g = naad_ambisonics_encoder_new(F64_HALF, d03);
 assert(naad_ambisonics_azimuth(enc_g) == F64_HALF, "azimuth getter echoes");
 assert(naad_ambisonics_elevation(enc_g) == d03, "elevation getter echoes");
+
+# ================================================================
+# naad_ambisonics_update_cache -- the cache holds cos/sin of the CURRENT
+# azimuth/elevation. Drive the raw struct setters (bypassing set_position, the
+# only other caller) so a stale cache is observable, then assert update_cache
+# refreshes all four slots with the right trig of the right angle. az and el
+# are given DIFFERENT angles so a cos_az/cos_el (or sin/cos) mix-up fails.
+# ================================================================
+test_group("update_cache_refreshes_all_four_slots");
+var uc = naad_ambisonics_encoder_new(0, 0);
+# Fresh encoder at (0, 0): cos(0) == 1.0 exactly, sin(0) == +0.0 exactly.
+assert_eq(AmbisonicsEncoder_cos_az(uc), F64_ONE, "fresh cos_az == 1.0");
+assert_eq(AmbisonicsEncoder_sin_az(uc), 0, "fresh sin_az == +0.0");
+assert_eq(AmbisonicsEncoder_cos_el(uc), F64_ONE, "fresh cos_el == 1.0");
+assert_eq(AmbisonicsEncoder_sin_el(uc), 0, "fresh sin_el == +0.0");
+
+# Move the angles behind the cache's back: az = pi/2, el = pi.
+AmbisonicsEncoder_set_azimuth(uc, F64_PI_2);
+AmbisonicsEncoder_set_elevation(uc, F64_PI);
+# The cache is now stale -- it still describes (0, 0).
+assert_eq(AmbisonicsEncoder_cos_az(uc), F64_ONE, "cache is stale before update_cache");
+assert_eq(naad_ambisonics_update_cache(uc), 0, "update_cache returns 0");
+# az = pi/2 -> cos_az ~ 0, sin_az ~ 1.  el = pi -> cos_el ~ -1, sin_el ~ 0.
+assert(approx(AmbisonicsEncoder_cos_az(uc), 0, TOL_1E12), "cos_az ~ 0 for az = pi/2");
+assert(approx(AmbisonicsEncoder_sin_az(uc), F64_ONE, TOL_1E12), "sin_az ~ 1 for az = pi/2");
+assert(approx(AmbisonicsEncoder_cos_el(uc), f64_neg(F64_ONE), TOL_1E12), "cos_el ~ -1 for el = pi");
+assert(approx(AmbisonicsEncoder_sin_el(uc), 0, TOL_1E12), "sin_el ~ 0 for el = pi");
+
+# ================================================================
+# naad_ambisonics_encode_buffer (new in 2.2.0) must agree with the per-sample
+# form sample for sample. Two encoders built identically; one driven through
+# encode_buffer, the other through encode_sample. The comparison is BIT-exact
+# (identical op order in encode_sample_into), so no tolerance is used.
+# ================================================================
+test_group("encode_buffer_matches_per_sample");
+var eb_in = vec_new();
+vec_push(eb_in, F64_ONE);
+vec_push(eb_in, AMB_NEG_HALF);
+vec_push(eb_in, 0);
+vec_push(eb_in, AMB_0_25);
+vec_push(eb_in, f64_neg(F64_TWO));
+
+var eb_w = vec_new();
+var eb_x = vec_new();
+var eb_y = vec_new();
+var eb_z = vec_new();
+var eb_i = 0;
+while (eb_i < 5) {
+    vec_push(eb_w, AMB_SENTINEL);
+    vec_push(eb_x, AMB_SENTINEL);
+    vec_push(eb_y, AMB_SENTINEL);
+    vec_push(eb_z, AMB_SENTINEL);
+    eb_i = eb_i + 1;
+}
+
+var eb_buf_enc = naad_ambisonics_encoder_new(AMB_0_7, d03);
+var eb_ref_enc = naad_ambisonics_encoder_new(AMB_0_7, d03);
+assert_eq(naad_ambisonics_encode_buffer(eb_buf_enc, eb_in, eb_w, eb_x, eb_y, eb_z), 0,
+  "encode_buffer returns 0");
+
+var eb_match = 1;
+var eb_written = 1;
+eb_i = 0;
+while (eb_i < 5) {
+    var eb_ref = naad_ambisonics_encode_sample(eb_ref_enc, vec_get(eb_in, eb_i));
+    if (vec_get(eb_w, eb_i) != BFormatSample_w(eb_ref)) { eb_match = 0; }
+    if (vec_get(eb_x, eb_i) != BFormatSample_x(eb_ref)) { eb_match = 0; }
+    if (vec_get(eb_y, eb_i) != BFormatSample_y(eb_ref)) { eb_match = 0; }
+    if (vec_get(eb_z, eb_i) != BFormatSample_z(eb_ref)) { eb_match = 0; }
+    # The sentinel must be gone from every slot the call was told to fill.
+    if (vec_get(eb_w, eb_i) == AMB_SENTINEL) { eb_written = 0; }
+    if (vec_get(eb_x, eb_i) == AMB_SENTINEL) { eb_written = 0; }
+    if (vec_get(eb_y, eb_i) == AMB_SENTINEL) { eb_written = 0; }
+    if (vec_get(eb_z, eb_i) == AMB_SENTINEL) { eb_written = 0; }
+    eb_i = eb_i + 1;
+}
+assert_eq(eb_written, 1, "encode_buffer actually wrote every output slot");
+assert_eq(eb_match, 1, "encode_buffer == encode_sample, bit for bit");
+# Independent spot-check of the values themselves (not just self-agreement):
+# W is the input verbatim, and index 2's zero input must give an all-zero frame.
+assert_eq(vec_get(eb_w, 0), F64_ONE, "W[0] is the input verbatim");
+assert_eq(vec_get(eb_w, 4), f64_neg(F64_TWO), "W[4] is the input verbatim");
+assert_eq(vec_get(eb_x, 2), 0, "X[2] == 0 for a zero input sample");
+assert_eq(vec_get(eb_y, 2), 0, "Y[2] == 0 for a zero input sample");
+assert_eq(vec_get(eb_z, 2), 0, "Z[2] == 0 for a zero input sample");
+
+# ================================================================
+# encode_buffer with mismatched output lengths: a SHORT channel takes only its
+# first len samples, a LONG channel keeps its tail untouched, and neither vec
+# is resized or overruns into the vec allocated after it.
+# ================================================================
+test_group("encode_buffer_mismatched_output_lengths");
+var ml_enc = naad_ambisonics_encoder_new(AMB_0_7, d03);
+var ml_short = vec_new();        # 2 slots for a 5-sample input
+vec_push(ml_short, AMB_SENTINEL);
+vec_push(ml_short, AMB_SENTINEL);
+var ml_long = vec_new();         # 8 slots for a 5-sample input
+var ml_i = 0;
+while (ml_i < 8) { vec_push(ml_long, AMB_SENTINEL); ml_i = ml_i + 1; }
+var ml_y = vec_new();
+var ml_z = vec_new();
+ml_i = 0;
+while (ml_i < 5) { vec_push(ml_y, AMB_SENTINEL); vec_push(ml_z, AMB_SENTINEL); ml_i = ml_i + 1; }
+# Canary allocated AFTER the outputs: an overrun past ml_z would land here.
+var ml_canary = vec_new();
+vec_push(ml_canary, AMB_CANARY);
+vec_push(ml_canary, AMB_CANARY);
+
+naad_ambisonics_encode_buffer(ml_enc, eb_in, ml_short, ml_long, ml_y, ml_z);
+
+assert_eq(vec_len(ml_short), 2, "short output vec is not resized");
+assert_eq(vec_len(ml_long), 8, "long output vec is not resized");
+assert_eq(vec_get(ml_short, 0), F64_ONE, "short W[0] written");
+assert_eq(vec_get(ml_short, 1), AMB_NEG_HALF, "short W[1] written");
+# Slots 5..7 of the long channel are past the input -- untouched.
+assert_eq(vec_get(ml_long, 5), AMB_SENTINEL, "long X[5] untouched past input end");
+assert_eq(vec_get(ml_long, 6), AMB_SENTINEL, "long X[6] untouched past input end");
+assert_eq(vec_get(ml_long, 7), AMB_SENTINEL, "long X[7] untouched past input end");
+assert_eq(vec_get(ml_canary, 0), AMB_CANARY, "no overrun past the output vecs (0)");
+assert_eq(vec_get(ml_canary, 1), AMB_CANARY, "no overrun past the output vecs (1)");
+# An empty input writes nothing at all.
+var ml_empty_out = vec_new();
+vec_push(ml_empty_out, AMB_SENTINEL);
+naad_ambisonics_encode_buffer(ml_enc, vec_new(), ml_empty_out, ml_empty_out, ml_empty_out, ml_empty_out);
+assert_eq(vec_get(ml_empty_out, 0), AMB_SENTINEL, "empty input writes nothing");
 
 var rc = assert_summary();
 syscall(60, rc);

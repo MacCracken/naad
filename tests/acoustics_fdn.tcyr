@@ -14,6 +14,8 @@ alloc_init();
 var C0_001 = 0x3f50624dd2f1a9fc;   # 0.001
 var C0_7   = 0x3fe6666666666666;   # 0.7
 var C1E_5  = 0x3ee4f8b588e368f1;   # 1e-5
+var FDN_0_25 = 0x3fd0000000000000;   # 0.25
+var FDN_NEG_HALF = 0xbfe0000000000000;  # -0.5
 
 # ================================================================
 test_group("fdn produces reverb tail");
@@ -157,6 +159,236 @@ test_group("negative sample rate is rejected");
 assert_eq(naad_is_err(naad_fdn_matrix_new(F64_ONE, 0 - 48000, F64_ONE)), 1, "fdn matrix rejects a negative rate");
 assert_eq(naad_is_err(naad_fdn_matrix_new(F64_ONE, 0, F64_ONE)), 1, "fdn matrix still rejects a zero rate");
 assert_eq(naad_is_err(naad_fdn_reverb_new(f64_from(10), f64_from(8), f64_from(3), F64_ONE, 0 - 48000, F64_ONE)), 1, "fdn reverb rejects a negative rate");
+
+# ================================================================
+# naad_fdn_matrix_process_buffer -- in-place map of process_sample over a vec.
+# Asserting only "the values changed" would pass for any wrong transform, so
+# the buffer is compared element-for-element against a second, identically
+# constructed MatrixFdn driven one sample at a time. Both paths run the same
+# ops in the same order, so the comparison is BIT-exact.
+# ================================================================
+test_group("matrix_fdn_process_buffer_matches_per_sample");
+var pb_buf = naad_fdn_matrix_new(F64_ONE, 48000, F64_HALF);
+var pb_ref = naad_fdn_matrix_new(F64_ONE, 48000, F64_HALF);
+var pb_in = vec_new();      # the values fed in, kept for the dry-mix check
+var pb_work = vec_new();    # the vec process_buffer rewrites in place
+var pb_i = 0;
+while (pb_i < 64) {
+    var pb_v = 0;
+    if (pb_i == 0) { pb_v = F64_ONE; }
+    if (pb_i == 17) { pb_v = FDN_NEG_HALF; }
+    if (pb_i == 33) { pb_v = FDN_0_25; }
+    vec_push(pb_in, pb_v);
+    vec_push(pb_work, pb_v);
+    pb_i = pb_i + 1;
+}
+assert_eq(naad_fdn_matrix_process_buffer(pb_buf, pb_work), 0, "process_buffer returns 0");
+assert_eq(vec_len(pb_work), 64, "process_buffer does not resize the buffer");
+
+var pb_match = 1;
+var pb_changed = 0;
+pb_i = 0;
+while (pb_i < 64) {
+    var pb_expect = naad_fdn_matrix_process_sample(pb_ref, vec_get(pb_in, pb_i));
+    if (vec_get(pb_work, pb_i) != pb_expect) { pb_match = 0; }
+    if (vec_get(pb_work, pb_i) != vec_get(pb_in, pb_i)) { pb_changed = 1; }
+    pb_i = pb_i + 1;
+}
+assert_eq(pb_match, 1, "process_buffer == process_sample, bit for bit, in order");
+assert_eq(pb_changed, 1, "process_buffer actually rewrote the buffer");
+# Sample 0 is the first sample into a silent FDN: every delay line reads zero,
+# so wet == 0 and the output is purely the dry half of the mix -- an exactly
+# predictable value that a wrong mix or a wrong read index would miss.
+assert_eq(vec_get(pb_work, 0), F64_HALF, "first sample of a silent FDN is input * (1 - mix)");
+# Feeding an empty buffer is a no-op, not a crash.
+assert_eq(naad_fdn_matrix_process_buffer(pb_buf, vec_new()), 0, "empty buffer is a no-op");
+
+# ================================================================
+# naad_fdn_matrix_reset -- must restore fresh-object behaviour, not merely
+# quieten the output. Three things are asserted: every delay line, cursor and
+# damping-state slot is back to zero; the reverb tail is gone; and the SAME
+# input now reproduces a fresh MatrixFdn's output stream bit for bit.
+# ================================================================
+test_group("matrix_fdn_reset_restores_fresh_state");
+var mr = naad_fdn_matrix_new(F64_ONE, 48000, F64_ONE);
+# Excite it hard, then let it ring so the lines are demonstrably non-zero.
+var mr_out = naad_fdn_matrix_process_sample(mr, F64_ONE);
+var mr_ringing = 0;
+var mr_i = 0;
+# The shortest delay line is 29.7 ms -> 1425 samples at 48 kHz, so the first
+# echo returns on call 1426 and nothing at all comes back before then (a
+# 500-sample run would still be reading silence out of every line). Stopping
+# exactly on that call also guarantees a non-zero damping_state below: the FDN
+# is sparse this early, and on most other calls every line happens to read a
+# zero slot. Any sample over the threshold counts as ringing -- checking only
+# the LAST sample would be checking one arbitrary zero crossing.
+while (mr_i < 1425) {
+    mr_out = naad_fdn_matrix_process_sample(mr, 0);
+    if (f64_gt(f64_abs(mr_out), C0_001) == 1) { mr_ringing = 1; }
+    mr_i = mr_i + 1;
+}
+assert_eq(mr_ringing, 1, "the FDN is ringing before the reset");
+assert_neq(vec_get(MatrixFdn_positions(mr), 0), 0, "a cursor has advanced before the reset");
+# The state the reset has to clear is genuinely dirty: at least one delay-line
+# slot and one damping slot hold a non-zero value.
+var mr_dirty_line = 0;
+var mr_dirty_damp = 0;
+mr_i = 0;
+while (mr_i < 8) {
+    if (vec_get(MatrixFdn_damping_state(mr), mr_i) != 0) { mr_dirty_damp = 1; }
+    var mr_dl = vec_get(MatrixFdn_buffers(mr), mr_i);
+    var mr_dj = 0;
+    while (mr_dj < vec_len(mr_dl)) {
+        if (vec_get(mr_dl, mr_dj) != 0) { mr_dirty_line = 1; }
+        mr_dj = mr_dj + 1;
+    }
+    mr_i = mr_i + 1;
+}
+assert_eq(mr_dirty_line, 1, "delay lines hold non-zero state before the reset");
+assert_eq(mr_dirty_damp, 1, "damping state is non-zero before the reset");
+
+assert_eq(naad_fdn_matrix_reset(mr), 0, "reset returns 0");
+
+var mr_lines_zero = 1;
+var mr_i2 = 0;
+while (mr_i2 < 8) {
+    var mr_line = vec_get(MatrixFdn_buffers(mr), mr_i2);
+    if (vec_get(MatrixFdn_positions(mr), mr_i2) != 0) { mr_lines_zero = 0; }
+    if (vec_get(MatrixFdn_damping_state(mr), mr_i2) != 0) { mr_lines_zero = 0; }
+    var mr_j = 0;
+    while (mr_j < vec_len(mr_line)) {
+        if (vec_get(mr_line, mr_j) != 0) { mr_lines_zero = 0; }
+        mr_j = mr_j + 1;
+    }
+    mr_i2 = mr_i2 + 1;
+}
+assert_eq(mr_lines_zero, 1, "reset zeroes every delay line, cursor and damping slot");
+# The delay lines and damping gains are configuration, not state -- reset must
+# leave them alone, or the reverb would come back as a different reverb.
+assert_eq(vec_len(MatrixFdn_delay_lengths(mr)), 8, "reset keeps the eight delay lines");
+assert_eq(vec_get(MatrixFdn_delay_lengths(mr), 0), f64_to(f64_mul(FDN_MS_0, f64_mul(FDN_MS_SCALE, f64_from(48000)))),
+  "reset keeps delay line 0's length (29.7 ms at 48 kHz)");
+assert_eq(MatrixFdn_target_rt60(mr), F64_ONE, "reset keeps the target RT60");
+assert_eq(MatrixFdn_mix(mr), F64_ONE, "reset keeps the wet/dry mix");
+
+# Silence in, silence out -- the tail is genuinely gone (mix = 1, so a residue
+# in any line would show up immediately as a non-zero wet sum).
+var mr_silent = 1;
+mr_i = 0;
+while (mr_i < 64) {
+    if (naad_fdn_matrix_process_sample(mr, 0) != 0) { mr_silent = 0; }
+    mr_i = mr_i + 1;
+}
+assert_eq(mr_silent, 1, "a reset FDN outputs exact silence for silent input");
+
+# Behavioural proof of "fresh": drive the reset instance and a brand-new one
+# with the same impulse and compare every sample.
+var mr_reset2 = naad_fdn_matrix_new(F64_ONE, 48000, F64_ONE);
+mr_out = naad_fdn_matrix_process_sample(mr_reset2, F64_ONE);
+mr_i = 0;
+while (mr_i < 3000) { mr_out = naad_fdn_matrix_process_sample(mr_reset2, 0); mr_i = mr_i + 1; }
+naad_fdn_matrix_reset(mr_reset2);
+var mr_fresh = naad_fdn_matrix_new(F64_ONE, 48000, F64_ONE);
+var mr_same = 1;
+var mr_any_nonzero = 0;
+mr_i = 0;
+while (mr_i < 3000) {
+    var mr_in = 0;
+    if (mr_i == 0) { mr_in = F64_ONE; }
+    var mr_a = naad_fdn_matrix_process_sample(mr_reset2, mr_in);
+    var mr_b = naad_fdn_matrix_process_sample(mr_fresh, mr_in);
+    if (mr_a != mr_b) { mr_same = 0; }
+    if (mr_a != 0) { mr_any_nonzero = 1; }
+    mr_i = mr_i + 1;
+}
+assert_eq(mr_any_nonzero, 1, "the comparison stream carries real signal");
+assert_eq(mr_same, 1, "a reset MatrixFdn is bit-identical to a fresh one");
+
+# ================================================================
+# naad_fdn_reverb_reset -- same contract for the goonj-backed reverb: clear the
+# inner FDN so the instance behaves exactly like a newly constructed one.
+# ================================================================
+test_group("fdn_reverb_reset_restores_fresh_state");
+var fr = naad_fdn_reverb_new(f64_from(10), f64_from(8), f64_from(3), F64_ONE, 48000, F64_ONE);
+var fr_out = naad_fdn_reverb_process_sample(fr, F64_ONE);
+var fr_ringing = 0;
+var fr_i = 0;
+# The goonj delay lines are derived from the 10 x 8 x 3 m room (~840 samples
+# for the shortest), so the tail needs well over 500 samples to appear. Any
+# sample over the threshold counts -- the last one alone could be a zero
+# crossing.
+while (fr_i < 3000) {
+    fr_out = naad_fdn_reverb_process_sample(fr, 0);
+    if (f64_gt(f64_abs(fr_out), C0_001) == 1) { fr_ringing = 1; }
+    fr_i = fr_i + 1;
+}
+assert_eq(fr_ringing, 1, "the goonj FDN is ringing before the reset");
+assert_neq(vec_get(Fdn_write_positions(FdnReverb_fdn(fr)), 0), 0, "a cursor advanced before the reset");
+# The delay lines really are dirty before the reset.
+var fr_dirty = 0;
+var fr_pre_lines = Fdn_delay_lines(FdnReverb_fdn(fr));
+fr_i = 0;
+while (fr_i < vec_len(fr_pre_lines)) {
+    var fr_pl = vec_get(fr_pre_lines, fr_i);
+    var fr_pj = 0;
+    while (fr_pj < vec_len(fr_pl)) {
+        if (vec_get(fr_pl, fr_pj) != 0) { fr_dirty = 1; }
+        fr_pj = fr_pj + 1;
+    }
+    fr_i = fr_i + 1;
+}
+assert_eq(fr_dirty, 1, "goonj delay lines hold non-zero state before the reset");
+
+assert_eq(naad_fdn_reverb_reset(fr), 0, "reset returns 0");
+var fr_lines_zero = 1;
+var fr_lines = Fdn_delay_lines(FdnReverb_fdn(fr));
+fr_i = 0;
+while (fr_i < vec_len(fr_lines)) {
+    if (vec_get(Fdn_write_positions(FdnReverb_fdn(fr)), fr_i) != 0) { fr_lines_zero = 0; }
+    var fr_line = vec_get(fr_lines, fr_i);
+    var fr_j = 0;
+    while (fr_j < vec_len(fr_line)) {
+        if (vec_get(fr_line, fr_j) != 0) { fr_lines_zero = 0; }
+        fr_j = fr_j + 1;
+    }
+    fr_i = fr_i + 1;
+}
+assert_eq(fr_lines_zero, 1, "reset zeroes every goonj delay line and cursor");
+# The wrapper's own configuration is untouched.
+assert_eq(FdnReverb_target_rt60(fr), F64_ONE, "reset keeps the target RT60");
+assert_eq(FdnReverb_mix(fr), F64_ONE, "reset keeps the wet/dry mix");
+assert_eq(FdnReverb_sample_rate(fr), 48000, "reset keeps the sample rate");
+
+# mix = 1 (fully wet), so a cleared FDN must emit exact silence for silence.
+var fr_silent = 1;
+fr_i = 0;
+while (fr_i < 64) {
+    if (naad_fdn_reverb_process_sample(fr, 0) != 0) { fr_silent = 0; }
+    fr_i = fr_i + 1;
+}
+assert_eq(fr_silent, 1, "a reset FdnReverb outputs exact silence for silent input");
+
+# Behavioural proof of "fresh".
+var fr_reset2 = naad_fdn_reverb_new(f64_from(10), f64_from(8), f64_from(3), F64_ONE, 48000, F64_ONE);
+fr_out = naad_fdn_reverb_process_sample(fr_reset2, F64_ONE);
+fr_i = 0;
+while (fr_i < 3000) { fr_out = naad_fdn_reverb_process_sample(fr_reset2, 0); fr_i = fr_i + 1; }
+naad_fdn_reverb_reset(fr_reset2);
+var fr_fresh = naad_fdn_reverb_new(f64_from(10), f64_from(8), f64_from(3), F64_ONE, 48000, F64_ONE);
+var fr_same = 1;
+var fr_any_nonzero = 0;
+fr_i = 0;
+while (fr_i < 3000) {
+    var fr_in = 0;
+    if (fr_i == 0) { fr_in = F64_ONE; }
+    var fr_a = naad_fdn_reverb_process_sample(fr_reset2, fr_in);
+    var fr_b = naad_fdn_reverb_process_sample(fr_fresh, fr_in);
+    if (fr_a != fr_b) { fr_same = 0; }
+    if (fr_a != 0) { fr_any_nonzero = 1; }
+    fr_i = fr_i + 1;
+}
+assert_eq(fr_any_nonzero, 1, "the comparison stream carries real signal");
+assert_eq(fr_same, 1, "a reset FdnReverb is bit-identical to a fresh one");
 
 var rc = assert_summary();
 syscall(60, rc);

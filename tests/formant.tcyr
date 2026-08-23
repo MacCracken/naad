@@ -68,5 +68,204 @@ while (vi < vec_len(vowels)) {
 }
 assert(all_valid, "all vowel formants have positive freq/bw/amp");
 
+
+# ================================================================
+# ---- 2.2.1 accessor/coverage gap: formant_band_new, formant_q,
+# ---- formant_lerp, formant_synth_{apply_params,set_vowel,
+# ---- current_vowel,process_buffer}.
+# ================================================================
+
+var C1234_5 = 0x40934a0000000000;   # 1234.5
+var C78_25  = 0x4053900000000000;   # 78.25
+var C0_625  = 0x3fe4000000000000;   # 0.625
+var C0_25   = 0x3fd0000000000000;   # 0.25
+var C0_75   = 0x3fe8000000000000;   # 0.75
+var CNEG1   = 0xbff0000000000000;   # -1.0
+var C6_0    = 0x4018000000000000;   # 6.0
+
+# ================================================================
+test_group("formant_band_new round-trips its three fields");
+var fb = formant_band_new(C1234_5, C78_25, C0_625);
+assert_eq(FormantBand_freq(fb), C1234_5, "band freq stored exactly");
+assert_eq(FormantBand_bw(fb), C78_25, "band bw stored exactly");
+assert_eq(FormantBand_amp(fb), C0_625, "band amp stored exactly");
+# Distinct fields, not one value smeared across three slots.
+assert_neq(FormantBand_freq(fb), FormantBand_bw(fb), "freq and bw are distinct slots");
+assert_neq(FormantBand_bw(fb), FormantBand_amp(fb), "bw and amp are distinct slots");
+# The vowel table is built through formant_band_new -- band 0 of /a/ is
+# (730, 90, 1.0) per rust-old/src/synth/formant.rs Vowel::A.
+var pa = formant_vowel_formants(VOWEL_A);
+assert_eq(FormantBand_freq(vec_get(pa, 0)), f64_from(730), "A F1 = 730 Hz");
+assert_eq(FormantBand_bw(vec_get(pa, 0)), f64_from(90), "A F1 bandwidth = 90 Hz");
+assert_eq(FormantBand_amp(vec_get(pa, 0)), F64_ONE, "A F1 amplitude = 1.0");
+assert_eq(FormantBand_freq(vec_get(pa, 2)), f64_from(2440), "A F3 = 2440 Hz");
+assert_eq(FormantBand_amp(vec_get(pa, 2)), FORMANT_C0_25, "A F3 amplitude = 0.25");
+
+# ================================================================
+# formant_q -- `|freq, bw| if bw > 0.0 { freq / bw } else { 1.0 }`
+# (rust-old/src/synth/formant.rs, the `q` closure in FormantFilter::new).
+# ================================================================
+test_group("formant_q = freq/bw, 1.0 when bw <= 0");
+assert_eq(formant_q(f64_from(1000), f64_from(100)), f64_from(10), "q(1000,100) = 10 exactly");
+assert_eq(formant_q(f64_from(730), f64_from(90)), f64_div(f64_from(730), f64_from(90)), "q(730,90) = 730/90");
+assert_eq(formant_q(C1234_5, C78_25), f64_div(C1234_5, C78_25), "q on non-integral inputs is a plain divide");
+assert_eq(formant_q(f64_from(1000), 0), F64_ONE, "bw = 0 -> Q = 1.0 (not inf)");
+assert_eq(formant_q(f64_from(1000), f64_neg(f64_from(50))), F64_ONE, "bw < 0 -> Q = 1.0");
+assert_neq(formant_q(f64_from(1000), f64_from(100)), F64_ONE, "the bw > 0 branch is not the fallback");
+
+# ================================================================
+# formant_lerp -- a + (b - a) * t. Exact at the endpoints, the midpoint,
+# and outside [0,1] (it does NOT clamp -- morph() clamps t before calling).
+# ================================================================
+test_group("formant_lerp endpoints, midpoint, extrapolation");
+var LA = f64_from(2);          # 2.0
+var LB = C6_0;                 # 6.0
+assert_eq(formant_lerp(LA, LB, 0), LA, "lerp t=0 returns a exactly");
+assert_eq(formant_lerp(LA, LB, F64_ONE), LB, "lerp t=1 returns b exactly");
+assert_eq(formant_lerp(LA, LB, F64_HALF), f64_from(4), "lerp t=0.5 is the exact midpoint 4.0");
+assert_eq(formant_lerp(LA, LB, C0_25), f64_from(3), "lerp t=0.25 = 3.0 exactly");
+assert_eq(formant_lerp(LA, LB, C0_75), f64_from(5), "lerp t=0.75 = 5.0 exactly");
+assert_eq(formant_lerp(LA, LB, f64_from(2)), f64_from(10), "lerp extrapolates past t=1 (no clamp)");
+assert_eq(formant_lerp(LA, LB, CNEG1), f64_neg(f64_from(2)), "lerp extrapolates below t=0 (no clamp)");
+# Descending endpoints -- catches an a/b swap.
+assert_eq(formant_lerp(LB, LA, F64_HALF), f64_from(4), "lerp is symmetric about the midpoint");
+assert_eq(formant_lerp(LB, LA, 0), LB, "lerp(b,a,0) returns b, not a");
+
+# ================================================================
+test_group("formant_synth_current_vowel reports the constructor vowel");
+# VOWEL_U is 4, so a stub returning 0 would not pass this.
+var cs_u = formant_synth_new(VOWEL_U, f64_from(SR));
+assert_eq(formant_synth_current_vowel(cs_u), VOWEL_U, "fresh synth reports VOWEL_U");
+var cs_o = formant_synth_new(VOWEL_O, f64_from(SR));
+assert_eq(formant_synth_current_vowel(cs_o), VOWEL_O, "fresh synth reports VOWEL_O");
+# Constructor also seeds filters from that vowel: /u/ F1 = 300 Hz, Q = 300/70.
+var cs_u_f = FormantSynth_filters(cs_u);
+assert_eq(BiquadFilter_frequency(vec_get(cs_u_f, 0)), f64_from(300), "U F1 filter at 300 Hz");
+assert_eq(BiquadFilter_q(vec_get(cs_u_f, 0)), f64_div(f64_from(300), f64_from(70)), "U F1 Q = 300/70 (raw ratio per Rust new())");
+assert_eq(vec_get(FormantSynth_amplitudes(cs_u), 1), FORMANT_C0_35, "U F2 amplitude = 0.35");
+
+# ================================================================
+test_group("formant_synth_set_vowel round-trips and retunes the bank");
+var sv = formant_synth_new(VOWEL_U, f64_from(SR));
+assert_eq(formant_synth_set_vowel(sv, VOWEL_E), NAAD_ERR_NONE, "set_vowel U->E ok");
+assert_eq(formant_synth_current_vowel(sv), VOWEL_E, "current_vowel round-trips to E");
+var sv_f = FormantSynth_filters(sv);
+var sv_a = FormantSynth_amplitudes(sv);
+# /e/ = [(530,60,1.0), (1840,100,0.4), (2480,120,0.2)].
+assert_eq(BiquadFilter_frequency(vec_get(sv_f, 0)), f64_from(530), "E F1 filter retuned to 530 Hz");
+assert_eq(BiquadFilter_frequency(vec_get(sv_f, 1)), f64_from(1840), "E F2 filter retuned to 1840 Hz");
+assert_eq(BiquadFilter_frequency(vec_get(sv_f, 2)), f64_from(2480), "E F3 filter retuned to 2480 Hz");
+assert_eq(BiquadFilter_q(vec_get(sv_f, 1)), f64_div(f64_from(1840), f64_from(100)), "E F2 Q = 1840/100");
+assert_eq(vec_get(sv_a, 1), FORMANT_C0_4, "E F2 amplitude = 0.4");
+assert_eq(vec_get(sv_a, 2), FORMANT_C0_2, "E F3 amplitude = 0.2");
+# target_params is refreshed to the new vowel's table.
+assert_eq(FormantBand_freq(vec_get(FormantSynth_target_params(sv), 0)), f64_from(530), "target_params updated to E");
+# Back to VOWEL_A (== 0): a set_vowel that only ever stores non-zero would fail here.
+assert_eq(formant_synth_set_vowel(sv, VOWEL_A), NAAD_ERR_NONE, "set_vowel E->A ok");
+assert_eq(formant_synth_current_vowel(sv), VOWEL_A, "current_vowel round-trips back to A (0)");
+assert_eq(BiquadFilter_frequency(vec_get(sv_f, 0)), f64_from(730), "A F1 filter back at 730 Hz");
+
+test_group("set_vowel actually changes the output spectrum");
+var svx = formant_synth_new(VOWEL_A, f64_from(SR));
+var svy = formant_synth_new(VOWEL_A, f64_from(SR));
+assert_eq(formant_synth_set_vowel(svy, VOWEL_I), NAAD_ERR_NONE, "retune the second synth to I");
+var sv_diff = 0;
+var svn = 0;
+while (svn < 512) {
+    var sv_in = 0;
+    if ((svn % 100) == 0) { sv_in = F64_ONE; }
+    var sv_ox = formant_synth_process_sample(svx, sv_in);
+    var sv_oy = formant_synth_process_sample(svy, sv_in);
+    sv_diff = f64_add(sv_diff, f64_abs(f64_sub(sv_ox, sv_oy)));
+    svn = svn + 1;
+}
+assert(f64_gt(sv_diff, C0_01), "post-set_vowel spectrum differs from the un-retuned synth");
+
+# ================================================================
+test_group("formant_synth_apply_params writes freq/Q/amp into every band");
+var ap = formant_synth_new(VOWEL_A, f64_from(SR));
+var ap_params = vec_new();
+vec_push(ap_params, formant_band_new(C1234_5, C78_25, C0_625));
+vec_push(ap_params, formant_band_new(f64_from(1000), f64_from(100), C0_25));
+vec_push(ap_params, formant_band_new(f64_from(500), 0, C0_75));   # bw = 0 -> Q = 1.0
+assert_eq(formant_synth_apply_params(ap, ap_params), NAAD_ERR_NONE, "apply_params ok");
+assert_eq(FormantSynth_target_params(ap), ap_params, "target_params now holds the supplied vec");
+var ap_f = FormantSynth_filters(ap);
+var ap_a = FormantSynth_amplitudes(ap);
+assert_eq(BiquadFilter_frequency(vec_get(ap_f, 0)), C1234_5, "band 0 frequency applied");
+assert_eq(BiquadFilter_q(vec_get(ap_f, 0)), f64_div(C1234_5, C78_25), "band 0 Q = freq/bw");
+assert_eq(BiquadFilter_frequency(vec_get(ap_f, 1)), f64_from(1000), "band 1 frequency applied");
+assert_eq(BiquadFilter_q(vec_get(ap_f, 1)), f64_from(10), "band 1 Q = 1000/100 = 10");
+assert_eq(BiquadFilter_frequency(vec_get(ap_f, 2)), f64_from(500), "band 2 frequency applied");
+assert_eq(BiquadFilter_q(vec_get(ap_f, 2)), F64_ONE, "band 2 bw = 0 takes the Q = 1.0 fallback");
+assert_eq(BiquadFilter_gain_db(vec_get(ap_f, 0)), 0, "apply_params passes gain_db = 0");
+assert_eq(vec_get(ap_a, 0), C0_625, "band 0 amplitude applied");
+assert_eq(vec_get(ap_a, 1), C0_25, "band 1 amplitude applied");
+assert_eq(vec_get(ap_a, 2), C0_75, "band 2 amplitude applied");
+# ...and the retuned bank really is what set_vowel drives.
+assert_eq(formant_synth_set_vowel(ap, VOWEL_I), NAAD_ERR_NONE, "set_vowel over applied params ok");
+assert_eq(BiquadFilter_frequency(vec_get(ap_f, 0)), f64_from(270), "set_vowel overwrites the custom band");
+
+test_group("formant_synth_apply_params propagates a bad band");
+var apb = formant_synth_new(VOWEL_A, f64_from(SR));
+var apb_params = vec_new();
+vec_push(apb_params, formant_band_new(f64_from(30000), f64_from(100), F64_ONE));   # >= Nyquist
+vec_push(apb_params, formant_band_new(f64_from(1000), f64_from(100), C0_25));
+vec_push(apb_params, formant_band_new(f64_from(1500), f64_from(100), C0_25));
+assert_eq(formant_synth_apply_params(apb, apb_params), NAAD_ERR_INVALID_FREQUENCY, "above-Nyquist band rejected");
+assert_eq(BiquadFilter_frequency(vec_get(FormantSynth_filters(apb), 0)), f64_from(730), "rejected band left the filter untouched");
+
+# ================================================================
+# formant_synth_process_buffer -- must transform the buffer in place and
+# agree sample-for-sample with process_sample fed the same input.
+# ================================================================
+test_group("formant_synth_process_buffer matches the per-sample path");
+var pb = formant_synth_new(VOWEL_O, f64_from(SR));
+var pb_ref = formant_synth_new(VOWEL_O, f64_from(SR));
+var pb_in = vec_new();
+var pb_buf = vec_new();
+var pbi = 0;
+while (pbi < 128) {
+    var pb_v = C0_5;
+    if ((pbi % 7) == 0) { pb_v = f64_neg(F64_ONE); }
+    if ((pbi % 13) == 0) { pb_v = 0; }
+    vec_push(pb_in, pb_v);
+    vec_push(pb_buf, pb_v);
+    pbi = pbi + 1;
+}
+formant_synth_process_buffer(pb, pb_buf);
+var pb_match = 1;
+var pb_changed = 0;
+var pb_nonzero = 0;
+pbi = 0;
+while (pbi < 128) {
+    var pb_want = formant_synth_process_sample(pb_ref, vec_get(pb_in, pbi));
+    var pb_got = vec_get(pb_buf, pbi);
+    if (pb_got != pb_want) { pb_match = 0; }
+    if (pb_got != vec_get(pb_in, pbi)) { pb_changed = 1; }
+    if (pb_got != 0) { pb_nonzero = 1; }
+    pbi = pbi + 1;
+}
+assert(pb_match, "process_buffer is bit-identical to process_sample over the same input");
+assert(pb_changed, "process_buffer overwrote the buffer (did not leave the input in place)");
+assert(pb_nonzero, "process_buffer wrote a non-zero sample");
+# The two synths consumed the same 128 inputs, so their filter state must agree.
+var pb_tail_a = formant_synth_process_sample(pb, F64_ONE);
+var pb_tail_b = formant_synth_process_sample(pb_ref, F64_ONE);
+assert_eq(pb_tail_a, pb_tail_b, "process_buffer advanced the filter state exactly as process_sample did");
+
+test_group("formant_synth_process_buffer handles degenerate lengths");
+var pb0 = formant_synth_new(VOWEL_A, f64_from(SR));
+var pb_empty = vec_new();
+formant_synth_process_buffer(pb0, pb_empty);
+assert_eq(vec_len(pb_empty), 0, "empty buffer stays empty and does not grow");
+var pb_one = vec_new();
+vec_push(pb_one, F64_ONE);
+formant_synth_process_buffer(pb0, pb_one);
+assert_eq(vec_len(pb_one), 1, "one-element buffer keeps its length");
+var pb_one_ref = formant_synth_new(VOWEL_A, f64_from(SR));
+var pb_one_want = formant_synth_process_sample(pb_one_ref, F64_ONE);
+assert_eq(vec_get(pb_one, 0), pb_one_want, "one-element buffer holds the first per-sample output");
+
 var rc = assert_summary();
 syscall(60, rc);

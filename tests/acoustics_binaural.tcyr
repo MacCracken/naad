@@ -10,6 +10,21 @@ include "src/error.cyr"
 include "src/acoustics_binaural.cyr"
 
 var C1E_6 = 0x3eb0c6f7a0b5ed8d;   # 1e-6 (stereo-difference threshold)
+var BIN_1E_12   = 0x3d719799812dea11;   # 1e-12 (HRIR closed-form tolerance)
+var BIN_1_5     = 0x3ff8000000000000;   # 1.5   (1 + sin(pi/2)*0.5)
+var BIN_0_3     = 0x3fd3333333333333;   # 0.3
+var BIN_0_25    = 0x3fd0000000000000;   # 0.25
+var BIN_NEG_HALF = 0xbfe0000000000000;  # -0.5
+var BIN_L1      = 0x3fdd22e6a0197c03;   # 0.5*exp(-3/32)  = 0.4552551806900171
+var BIN_L31     = 0x3f9bff11acdade73;   # 0.5*exp(-93/32) = 0.027340198683957383
+var BIN_SENTINEL = 0xc08f380000000000;  # -999.0 (unwritten-slot marker)
+var BIN_CANARY   = 0x400e000000000000;  # 3.75   (overrun canary)
+
+# |a - b| < tol  ->  1
+fn approx(a, b, tol) {
+    if (f64_lt(f64_abs(f64_sub(a, b)), tol) == 1) { return 1; }
+    return 0;
+}
 
 alloc_init();
 
@@ -53,6 +68,282 @@ assert(naad_is_err(proc4) == 1, "zero sample rate should error");
 # ================================================================
 test_group("negative sample rate is rejected");
 assert_eq(naad_is_err(naad_binaural_new(F64_HALF, f64_from(0), 0 - 48000)), 1, "binaural rejects a negative rate");
+
+# ================================================================
+# naad_binaural_make_pair -- the synthetic HRIR generator. Ports the `make_pair`
+# closure at rust-old/src/acoustics/binaural.rs:174-195, whose expectations are
+# pinned exactly here:
+#   left_gain  = max(1 - sin(az)*0.5, 0.1)
+#   right_gain = max(1 + sin(az)*0.5, 0.1)
+#   left[i]    = left_gain  * exp(-3 * i / 32),  32 taps
+# Tap 0's decay is exp(0) == 1.0, so left[0] IS left_gain to the bit -- the
+# cleanest place to pin the interaural level difference.
+# ================================================================
+test_group("make_pair_gains_and_decay");
+var mp_front = naad_binaural_make_pair(0, 0);
+assert_eq(vec_len(HrtfPair_left(mp_front)), 32, "left HRIR is 32 taps");
+assert_eq(vec_len(HrtfPair_right(mp_front)), 32, "right HRIR is 32 taps");
+assert_eq(HrtfPair_azimuth(mp_front), 0, "azimuth echoed exactly");
+assert_eq(HrtfPair_elevation(mp_front), 0, "elevation echoed exactly");
+# az = 0 -> sin(az) = 0 -> both gains are exactly 1.0, no level difference.
+assert_eq(vec_get(HrtfPair_left(mp_front), 0), F64_ONE, "front left_gain == 1.0 exactly");
+assert_eq(vec_get(HrtfPair_right(mp_front), 0), F64_ONE, "front right_gain == 1.0 exactly");
+
+# az = +pi/2 (source hard right) -> sin(az) = 1 -> left 0.5, right 1.5.
+var mp_right = naad_binaural_make_pair(F64_PI_2, BIN_0_3);
+assert(approx(vec_get(HrtfPair_left(mp_right), 0), F64_HALF, BIN_1E_12),
+  "hard-right left_gain == 1 - 0.5 == 0.5");
+assert(approx(vec_get(HrtfPair_right(mp_right), 0), BIN_1_5, BIN_1E_12),
+  "hard-right right_gain == 1 + 0.5 == 1.5");
+assert_eq(HrtfPair_elevation(mp_right), BIN_0_3, "elevation echoed exactly (0.3)");
+
+# az = -pi/2 (source hard left) -> the gains swap. Asserting BOTH sides rules
+# out a sign error that a single-sided check would let through.
+var mp_left = naad_binaural_make_pair(f64_neg(F64_PI_2), 0);
+assert(approx(vec_get(HrtfPair_left(mp_left), 0), BIN_1_5, BIN_1E_12),
+  "hard-left left_gain == 1 + 0.5 == 1.5");
+assert(approx(vec_get(HrtfPair_right(mp_left), 0), F64_HALF, BIN_1E_12),
+  "hard-left right_gain == 1 - 0.5 == 0.5");
+
+# The envelope: exp(-3 * i / 32), identical on both ears, so right[i]/left[i]
+# is the constant gain ratio 1.5 / 0.5 == 3.0 at EVERY tap, and the tail value
+# is pinned against the closed form: left[31] = 0.5 * exp(-3 * 31 / 32).
+var mp_ratio_ok = 1;
+var mp_decay_ok = 1;
+var mp_i = 0;
+while (mp_i < 32) {
+    var mp_l = vec_get(HrtfPair_left(mp_right), mp_i);
+    var mp_r = vec_get(HrtfPair_right(mp_right), mp_i);
+    if (approx(f64_div(mp_r, mp_l), f64_from(3), BIN_1E_12) == 0) { mp_ratio_ok = 0; }
+    if (mp_i > 0) {
+        # Strictly decaying -- a flat or growing HRIR would be silent here
+        # without this check.
+        if (f64_lt(mp_l, vec_get(HrtfPair_left(mp_right), mp_i - 1)) == 0) { mp_decay_ok = 0; }
+    }
+    mp_i = mp_i + 1;
+}
+assert_eq(mp_ratio_ok, 1, "right/left ratio is the constant gain ratio 3.0 at every tap");
+assert_eq(mp_decay_ok, 1, "the HRIR envelope decays strictly");
+assert(approx(vec_get(HrtfPair_left(mp_right), 1), BIN_L1, BIN_1E_12),
+  "left[1] == 0.5 * exp(-3/32)");
+assert(approx(vec_get(HrtfPair_left(mp_right), 31), BIN_L31, BIN_1E_12),
+  "left[31] == 0.5 * exp(-3*31/32)");
+
+# ================================================================
+# naad_binaural_build_minimal_hrtf -- assembles front, right (+pi/2),
+# left (-pi/2), back (pi) and the REQUESTED direction, in that order
+# (rust-old/src/acoustics/binaural.rs:199-206). Order matters: goonj's
+# hrtf_dataset_nearest picks by angular distance, so a missing or misplaced
+# reference direction silently changes which HRIR a source gets.
+# ================================================================
+test_group("build_minimal_hrtf_reference_directions");
+var bh = naad_binaural_build_minimal_hrtf(BIN_0_3, BIN_0_25, 44100);
+assert_eq(HrtfDataset_sample_rate(bh), 44100, "dataset carries the requested sample rate");
+var bh_pairs = HrtfDataset_pairs(bh);
+assert_eq(vec_len(bh_pairs), 5, "four reference directions plus the requested one");
+assert_eq(HrtfPair_azimuth(vec_get(bh_pairs, 0)), 0, "pair 0 is front (az 0)");
+assert_eq(HrtfPair_azimuth(vec_get(bh_pairs, 1)), F64_PI_2, "pair 1 is right (az +pi/2)");
+assert_eq(HrtfPair_azimuth(vec_get(bh_pairs, 2)), f64_neg(F64_PI_2), "pair 2 is left (az -pi/2)");
+assert_eq(HrtfPair_azimuth(vec_get(bh_pairs, 3)), F64_PI, "pair 3 is back (az pi)");
+assert_eq(HrtfPair_azimuth(vec_get(bh_pairs, 4)), BIN_0_3, "pair 4 is the requested azimuth");
+# Only the requested pair carries the requested elevation; the references are
+# all in the horizontal plane.
+assert_eq(HrtfPair_elevation(vec_get(bh_pairs, 0)), 0, "front reference is horizontal");
+assert_eq(HrtfPair_elevation(vec_get(bh_pairs, 1)), 0, "right reference is horizontal");
+assert_eq(HrtfPair_elevation(vec_get(bh_pairs, 2)), 0, "left reference is horizontal");
+assert_eq(HrtfPair_elevation(vec_get(bh_pairs, 3)), 0, "back reference is horizontal");
+assert_eq(HrtfPair_elevation(vec_get(bh_pairs, 4)), BIN_0_25, "pair 4 carries the requested elevation");
+# Each entry is a real make_pair result, matching it tap for tap.
+var bh_ref = naad_binaural_make_pair(BIN_0_3, BIN_0_25);
+var bh_same = 1;
+var bh_i = 0;
+while (bh_i < 32) {
+    if (vec_get(HrtfPair_left(vec_get(bh_pairs, 4)), bh_i) != vec_get(HrtfPair_left(bh_ref), bh_i)) { bh_same = 0; }
+    if (vec_get(HrtfPair_right(vec_get(bh_pairs, 4)), bh_i) != vec_get(HrtfPair_right(bh_ref), bh_i)) { bh_same = 0; }
+    bh_i = bh_i + 1;
+}
+assert_eq(bh_same, 1, "the requested pair is make_pair(azimuth, elevation), tap for tap");
+# The right and left references really differ (a dataset of five identical
+# pairs would satisfy every count-based check above).
+assert_neq(vec_get(HrtfPair_left(vec_get(bh_pairs, 1)), 0), vec_get(HrtfPair_left(vec_get(bh_pairs, 2)), 0),
+  "the +pi/2 and -pi/2 references have different left gains");
+
+# ================================================================
+# naad_binaural_is_loaded / naad_binaural_rebuild. is_loaded reports on the
+# LEFT ir specifically, so it is exercised in both directions -- an always-1
+# implementation is the failure mode a fresh-object-only check misses.
+# rebuild must restore exactly the state naad_binaural_new would have built.
+# ================================================================
+test_group("is_loaded_and_rebuild");
+var rb = naad_binaural_new(F64_HALF, 0, 48000);
+assert_eq(naad_is_err(rb), 0, "processor built");
+assert_eq(naad_binaural_is_loaded(rb), 1, "a fresh processor is loaded");
+assert(vec_len(BinauralProcessor_left_ir(rb)) > 0, "...because its left IR is non-empty");
+
+# Emulate the post-deserialization state Rust's #[serde(skip)] leaves behind.
+BinauralProcessor_set_left_ir(rb, vec_new());
+assert_eq(naad_binaural_is_loaded(rb), 0, "an emptied left IR reports NOT loaded");
+
+# Advance the write cursor so rebuild has something to rewind.
+var rb_pre = naad_binaural_process_sample(rb, F64_ONE);
+assert_eq(naad_is_finite(BinauralStereo_left(rb_pre)), 1, "still processes while unloaded");
+assert_neq(BinauralProcessor_position(rb), 0, "cursor advanced before rebuild");
+
+assert_eq(naad_binaural_rebuild(rb), NAAD_ERR_NONE, "rebuild reports success");
+assert_eq(naad_binaural_is_loaded(rb), 1, "rebuild reloads the left IR");
+assert_eq(BinauralProcessor_position(rb), 0, "rebuild rewinds the ring-buffer cursor");
+assert_eq(BinauralProcessor_azimuth(rb), F64_HALF, "rebuild keeps the azimuth");
+assert_eq(BinauralProcessor_sample_rate(rb), 48000, "rebuild keeps the sample rate");
+
+# The rebuilt state must equal a freshly constructed processor's: same IRs tap
+# for tap, same zeroed ring buffers, and therefore the same output stream.
+var rb_fresh = naad_binaural_new(F64_HALF, 0, 48000);
+assert_eq(vec_len(BinauralProcessor_left_ir(rb)), vec_len(BinauralProcessor_left_ir(rb_fresh)),
+  "rebuilt left IR has the fresh length");
+assert_eq(vec_len(BinauralProcessor_right_ir(rb)), vec_len(BinauralProcessor_right_ir(rb_fresh)),
+  "rebuilt right IR has the fresh length");
+assert_eq(vec_len(BinauralProcessor_left_buffer(rb)), vec_len(BinauralProcessor_left_buffer(rb_fresh)),
+  "rebuilt ring buffer has the fresh length");
+var rb_ir_same = 1;
+var rb_buf_zero = 1;
+var rb_i = 0;
+var rb_n = vec_len(BinauralProcessor_left_ir(rb_fresh));
+while (rb_i < rb_n) {
+    if (vec_get(BinauralProcessor_left_ir(rb), rb_i) != vec_get(BinauralProcessor_left_ir(rb_fresh), rb_i)) { rb_ir_same = 0; }
+    if (vec_get(BinauralProcessor_right_ir(rb), rb_i) != vec_get(BinauralProcessor_right_ir(rb_fresh), rb_i)) { rb_ir_same = 0; }
+    rb_i = rb_i + 1;
+}
+assert_eq(rb_ir_same, 1, "rebuilt IRs are bit-identical to a fresh processor's");
+rb_i = 0;
+while (rb_i < vec_len(BinauralProcessor_left_buffer(rb))) {
+    if (vec_get(BinauralProcessor_left_buffer(rb), rb_i) != 0) { rb_buf_zero = 0; }
+    if (vec_get(BinauralProcessor_right_buffer(rb), rb_i) != 0) { rb_buf_zero = 0; }
+    rb_i = rb_i + 1;
+}
+assert_eq(rb_buf_zero, 1, "rebuilt ring buffers are silent");
+# Behavioural proof: the same impulse now produces the same stream, bit for bit.
+var rb_stream_same = 1;
+rb_i = 0;
+while (rb_i < 16) {
+    var rb_in = 0;
+    if (rb_i == 0) { rb_in = F64_ONE; }
+    var rb_a = naad_binaural_process_sample(rb, rb_in);
+    var rb_b = naad_binaural_process_sample(rb_fresh, rb_in);
+    if (BinauralStereo_left(rb_a) != BinauralStereo_left(rb_b)) { rb_stream_same = 0; }
+    if (BinauralStereo_right(rb_a) != BinauralStereo_right(rb_b)) { rb_stream_same = 0; }
+    rb_i = rb_i + 1;
+}
+assert_eq(rb_stream_same, 1, "a rebuilt processor is behaviourally a fresh one");
+
+# rebuild propagates a construction failure rather than reporting success.
+var rb_bad = naad_binaural_new(F64_HALF, 0, 48000);
+BinauralProcessor_set_sample_rate(rb_bad, 0);
+assert_eq(naad_is_err(naad_binaural_rebuild(rb_bad)), 1, "rebuild fails when new() would fail");
+
+# ================================================================
+# naad_binaural_process_buffer (new in 2.2.0) must agree with the per-sample
+# form sample for sample -- same encoder state, same op order, so bit-exact.
+# ================================================================
+test_group("process_buffer_matches_per_sample");
+var pb_buf_proc = naad_binaural_new(F64_PI_2, 0, 48000);
+var pb_ref_proc = naad_binaural_new(F64_PI_2, 0, 48000);
+# The 6 x 4 x 3 m room puts the source 2 m from the listener, so the direct
+# arrival lands ~280 samples into the IR: an impulse compared over the first
+# 24 samples alone would be comparing silence to silence. Prime both
+# processors identically through the per-sample path first, so the block below
+# lands on the part of the response that actually carries energy.
+assert(vec_len(BinauralProcessor_left_buffer(pb_buf_proc)) > 400,
+  "IR is long enough for the 324-sample run below not to wrap the ring buffer");
+var pb_lockstep = 1;
+var pb_i = 0;
+while (pb_i < 300) {
+    var pb_prime = 0;
+    if (pb_i == 0) { pb_prime = F64_ONE; }
+    var pb_pa = naad_binaural_process_sample(pb_buf_proc, pb_prime);
+    var pb_pb = naad_binaural_process_sample(pb_ref_proc, pb_prime);
+    if (BinauralStereo_left(pb_pa) != BinauralStereo_left(pb_pb)) { pb_lockstep = 0; }
+    if (BinauralStereo_right(pb_pa) != BinauralStereo_right(pb_pb)) { pb_lockstep = 0; }
+    pb_i = pb_i + 1;
+}
+assert_eq(pb_lockstep, 1, "two identically built processors stay in lockstep while priming");
+var pb_in = vec_new();
+var pb_left = vec_new();
+var pb_right = vec_new();
+pb_i = 0;
+while (pb_i < 24) {
+    var pb_v = 0;
+    if (pb_i == 5) { pb_v = BIN_NEG_HALF; }
+    if (pb_i == 11) { pb_v = BIN_0_25; }
+    vec_push(pb_in, pb_v);
+    vec_push(pb_left, BIN_SENTINEL);
+    vec_push(pb_right, BIN_SENTINEL);
+    pb_i = pb_i + 1;
+}
+assert_eq(naad_binaural_process_buffer(pb_buf_proc, pb_in, pb_left, pb_right), 0,
+  "process_buffer returns 0");
+var pb_match = 1;
+var pb_written = 1;
+var pb_nonzero = 0;
+pb_i = 0;
+while (pb_i < 24) {
+    var pb_ref = naad_binaural_process_sample(pb_ref_proc, vec_get(pb_in, pb_i));
+    if (vec_get(pb_left, pb_i) != BinauralStereo_left(pb_ref)) { pb_match = 0; }
+    if (vec_get(pb_right, pb_i) != BinauralStereo_right(pb_ref)) { pb_match = 0; }
+    if (vec_get(pb_left, pb_i) == BIN_SENTINEL) { pb_written = 0; }
+    if (vec_get(pb_right, pb_i) == BIN_SENTINEL) { pb_written = 0; }
+    if (vec_get(pb_left, pb_i) != 0) { pb_nonzero = 1; }
+    pb_i = pb_i + 1;
+}
+assert_eq(pb_written, 1, "process_buffer wrote every output slot");
+assert_eq(pb_match, 1, "process_buffer == process_sample, bit for bit");
+assert_eq(pb_nonzero, 1, "process_buffer produced actual signal, not silence");
+# The cursor advanced exactly once per input sample: 300 primed + 24 buffered.
+assert_eq(BinauralProcessor_position(pb_buf_proc), 324,
+  "process_buffer advances the cursor once per input sample");
+assert_eq(BinauralProcessor_position(pb_ref_proc), 324,
+  "...matching the per-sample form exactly");
+
+# ================================================================
+# process_buffer with mismatched output lengths: min(len) samples written, no
+# resize, no overrun into the vec allocated after the outputs.
+# ================================================================
+test_group("process_buffer_mismatched_output_lengths");
+var pm_proc = naad_binaural_new(F64_PI_2, 0, 48000);
+var pm_short = vec_new();
+vec_push(pm_short, BIN_SENTINEL);
+vec_push(pm_short, BIN_SENTINEL);
+var pm_long = vec_new();
+var pm_i = 0;
+while (pm_i < 32) { vec_push(pm_long, BIN_SENTINEL); pm_i = pm_i + 1; }
+var pm_canary = vec_new();
+vec_push(pm_canary, BIN_CANARY);
+vec_push(pm_canary, BIN_CANARY);
+naad_binaural_process_buffer(pm_proc, pb_in, pm_short, pm_long);
+assert_eq(vec_len(pm_short), 2, "short output is not resized");
+assert_eq(vec_len(pm_long), 32, "long output is not resized");
+assert_neq(vec_get(pm_short, 0), BIN_SENTINEL, "short left[0] written");
+assert_neq(vec_get(pm_short, 1), BIN_SENTINEL, "short left[1] written");
+# Slots 24..31 lie past the 24-sample input.
+assert_eq(vec_get(pm_long, 24), BIN_SENTINEL, "long right[24] untouched past input end");
+assert_eq(vec_get(pm_long, 31), BIN_SENTINEL, "long right[31] untouched past input end");
+assert_eq(vec_get(pm_canary, 0), BIN_CANARY, "no overrun past the output vecs (0)");
+assert_eq(vec_get(pm_canary, 1), BIN_CANARY, "no overrun past the output vecs (1)");
+# A short LEFT vec must not stop the RIGHT channel being filled, and the whole
+# 24-sample input is still consumed: a fresh processor's cursor lands on 24.
+assert_eq(BinauralProcessor_position(pm_proc), 24,
+  "a short output vec does not truncate input consumption");
+var pm_right_written = 1;
+pm_i = 0;
+while (pm_i < 24) {
+    if (vec_get(pm_long, pm_i) == BIN_SENTINEL) { pm_right_written = 0; }
+    pm_i = pm_i + 1;
+}
+assert_eq(pm_right_written, 1, "the right channel is filled even though the left vec is short");
+# An empty input writes nothing.
+var pm_empty = vec_new();
+vec_push(pm_empty, BIN_SENTINEL);
+naad_binaural_process_buffer(pm_proc, vec_new(), pm_empty, pm_empty);
+assert_eq(vec_get(pm_empty, 0), BIN_SENTINEL, "empty input writes nothing");
 
 var rc = assert_summary();
 syscall(60, rc);

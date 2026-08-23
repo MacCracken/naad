@@ -70,5 +70,245 @@ while (i < 100000) {
 }
 assert(no_blow, "reverb should not blow up");
 
+# ================================================================
+# Constants for the building-block coverage below.
+var NEG_HALF  = 0xbfe0000000000000;   # -0.5
+var C0_25     = 0x3fd0000000000000;   # 0.25
+var C0_75     = 0x3fe8000000000000;   # 0.75
+var C0_375    = 0x3fd8000000000000;   # 0.375
+var C0_125    = 0x3fc0000000000000;   # 0.125
+var C0_0625   = 0x3fb0000000000000;   # 0.0625
+var C0_03125  = 0x3fa0000000000000;   # 0.03125
+var C0_709    = 0x3fe6b020c49ba5e3;   # 0.709
+var C100_0    = 0x4059000000000000;   # 100.0  (output sentinel)
+
+# ================================================================
+test_group("reverb_allpass_new stores its parameters");
+var ap = reverb_allpass_new(4, F64_HALF);
+assert_eq(ReverbAllpass_delay_samples(ap), f64_from(4), "allpass delay_samples is the int length widened");
+assert_eq(ReverbAllpass_feedback(ap), F64_HALF, "allpass feedback stored");
+assert_eq(DelayLine_max_delay_samples(ReverbAllpass_delay(ap)), 4, "allpass allocated a 4-sample delay line");
+var ap_fresh_read = delay_line_read(ReverbAllpass_delay(ap), F64_ONE);
+assert_eq(ap_fresh_read, 0, "a fresh allpass delay line is silent");
+# DelayLine::new floors at 1 slot, so a zero-length allpass is still usable.
+var ap0 = reverb_allpass_new(0, F64_HALF);
+assert_eq(DelayLine_max_delay_samples(ReverbAllpass_delay(ap0)), 1, "a zero-length allpass still gets one slot");
+assert_eq(ReverbAllpass_delay_samples(ap0), 0, "delay_samples records the requested 0, not the floored 1");
+
+# ================================================================
+# reverb_allpass_process -- exact impulse response.
+#
+# y[n] = -fb*x[n] + d[n], and the line stores x[n] + fb*y[n]
+# (rust-old/src/reverb.rs:65 ReverbAllpass::process). With fb = 0.5 over a
+# 4-slot line an impulse gives -0.5 immediately, then silence for three
+# samples, then the stored 1 + 0.5*(-0.5) = 0.75 comes back, and 0.5*0.75 =
+# 0.375 four samples after that. Every value is exact in binary.
+# ================================================================
+test_group("reverb_allpass_process exact impulse response");
+var apx = reverb_allpass_new(4, F64_HALF);
+assert_eq(reverb_allpass_process(apx, F64_ONE), NEG_HALF, "allpass n=0 -> -fb * impulse");
+assert_eq(reverb_allpass_process(apx, 0), 0, "allpass n=1 silent");
+assert_eq(reverb_allpass_process(apx, 0), 0, "allpass n=2 silent");
+assert_eq(reverb_allpass_process(apx, 0), 0, "allpass n=3 silent");
+assert_eq(reverb_allpass_process(apx, 0), C0_75, "allpass n=4 -> the stored 1 + fb*(-fb)");
+assert_eq(reverb_allpass_process(apx, 0), 0, "allpass n=5 silent");
+assert_eq(reverb_allpass_process(apx, 0), 0, "allpass n=6 silent");
+assert_eq(reverb_allpass_process(apx, 0), 0, "allpass n=7 silent");
+assert_eq(reverb_allpass_process(apx, 0), C0_375, "allpass n=8 -> fb * 0.75");
+# fb = 0 degenerates to a pure 4-sample delay -- proves the feedback term is
+# the -fb*x + fb*y pair and not something that happens to cancel.
+var apz = reverb_allpass_new(4, 0);
+assert_eq(reverb_allpass_process(apz, F64_ONE), 0, "fb=0 allpass n=0 has no direct path");
+assert_eq(reverb_allpass_process(apz, 0), 0, "fb=0 allpass n=1");
+assert_eq(reverb_allpass_process(apz, 0), 0, "fb=0 allpass n=2");
+assert_eq(reverb_allpass_process(apz, 0), 0, "fb=0 allpass n=3");
+assert_eq(reverb_allpass_process(apz, 0), F64_ONE, "fb=0 allpass is a pure 4-sample delay");
+
+# ================================================================
+test_group("reverb_damped_comb_new stores its parameters");
+var cb = reverb_damped_comb_new(4, F64_HALF, C0_25);
+assert_eq(DampedComb_delay_samples(cb), f64_from(4), "comb delay_samples is the int length widened");
+assert_eq(DampedComb_feedback(cb), F64_HALF, "comb feedback stored");
+assert_eq(DampedComb_damp1(cb), C0_25, "damp1 == damping");
+assert_eq(DampedComb_damp2(cb), C0_75, "damp2 == 1 - damping");
+assert_eq(DampedComb_filter_state(cb), 0, "a fresh comb starts with +0.0 filter state");
+assert_eq(DelayLine_max_delay_samples(DampedComb_delay(cb)), 4, "comb allocated a 4-sample delay line");
+var cb1 = reverb_damped_comb_new(4, F64_HALF, F64_ONE);
+assert_eq(DampedComb_damp2(cb1), 0, "damping = 1 leaves damp2 at +0.0");
+
+# ================================================================
+# reverb_damped_comb_process -- exact impulse response with damping.
+#
+# The comb returns the DELAYED sample and feeds back through a one-pole
+# lowpass state = delayed*damp2 + state*damp1 (rust-old/src/reverb.rs:38
+# DampedComb::process). With fb = 0.5, damping = 0.5 over a 4-slot line the
+# impulse reappears at n=4, and the lowpass then smears the recirculation into
+# the exact dyadic sequence 0.25, 0.125, 0.0625, 0.03125.
+# ================================================================
+test_group("reverb_damped_comb_process exact impulse response");
+var cbx = reverb_damped_comb_new(4, F64_HALF, F64_HALF);
+assert_eq(reverb_damped_comb_process(cbx, F64_ONE), 0, "comb n=0 returns the delayed (silent) sample");
+assert_eq(reverb_damped_comb_process(cbx, 0), 0, "comb n=1");
+assert_eq(reverb_damped_comb_process(cbx, 0), 0, "comb n=2");
+assert_eq(reverb_damped_comb_process(cbx, 0), 0, "comb n=3");
+assert_eq(reverb_damped_comb_process(cbx, 0), F64_ONE, "comb n=4 -> the impulse, undamped on the direct path");
+assert_eq(DampedComb_filter_state(cbx), F64_HALF, "the damping lowpass charged to delayed*damp2");
+assert_eq(reverb_damped_comb_process(cbx, 0), 0, "comb n=5");
+assert_eq(DampedComb_filter_state(cbx), C0_25, "lowpass state decays by damp1 each silent sample");
+assert_eq(reverb_damped_comb_process(cbx, 0), 0, "comb n=6");
+assert_eq(DampedComb_filter_state(cbx), C0_125, "lowpass state decays again");
+assert_eq(reverb_damped_comb_process(cbx, 0), 0, "comb n=7");
+assert_eq(DampedComb_filter_state(cbx), C0_0625, "lowpass state decays again");
+assert_eq(reverb_damped_comb_process(cbx, 0), C0_25, "comb n=8 -> fb * the damped state written at n=4");
+assert_eq(reverb_damped_comb_process(cbx, 0), C0_125, "comb n=9");
+assert_eq(reverb_damped_comb_process(cbx, 0), C0_0625, "comb n=10");
+assert_eq(reverb_damped_comb_process(cbx, 0), C0_03125, "comb n=11");
+# damping = 0 bypasses the lowpass: the echo stays a clean single tap.
+var cbz = reverb_damped_comb_new(4, F64_HALF, 0);
+var cbi = 0;
+while (cbi < 4) { var cbd = reverb_damped_comb_process(cbz, F64_ONE); cbi = cbi + 1; }
+assert_eq(reverb_damped_comb_process(cbz, 0), F64_ONE, "damping=0 comb n=4 -> the impulse");
+assert_eq(reverb_damped_comb_process(cbz, 0), F64_ONE, "damping=0 keeps the tap sharp (no smearing)");
+
+# ================================================================
+test_group("reverb_make_comb / reverb_make_ap sizing");
+# len = floor((base + offset) * scale), floored at 1 (Rust: `((base+offset) as
+# f32 * scale) as usize` then `.max(1)`, rust-old/src/reverb.rs:139).
+var mc = reverb_make_comb(REVERB_COMB_0, REVERB_STEREO_OFFSET, F64_ONE, C0_8, C0_3);
+assert_eq(DampedComb_delay_samples(mc), f64_from(1140), "make_comb: (1117 + 23) * 1.0 = 1140");
+assert_eq(DelayLine_max_delay_samples(DampedComb_delay(mc)), 1140, "make_comb allocated a matching delay line");
+assert_eq(DampedComb_feedback(mc), C0_8, "make_comb forwards feedback");
+assert_eq(DampedComb_damp1(mc), C0_3, "make_comb forwards damping");
+var mch = reverb_make_comb(REVERB_COMB_0, REVERB_STEREO_OFFSET, F64_HALF, C0_8, C0_3);
+assert_eq(DampedComb_delay_samples(mch), f64_from(570), "make_comb scales: 1140 * 0.5 = 570");
+var mcf = reverb_make_comb(100, 0, C0_709, C0_8, C0_3);
+assert_eq(DampedComb_delay_samples(mcf), f64_from(70), "make_comb floors 100 * 0.709 = 70.9 down to 70");
+var mcz = reverb_make_comb(REVERB_COMB_0, 0, 0, C0_8, C0_3);
+assert_eq(DampedComb_delay_samples(mcz), F64_ONE, "make_comb clamps a zero-length comb to 1 sample");
+assert_eq(DelayLine_max_delay_samples(DampedComb_delay(mcz)), 1, "the clamped comb line holds 1 sample");
+
+var ma = reverb_make_ap(REVERB_ALLPASS_0, REVERB_STEREO_OFFSET, F64_ONE);
+assert_eq(ReverbAllpass_delay_samples(ma), f64_from(580), "make_ap: (557 + 23) * 1.0 = 580");
+assert_eq(DelayLine_max_delay_samples(ReverbAllpass_delay(ma)), 580, "make_ap allocated a matching delay line");
+assert_eq(ReverbAllpass_feedback(ma), F64_HALF, "make_ap always uses feedback 0.5");
+var mah = reverb_make_ap(REVERB_ALLPASS_1, 0, F64_HALF);
+assert_eq(ReverbAllpass_delay_samples(mah), f64_from(221), "make_ap floors 443 * 0.5 = 221.5 down to 221");
+var maz = reverb_make_ap(REVERB_ALLPASS_1, 0, 0);
+assert_eq(ReverbAllpass_delay_samples(maz), F64_ONE, "make_ap clamps a zero-length allpass to 1 sample");
+
+# ================================================================
+test_group("reverb_process_core writes the caller's ReverbStereo");
+var pcr = reverb_new(C0_8, C0_3, f64_from(10), F64_ONE, f64_from(SR));
+var pcw = reverb_new(C0_8, C0_3, f64_from(10), F64_ONE, f64_from(SR));
+var scratch = alloc(sizeof(ReverbStereo));
+ReverbStereo_set_left(scratch, C100_0);
+ReverbStereo_set_right(scratch, C100_0);
+reverb_process_core(pcr, F64_ONE, scratch);
+assert_neq(ReverbStereo_left(scratch), C100_0, "process_core overwrote the left sentinel");
+assert_neq(ReverbStereo_right(scratch), C100_0, "process_core overwrote the right sentinel");
+var pcs = reverb_process_sample(pcw, F64_ONE);
+assert_eq(ReverbStereo_left(scratch), ReverbStereo_left(pcs), "process_core L == process_sample L (n=0)");
+assert_eq(ReverbStereo_right(scratch), ReverbStereo_right(pcs), "process_core R == process_sample R (n=0)");
+# ... and it stays bit-identical once the tail is actually ringing, so the
+# shared scratch struct cannot be hiding stale state between samples.
+var pc_match = 1;
+var pc_nonzero = 0;
+var pcn = 0;
+while (pcn < 2000) {
+    reverb_process_core(pcr, 0, scratch);
+    var pcs2 = reverb_process_sample(pcw, 0);
+    if (ReverbStereo_left(scratch) != ReverbStereo_left(pcs2)) { pc_match = 0; }
+    if (ReverbStereo_right(scratch) != ReverbStereo_right(pcs2)) { pc_match = 0; }
+    if (ReverbStereo_left(scratch) != 0) { pc_nonzero = 1; }
+    pcn = pcn + 1;
+}
+assert(pc_nonzero, "the reverb tail is nonzero, so the comparison is not all zeros");
+assert(pc_match, "process_core is bit-identical to process_sample for 2000 tail samples");
+
+# ================================================================
+test_group("reverb_process_buffer matches process_sample");
+var pbrv = reverb_new(C0_8, C0_3, f64_from(10), F64_ONE, f64_from(SR));
+var pbref = reverb_new(C0_8, C0_3, f64_from(10), F64_ONE, f64_from(SR));
+var bin = vec_new();
+var bl = vec_new();
+var br = vec_new();
+# 3000 samples: the impulse only reaches the output after the 441-sample
+# pre-delay, the 1117-sample shortest comb and the two allpasses (~2115), so a
+# shorter buffer would compare nothing but zeros.
+var bn = 0;
+while (bn < 3000) {
+    var bv = 0;
+    if (bn == 0) { bv = F64_ONE; }
+    vec_push(bin, bv);
+    vec_push(bl, C100_0);
+    vec_push(br, C100_0);
+    bn = bn + 1;
+}
+reverb_process_buffer(pbrv, bin, bl, br);
+var b_match = 1;
+var b_written = 1;
+var b_nonzero = 0;
+bn = 0;
+while (bn < 3000) {
+    var bres = reverb_process_sample(pbref, vec_get(bin, bn));
+    if (vec_get(bl, bn) != ReverbStereo_left(bres)) { b_match = 0; }
+    if (vec_get(br, bn) != ReverbStereo_right(bres)) { b_match = 0; }
+    if (vec_get(bl, bn) == C100_0) { b_written = 0; }
+    if (vec_get(br, bn) == C100_0) { b_written = 0; }
+    if (vec_get(bl, bn) != 0) { b_nonzero = 1; }
+    bn = bn + 1;
+}
+assert(b_written, "process_buffer overwrote every output sentinel");
+assert(b_nonzero, "the compared output is not all zeros");
+assert(b_match, "process_buffer is bit-identical to process_sample");
+assert_eq(vec_len(bin), 3000, "process_buffer did not resize the input");
+assert_eq(vec_len(bl), 3000, "process_buffer did not resize the left output");
+
+# ================================================================
+test_group("reverb_process_buffer respects short and long output vecs");
+# mix = 0 makes the output exactly the dry input, so each written slot has a
+# known value and each skipped slot is provably untouched.
+var pbs = reverb_new(F64_HALF, F64_HALF, 0, 0, f64_from(SR));
+var sin8 = vec_new();
+vec_push(sin8, F64_ONE);
+vec_push(sin8, C0_7);
+vec_push(sin8, C0_8);
+vec_push(sin8, C0_3);
+vec_push(sin8, C0_25);
+vec_push(sin8, C0_75);
+vec_push(sin8, C0_125);
+vec_push(sin8, C0_0625);
+var sl3 = vec_new();
+var sn3 = 0;
+while (sn3 < 3) { vec_push(sl3, C100_0); sn3 = sn3 + 1; }
+var sr12 = vec_new();
+sn3 = 0;
+while (sn3 < 12) { vec_push(sr12, C100_0); sn3 = sn3 + 1; }
+reverb_process_buffer(pbs, sin8, sl3, sr12);
+assert_eq(vec_len(sl3), 3, "a short left vec is not grown");
+assert_eq(vec_len(sr12), 12, "a long right vec is not shrunk");
+# The 3 slots the short vec does have carry the real dry samples.
+assert_eq(vec_get(sl3, 0), F64_ONE, "short left[0] == dry input[0]");
+assert_eq(vec_get(sl3, 1), C0_7, "short left[1] == dry input[1]");
+assert_eq(vec_get(sl3, 2), C0_8, "short left[2] == dry input[2]");
+# The long vec is written only where the input reached, sentinel beyond.
+assert_eq(vec_get(sr12, 0), F64_ONE, "long right[0] == dry input[0]");
+assert_eq(vec_get(sr12, 7), C0_0625, "long right[7] == dry input[7]");
+assert_eq(vec_get(sr12, 8), C100_0, "long right[8] past the input is untouched");
+assert_eq(vec_get(sr12, 11), C100_0, "long right[11] past the input is untouched");
+# All 8 input samples were consumed even though `left` only held 3 -- a
+# reference reverb advanced 8 times must now agree with this one.
+var pbs_ref = reverb_new(F64_HALF, F64_HALF, 0, 0, f64_from(SR));
+var pbs_i = 0;
+while (pbs_i < 8) { var pbs_r = reverb_process_sample(pbs_ref, vec_get(sin8, pbs_i)); pbs_i = pbs_i + 1; }
+var pbs_a = reverb_process_sample(pbs, C0_3);
+var pbs_b = reverb_process_sample(pbs_ref, C0_3);
+assert_eq(ReverbStereo_left(pbs_a), ReverbStereo_left(pbs_b), "the short-output run still advanced all 8 samples");
+# A zero-length input is a no-op that leaves the outputs alone.
+var sempty = vec_new();
+reverb_process_buffer(pbs, sempty, sl3, sr12);
+assert_eq(vec_get(sl3, 0), F64_ONE, "an empty input leaves the outputs untouched");
+assert_eq(vec_get(sr12, 8), C100_0, "an empty input writes nothing at all");
+
 var rc = assert_summary();
 syscall(60, rc);

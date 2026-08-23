@@ -81,5 +81,208 @@ assert(naad_is_err(vocoder_new(8, 0, f64_from(8000), f64_from(44100))), "zero lo
 assert(naad_is_err(vocoder_new(8, f64_from(8000), f64_from(200), f64_from(44100))), "high<=low err");
 assert(naad_is_err(vocoder_new(8, f64_from(200), f64_from(8000), 0)), "zero sample_rate err");
 
+
+# ================================================================
+# ---- 2.2.1 accessor/coverage gap: vocoder_band_process.
+# ----
+# ---- Ports VocoderBand::process (rust-old/src/synth/vocoder.rs:46-64):
+# ----   mod_filtered = analysis(modulator);  level = |mod_filtered|
+# ----   coeff        = level > env ? attack : release
+# ----   env          = flush_denormal(env + coeff * (level - env))
+# ----   out          = synthesis(carrier) * env
+# ---- Every assertion below recomputes that from an independent pair of
+# ---- biquads and compares raw f64 bits.
+# ================================================================
+
+var VB_ATT = 0x3fd0000000000000;   # 0.25   (attack coeff)
+var VB_REL = 0x3fb0000000000000;   # 0.0625 (release coeff)
+
+var VB_SR = f64_from(44100);
+var VB_CF = f64_from(1000);        # band centre
+var VB_Q  = f64_from(4);
+
+# ---- Reference stimulus + expected envelope/output, computed first so the
+# ---- comparison loop never mixes an f64 expression with an i64 one.
+var vb_mod = vec_new();
+var vb_car = vec_new();
+var vb_lvl = vec_new();            # |analysis(modulator)| per sample
+var vb_env = vec_new();            # expected envelope-follower state
+var vb_out = vec_new();            # expected band output
+var vb_peak = vec_new();           # expected env for attack=1.0 / release=0.0
+
+var vb_ref_a = filter_biquad_new(NAAD_FILTER_BANDPASS, VB_SR, VB_CF, VB_Q);
+var vb_ref_s = filter_biquad_new(NAAD_FILTER_BANDPASS, VB_SR, VB_CF, VB_Q);
+assert_eq(naad_is_err(vb_ref_a), 0, "reference analysis filter built");
+assert_eq(naad_is_err(vb_ref_s), 0, "reference synthesis filter built");
+
+var vb_e = 0;
+var vb_pk = 0;
+var vb_att_hits = 0;
+var vb_rel_hits = 0;
+var vbi = 0;
+while (vbi < 512) {
+    var vb_t = f64_div(f64_from(vbi), VB_SR);
+    var vb_m = f64_sin(f64_mul(f64_mul(vb_t, f64_from(1000)), F64_TAU));
+    var vb_c = f64_sin(f64_mul(f64_mul(vb_t, f64_from(110)), F64_TAU));
+    vec_push(vb_mod, vb_m);
+    vec_push(vb_car, vb_c);
+
+    var vb_mf = filter_biquad_process_sample(vb_ref_a, vb_m);
+    var vb_l = f64_abs(vb_mf);
+    vec_push(vb_lvl, vb_l);
+
+    var vb_k = VB_REL;
+    if (f64_gt(vb_l, vb_e) == 1) {
+        vb_k = VB_ATT;
+        vb_att_hits = vb_att_hits + 1;
+    } else {
+        vb_rel_hits = vb_rel_hits + 1;
+    }
+    vb_e = flush_denormal(f64_add(vb_e, f64_mul(vb_k, f64_sub(vb_l, vb_e))));
+    vec_push(vb_env, vb_e);
+
+    # attack = 1.0 / release = 0.0 degenerates to a peak-hold of the level.
+    if (f64_gt(vb_l, vb_pk) == 1) { vb_pk = vb_l; }
+    vec_push(vb_peak, vb_pk);
+
+    var vb_cf_out = filter_biquad_process_sample(vb_ref_s, vb_c);
+    vec_push(vb_out, f64_mul(vb_cf_out, vb_e));
+    vbi = vbi + 1;
+}
+assert(vb_att_hits > 0, "the stimulus exercises the attack branch");
+assert(vb_rel_hits > 0, "the stimulus exercises the release branch");
+
+# ================================================================
+test_group("vocoder_band_process matches an independent reference");
+var vba = filter_biquad_new(NAAD_FILTER_BANDPASS, VB_SR, VB_CF, VB_Q);
+var vbs = filter_biquad_new(NAAD_FILTER_BANDPASS, VB_SR, VB_CF, VB_Q);
+var vband = alloc(sizeof(VocoderBand));
+VocoderBand_set_analysis_filter(vband, vba);
+VocoderBand_set_synthesis_filter(vband, vbs);
+VocoderBand_set_envelope_follower(vband, 0);
+VocoderBand_set_attack_coeff(vband, VB_ATT);
+VocoderBand_set_release_coeff(vband, VB_REL);
+assert_eq(VocoderBand_envelope_follower(vband), 0, "band starts with a zeroed envelope follower");
+
+var vb_out_ok = 1;
+var vb_env_ok = 1;
+var vb_any = 0;
+vbi = 0;
+while (vbi < 512) {
+    var vb_got = vocoder_band_process(vband, vec_get(vb_mod, vbi), vec_get(vb_car, vbi));
+    if (vb_got != vec_get(vb_out, vbi)) { vb_out_ok = 0; }
+    if (VocoderBand_envelope_follower(vband) != vec_get(vb_env, vbi)) { vb_env_ok = 0; }
+    if (f64_gt(f64_abs(vb_got), 0) == 1) { vb_any = 1; }
+    vbi = vbi + 1;
+}
+assert(vb_out_ok, "band output is bit-identical to synthesis(carrier) * envelope");
+assert(vb_env_ok, "the envelope follower advances bit-identically at every sample");
+assert(vb_any, "the band actually produced non-zero samples (not a 0 == 0 match)");
+assert(f64_gt(VocoderBand_envelope_follower(vband), 0), "the follower ends above zero");
+assert_eq(VocoderBand_envelope_follower(vband), vb_e, "final follower state matches the reference exactly");
+# The band must not disturb its own coefficients while running.
+assert_eq(VocoderBand_attack_coeff(vband), VB_ATT, "attack coeff unchanged by processing");
+assert_eq(VocoderBand_release_coeff(vband), VB_REL, "release coeff unchanged by processing");
+assert_eq(VocoderBand_analysis_filter(vband), vba, "analysis filter pointer unchanged");
+assert_eq(VocoderBand_synthesis_filter(vband), vbs, "synthesis filter pointer unchanged");
+
+# ================================================================
+# attack = 1.0, release = 0.0 isolates the branch selection: a rising level
+# snaps the envelope onto the level exactly, a falling one holds it. The
+# follower must therefore equal the running peak of |analysis(modulator)|.
+# ================================================================
+test_group("vocoder_band_process picks attack vs release correctly");
+var vpa = filter_biquad_new(NAAD_FILTER_BANDPASS, VB_SR, VB_CF, VB_Q);
+var vps = filter_biquad_new(NAAD_FILTER_BANDPASS, VB_SR, VB_CF, VB_Q);
+var vpeak = alloc(sizeof(VocoderBand));
+VocoderBand_set_analysis_filter(vpeak, vpa);
+VocoderBand_set_synthesis_filter(vpeak, vps);
+VocoderBand_set_envelope_follower(vpeak, 0);
+VocoderBand_set_attack_coeff(vpeak, F64_ONE);
+VocoderBand_set_release_coeff(vpeak, 0);
+var vp_ok = 1;
+var vp_held = 0;
+vbi = 0;
+while (vbi < 512) {
+    var vp_got = vocoder_band_process(vpeak, vec_get(vb_mod, vbi), vec_get(vb_car, vbi));
+    if (VocoderBand_envelope_follower(vpeak) != vec_get(vb_peak, vbi)) { vp_ok = 0; }
+    if (vbi > 0) {
+        if (f64_lt(vec_get(vb_lvl, vbi), vec_get(vb_peak, vbi - 1)) == 1) { vp_held = 1; }
+    }
+    vbi = vbi + 1;
+}
+assert(vp_ok, "attack=1.0 snaps to the level, release=0.0 holds it (exact peak-hold)");
+assert(vp_held, "the release branch really was taken (levels did fall below the peak)");
+assert(f64_gt(VocoderBand_envelope_follower(vpeak), 0), "peak-hold follower ended above zero");
+assert(f64_gt(VocoderBand_envelope_follower(vpeak), VocoderBand_envelope_follower(vband)),
+  "the peak-hold follower sits above the smoothed one");
+
+# ================================================================
+# A silent modulator must gate the carrier to EXACT zero -- the envelope
+# follower can never leave 0 while the level stays 0.
+# ================================================================
+test_group("vocoder_band_process gates a silent modulator to exact zero");
+var vqa = filter_biquad_new(NAAD_FILTER_BANDPASS, VB_SR, VB_CF, VB_Q);
+var vqs = filter_biquad_new(NAAD_FILTER_BANDPASS, VB_SR, VB_CF, VB_Q);
+var vquiet = alloc(sizeof(VocoderBand));
+VocoderBand_set_analysis_filter(vquiet, vqa);
+VocoderBand_set_synthesis_filter(vquiet, vqs);
+VocoderBand_set_envelope_follower(vquiet, 0);
+VocoderBand_set_attack_coeff(vquiet, VB_ATT);
+VocoderBand_set_release_coeff(vquiet, VB_REL);
+var vq_silent = 1;
+var vq_env_zero = 1;
+vbi = 0;
+while (vbi < 512) {
+    var vq_got = vocoder_band_process(vquiet, 0, vec_get(vb_car, vbi));
+    if (f64_gt(f64_abs(vq_got), 0) == 1) { vq_silent = 0; }
+    if (f64_gt(f64_abs(VocoderBand_envelope_follower(vquiet)), 0) == 1) { vq_env_zero = 0; }
+    vbi = vbi + 1;
+}
+assert(vq_silent, "zero modulator + live carrier yields exactly 0.0 for every sample");
+assert(vq_env_zero, "the envelope follower stays at exactly 0.0");
+# Feeding the same band a live modulator immediately opens the gate, so the
+# silence above is a real gating result and not a dead band.
+var vq_open = 0;
+vbi = 0;
+while (vbi < 512) {
+    var vq_got2 = vocoder_band_process(vquiet, vec_get(vb_mod, vbi), vec_get(vb_car, vbi));
+    if (f64_gt(f64_abs(vq_got2), 0) == 1) { vq_open = 1; }
+    vbi = vbi + 1;
+}
+assert(vq_open, "the same band opens again once the modulator returns");
+assert(f64_gt(VocoderBand_envelope_follower(vquiet), 0), "the follower rose off zero with a live modulator");
+
+# ================================================================
+# vocoder_process_sample is the sum of its bands' vocoder_band_process
+# results -- check that against a hand-rolled sum over Vocoder_bands.
+# ================================================================
+test_group("vocoder_process_sample sums vocoder_band_process over the bank");
+var vsum = vocoder_new(4, f64_from(300), f64_from(4000), VB_SR);
+var vref = vocoder_new(4, f64_from(300), f64_from(4000), VB_SR);
+var vs_scratch = vec_new();
+vec_push(vs_scratch, 0);
+var vs_ok = 1;
+var vs_any = 0;
+vbi = 0;
+while (vbi < 256) {
+    var vs_m = vec_get(vb_mod, vbi);
+    var vs_c = vec_get(vb_car, vbi);
+    var vs_bands = Vocoder_bands(vref);
+    var vs_want = 0;
+    var vs_b = 0;
+    while (vs_b < vec_len(vs_bands)) {
+        vs_want = f64_add(vs_want, vocoder_band_process(vec_get(vs_bands, vs_b), vs_m, vs_c));
+        vs_b = vs_b + 1;
+    }
+    vec_set(vs_scratch, 0, vs_want);             # park it in a vec to keep the compare i64/i64
+    var vs_got = vocoder_process_sample(vsum, vs_m, vs_c);
+    if (vs_got != vec_get(vs_scratch, 0)) { vs_ok = 0; }
+    if (f64_gt(f64_abs(vs_got), 0) == 1) { vs_any = 1; }
+    vbi = vbi + 1;
+}
+assert(vs_ok, "process_sample == the band-by-band sum, bit for bit");
+assert(vs_any, "the 4-band vocoder produced non-zero output");
+
 var rc = assert_summary();
 syscall(60, rc);

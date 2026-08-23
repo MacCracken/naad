@@ -18,6 +18,13 @@ var CV_0_2  = 0x3fc999999999999a;   # 0.2
 var CV_0_3  = 0x3fd3333333333333;   # 0.3
 var CV_0_7  = 0x3fe6666666666666;   # 0.7
 var CV_0_01 = 0x3f847ae147ae147b;   # 0.01
+var CV_0_25 = 0x3fd0000000000000;   # 0.25
+var CV_NEG_0_25 = 0xbfd0000000000000;  # -0.25
+var CV_NEG_HALF = 0xbfe0000000000000;  # -0.5
+var CV_1E_9 = 0x3e112e0be826d695;   # 1e-9
+var CV_SENTINEL = 0xc08f380000000000;  # -999.0 (unwritten-slot marker)
+var CV_CANARY = 0x400e000000000000;    # 3.75  (overrun canary)
+var CV_2_125 = 0x4001000000000000;  # 2.125
 
 # 1 if |a - b| < tol, else 0.
 fn approx(a, b, tol) {
@@ -133,6 +140,192 @@ assert_eq(naad_convolution_is_loaded(rb_rev), 1, "rebuilt IR -> loaded");
 assert_eq(naad_convolution_ir_len(rb_rev), 4, "rebuilt IR length is 4");
 var rb_out = naad_convolution_process_sample(rb_rev, F64_ONE);
 assert_eq(naad_is_finite(rb_out), 1, "rebuilt reverb output finite");
+
+# ================================================================
+# naad_convolution_next_pow2 is pure integer math -- assert exact values,
+# including every boundary. Ports usize::next_power_of_two, for which
+# next_power_of_two(0) == 1 and next_power_of_two(n) == n when n is already a
+# power of two (the "already a power of two" case is the one an off-by-one
+# `p <= v` loop would silently double).
+# ================================================================
+test_group("next_pow2_exact_values");
+assert_eq(naad_convolution_next_pow2(0), 1, "next_pow2(0) == 1");
+assert_eq(naad_convolution_next_pow2(1), 1, "next_pow2(1) == 1");
+assert_eq(naad_convolution_next_pow2(2), 2, "next_pow2(2) == 2");
+assert_eq(naad_convolution_next_pow2(3), 4, "next_pow2(3) == 4");
+assert_eq(naad_convolution_next_pow2(4), 4, "next_pow2(4) == 4");
+assert_eq(naad_convolution_next_pow2(5), 8, "next_pow2(5) == 8");
+assert_eq(naad_convolution_next_pow2(7), 8, "next_pow2(7) == 8");
+assert_eq(naad_convolution_next_pow2(8), 8, "next_pow2(8) == 8");
+assert_eq(naad_convolution_next_pow2(9), 16, "next_pow2(9) == 16");
+assert_eq(naad_convolution_next_pow2(1023), 1024, "next_pow2(1023) == 1024");
+assert_eq(naad_convolution_next_pow2(1024), 1024, "next_pow2(1024) == 1024");
+assert_eq(naad_convolution_next_pow2(1025), 2048, "next_pow2(1025) == 2048");
+# Negative / non-positive spans also collapse to 1 (the loop never runs).
+assert_eq(naad_convolution_next_pow2(0 - 3), 1, "next_pow2(-3) == 1");
+
+# ================================================================
+# naad_convolution_passthrough copies min(len(input), len(output)) samples and
+# touches nothing else. Sentinel-filled outputs make an unwritten slot visible;
+# a canary vec allocated after the output catches an overrun.
+# ================================================================
+test_group("passthrough_copies_min_len");
+var pt_in = vec_new();
+vec_push(pt_in, F64_ONE);
+vec_push(pt_in, CV_NEG_HALF);
+vec_push(pt_in, 0);
+vec_push(pt_in, CV_0_25);
+vec_push(pt_in, F64_TWO);
+
+# Equal lengths: an exact, bit-for-bit copy.
+var pt_out = vec_new();
+var pt_i = 0;
+while (pt_i < 5) { vec_push(pt_out, CV_SENTINEL); pt_i = pt_i + 1; }
+assert_eq(naad_convolution_passthrough(pt_in, pt_out), 0, "passthrough returns 0");
+assert_eq(vec_get(pt_out, 0), F64_ONE, "passthrough[0]");
+assert_eq(vec_get(pt_out, 1), CV_NEG_HALF, "passthrough[1]");
+assert_eq(vec_get(pt_out, 2), 0, "passthrough[2]");
+assert_eq(vec_get(pt_out, 3), CV_0_25, "passthrough[3]");
+assert_eq(vec_get(pt_out, 4), F64_TWO, "passthrough[4]");
+
+# Output SHORTER than the input: only its own slots are filled, no resize.
+var pt_short = vec_new();
+vec_push(pt_short, CV_SENTINEL);
+vec_push(pt_short, CV_SENTINEL);
+var pt_canary = vec_new();
+vec_push(pt_canary, CV_CANARY);
+naad_convolution_passthrough(pt_in, pt_short);
+assert_eq(vec_len(pt_short), 2, "short output is not resized");
+assert_eq(vec_get(pt_short, 0), F64_ONE, "short passthrough[0]");
+assert_eq(vec_get(pt_short, 1), CV_NEG_HALF, "short passthrough[1]");
+assert_eq(vec_get(pt_canary, 0), CV_CANARY, "no overrun past a short output");
+
+# Output LONGER than the input: the tail past the input keeps its sentinel.
+var pt_long = vec_new();
+pt_i = 0;
+while (pt_i < 8) { vec_push(pt_long, CV_SENTINEL); pt_i = pt_i + 1; }
+naad_convolution_passthrough(pt_in, pt_long);
+assert_eq(vec_len(pt_long), 8, "long output is not resized");
+assert_eq(vec_get(pt_long, 4), F64_TWO, "long passthrough[4] written");
+assert_eq(vec_get(pt_long, 5), CV_SENTINEL, "long passthrough[5] untouched");
+assert_eq(vec_get(pt_long, 7), CV_SENTINEL, "long passthrough[7] untouched");
+
+# Empty input writes nothing.
+var pt_empty = vec_new();
+vec_push(pt_empty, CV_SENTINEL);
+naad_convolution_passthrough(vec_new(), pt_empty);
+assert_eq(vec_get(pt_empty, 0), CV_SENTINEL, "empty input copies nothing");
+
+# ================================================================
+# naad_convolution_process_block_direct is the fallback the FFT route drops to
+# when num_fft/num_ifft (or the scratch allocation) fails. The only thing that
+# proves the fallback correct is that it agrees with the FFT route, so drive
+# two freshly built reverbs -- identical IR, identical mix, both at position 0 --
+# down the two paths over the same block and compare.
+#
+# For a 4-tap IR and an 8-sample block from a fresh ring buffer, the direct
+# path's circular buffer and the FFT path's zero-padded linear convolution give
+# the same answer, so they must agree to FFT round-off. 1e-9 is far tighter
+# than the 0.5 / 0.2 magnitude bounds the oracle's block test settles for.
+# ================================================================
+test_group("process_block_direct_matches_fft_path");
+var pd_ir_a = vec4(F64_ONE, 0, 0, F64_HALF);
+var pd_ir_b = vec4(F64_ONE, 0, 0, F64_HALF);
+var pd_fft_rev = naad_convolution_from_ir(pd_ir_a, F64_ONE);
+var pd_dir_rev = naad_convolution_from_ir(pd_ir_b, F64_ONE);
+var pd_in = vec_new();
+var pd_fft_out = vec_new();
+var pd_dir_out = vec_new();
+var pd_k = 0;
+while (pd_k < 8) {
+    var pd_v = 0;
+    if (pd_k == 0) { pd_v = F64_ONE; }
+    if (pd_k == 1) { pd_v = CV_0_25; }
+    if (pd_k == 2) { pd_v = CV_NEG_HALF; }
+    if (pd_k == 4) { pd_v = F64_TWO; }
+    vec_push(pd_in, pd_v);
+    vec_push(pd_fft_out, CV_SENTINEL);
+    vec_push(pd_dir_out, CV_SENTINEL);
+    pd_k = pd_k + 1;
+}
+naad_convolution_process_block(pd_fft_rev, pd_in, pd_fft_out);
+assert_eq(naad_convolution_process_block_direct(pd_dir_rev, pd_in, pd_dir_out), 0,
+  "process_block_direct returns 0");
+
+var pd_agree = 1;
+var pd_written = 1;
+pd_k = 0;
+while (pd_k < 8) {
+    if (approx(vec_get(pd_dir_out, pd_k), vec_get(pd_fft_out, pd_k), CV_1E_9) == 0) { pd_agree = 0; }
+    if (vec_get(pd_dir_out, pd_k) == CV_SENTINEL) { pd_written = 0; }
+    pd_k = pd_k + 1;
+}
+assert_eq(pd_written, 1, "process_block_direct wrote every output slot");
+assert_eq(pd_agree, 1, "direct fallback == FFT path within 1e-9");
+
+# Independent check of the direct path's own arithmetic, not just agreement.
+# The IR [1, 0, 0, 0.5] means y[n] = x[n] + 0.5 * x[n-3]; mix = 1.0 (fully wet).
+# x = [1, 0.25, -0.5, 0, 2, 0, 0, 0]  ->  y = [1, 0.25, -0.5, 0.5, 2.125, -0.25, 0, 1].
+assert(approx(vec_get(pd_dir_out, 0), F64_ONE, CV_1E_9), "direct[0] == 1.0");
+assert(approx(vec_get(pd_dir_out, 1), CV_0_25, CV_1E_9), "direct[1] == 0.25");
+assert(approx(vec_get(pd_dir_out, 2), CV_NEG_HALF, CV_1E_9), "direct[2] == -0.5");
+assert(approx(vec_get(pd_dir_out, 3), F64_HALF, CV_1E_9), "direct[3] == 0.5 (echo of x[0])");
+assert(approx(vec_get(pd_dir_out, 4), CV_2_125, CV_1E_9), "direct[4] == 2.125 (x[4] + echo of x[1])");
+assert(approx(vec_get(pd_dir_out, 5), CV_NEG_0_25, CV_1E_9), "direct[5] == -0.25 (echo of x[2])");
+assert(approx(vec_get(pd_dir_out, 6), 0, CV_1E_9), "direct[6] == 0.0");
+assert(approx(vec_get(pd_dir_out, 7), F64_ONE, CV_1E_9), "direct[7] == 1.0 (echo of x[4])");
+
+# ================================================================
+# process_block_direct with mismatched output lengths: min(len) samples, no
+# resize, no overrun. It also advances the ring buffer exactly once per sample
+# WRITTEN, so a short output consumes only that many inputs -- checked by
+# feeding the remaining input to a second, equally short call.
+# ================================================================
+test_group("process_block_direct_mismatched_lengths");
+var pm_rev = naad_convolution_from_ir(vec4(F64_ONE, 0, 0, F64_HALF), F64_ONE);
+var pm_short = vec_new();
+vec_push(pm_short, CV_SENTINEL);
+vec_push(pm_short, CV_SENTINEL);
+var pm_canary = vec_new();
+vec_push(pm_canary, CV_CANARY);
+naad_convolution_process_block_direct(pm_rev, pd_in, pm_short);
+assert_eq(vec_len(pm_short), 2, "short output is not resized");
+assert(approx(vec_get(pm_short, 0), F64_ONE, CV_1E_9), "short direct[0] == 1.0");
+assert(approx(vec_get(pm_short, 1), CV_0_25, CV_1E_9), "short direct[1] == 0.25");
+assert_eq(vec_get(pm_canary, 0), CV_CANARY, "no overrun past a short output");
+
+var pm_long = vec_new();
+var pm_i = 0;
+while (pm_i < 8) { vec_push(pm_long, CV_SENTINEL); pm_i = pm_i + 1; }
+var pm_two = vec_new();
+vec_push(pm_two, CV_NEG_HALF);
+vec_push(pm_two, 0);
+naad_convolution_process_block_direct(pm_rev, pm_two, pm_long);
+assert_eq(vec_len(pm_long), 8, "long output is not resized");
+# Only 2 samples of input -> only slots 0 and 1 are written.
+assert_eq(vec_get(pm_long, 2), CV_SENTINEL, "long direct[2] untouched past input end");
+assert_eq(vec_get(pm_long, 7), CV_SENTINEL, "long direct[7] untouched past input end");
+# Continuing the SAME reverb: this is x[2] and x[3] of the stream above, so the
+# outputs must match what the single 8-sample direct run produced there.
+assert(approx(vec_get(pm_long, 0), vec_get(pd_dir_out, 2), CV_1E_9),
+  "short call consumed exactly 2 inputs (continuity at x[2])");
+assert(approx(vec_get(pm_long, 1), vec_get(pd_dir_out, 3), CV_1E_9),
+  "short call consumed exactly 2 inputs (continuity at x[3])");
+
+# An empty IR makes process_block_direct a pure passthrough (process_sample
+# returns its input unchanged), matching what process_block's dry copy does.
+var pe_rev = naad_convolution_from_ir(vec_new(), F64_ONE);
+var pe_out = vec_new();
+pm_i = 0;
+while (pm_i < 8) { vec_push(pe_out, CV_SENTINEL); pm_i = pm_i + 1; }
+naad_convolution_process_block_direct(pe_rev, pd_in, pe_out);
+var pe_ok = 1;
+pm_i = 0;
+while (pm_i < 8) {
+    if (vec_get(pe_out, pm_i) != vec_get(pd_in, pm_i)) { pe_ok = 0; }
+    pm_i = pm_i + 1;
+}
+assert_eq(pe_ok, 1, "empty IR -> direct fallback passes the block through");
 
 var rc = assert_summary();
 syscall(60, rc);

@@ -18,6 +18,135 @@ var C0_001 = 0x3f50624dd2f1a9fc;   # 0.001
 
 var SR = 44100;
 
+# --- 2.2.1 accessor/coverage pass: constants + helpers ----------------
+var C0_25 = 0x3FD0000000000000;   # 0.25
+var C0_75 = 0x3FE8000000000000;   # 0.75
+var C0_8  = 0x3FE999999999999A;   # 0.8  (the default ADSR sustain level)
+var C0_4  = 0x3FD999999999999A;   # 0.4
+var C0_3T = 0x3FD3333333333333;   # 0.3  (the default ADSR release time)
+var C1E_9 = 0x3E112E0BE826D695;   # 1e-9 (sine-accuracy tolerance)
+
+# |a - b| < tol  ->  1. Never compare f64 through f64_to -- it truncates.
+fn fm_approx(a, b, tol) {
+    if (f64_lt(f64_abs(f64_sub(a, b)), tol) == 1) { return 1; }
+    return 0;
+}
+
+# A fresh operator at `freq` Hz, gated on. Hand-built operators are the
+# reference for re-deriving what each routing algorithm must produce.
+fn fm_ref_op(freq) {
+    var op = fm_operator_new(f64_from(freq), f64_from(SR));
+    fm_operator_gate_on(op);
+    return op;
+}
+
+# A gated-on 4-operator engine with distinct operator frequencies
+# (110/220/330/440 Hz) running `algo`.
+fn fm_std_engine(algo) {
+    var e = fm_engine_new(4, f64_from(SR));
+    fm_engine_set_operator_freq(e, 0, f64_from(110));
+    fm_engine_set_operator_freq(e, 1, f64_from(220));
+    fm_engine_set_operator_freq(e, 2, f64_from(330));
+    fm_engine_set_operator_freq(e, 3, f64_from(440));
+    fm_engine_set_algorithm(e, algo);
+    fm_engine_note_on(e);
+    return e;
+}
+
+# Render `n` samples of `e` through fm_engine_next_sample into a new vec.
+fn fm_render(e, n) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) {
+        var s = fm_engine_next_sample(e);
+        vec_push(v, s);
+        i = i + 1;
+    }
+    return v;
+}
+
+# Sum of |a[i] - b[i]| over `n` samples.
+fn fm_sum_abs_diff(a, b, n) {
+    var d = 0;
+    var i = 0;
+    while (i < n) {
+        d = f64_add(d, f64_abs(f64_sub(vec_get(a, i), vec_get(b, i))));
+        i = i + 1;
+    }
+    return d;
+}
+
+# next_sample() on an engine set to ALGO vs the process_* function it must
+# dispatch to, run on a second identical engine. Returns the mismatch count,
+# or -1 if the reference never produced signal (a vacuous all-zero match).
+fn fm_dispatch_mismatch_serial2(n) {
+    var ea = fm_std_engine(FM_ALGO_SERIAL2);
+    var eb = fm_std_engine(FM_ALGO_SERIAL2);
+    var bad = 0;
+    var loud = 0;
+    var i = 0;
+    while (i < n) {
+        var g = fm_engine_next_sample(ea);
+        var w = fm_engine_process_serial2(eb, 4);
+        if (g != w) { bad = bad + 1; }
+        if (f64_gt(f64_abs(w), C0_01) == 1) { loud = 1; }
+        i = i + 1;
+    }
+    if (loud == 0) { return 0 - 1; }
+    return bad;
+}
+
+fn fm_dispatch_mismatch_parallel2(n) {
+    var ea = fm_std_engine(FM_ALGO_PARALLEL2);
+    var eb = fm_std_engine(FM_ALGO_PARALLEL2);
+    var bad = 0;
+    var loud = 0;
+    var i = 0;
+    while (i < n) {
+        var g = fm_engine_next_sample(ea);
+        var w = fm_engine_process_parallel2(eb, 4);
+        if (g != w) { bad = bad + 1; }
+        if (f64_gt(f64_abs(w), C0_01) == 1) { loud = 1; }
+        i = i + 1;
+    }
+    if (loud == 0) { return 0 - 1; }
+    return bad;
+}
+
+fn fm_dispatch_mismatch_serial4(n) {
+    var ea = fm_std_engine(FM_ALGO_SERIAL4);
+    var eb = fm_std_engine(FM_ALGO_SERIAL4);
+    var bad = 0;
+    var loud = 0;
+    var i = 0;
+    while (i < n) {
+        var g = fm_engine_next_sample(ea);
+        var w = fm_engine_process_serial4(eb, 4);
+        if (g != w) { bad = bad + 1; }
+        if (f64_gt(f64_abs(w), C0_01) == 1) { loud = 1; }
+        i = i + 1;
+    }
+    if (loud == 0) { return 0 - 1; }
+    return bad;
+}
+
+fn fm_dispatch_mismatch_stack4(n) {
+    var ea = fm_std_engine(FM_ALGO_STACK4);
+    var eb = fm_std_engine(FM_ALGO_STACK4);
+    var bad = 0;
+    var loud = 0;
+    var i = 0;
+    while (i < n) {
+        var g = fm_engine_next_sample(ea);
+        var w = fm_engine_process_stack4(eb, 4);
+        if (g != w) { bad = bad + 1; }
+        if (f64_gt(f64_abs(w), C0_01) == 1) { loud = 1; }
+        i = i + 1;
+    }
+    if (loud == 0) { return 0 - 1; }
+    return bad;
+}
+
 # ================================================================
 test_group("basic output");
 var engine = fm_engine_new(2, f64_from(SR));
@@ -114,6 +243,563 @@ test_group("invalid construction");
 assert(naad_is_err(fm_engine_new(0, f64_from(SR))), "zero operators err");
 assert(naad_is_err(fm_engine_new(7, f64_from(SR))), "too many operators err");
 assert(naad_is_err(fm_engine_new(2, 0)), "zero sample rate err");
+
+# ================================================================
+# 2.2.1 accessor/coverage pass -- fm_operator_* and the four algorithms.
+# ================================================================
+
+# ================================================================
+test_group("fm_operator_new constructor state");
+var op_d = fm_operator_new(f64_from(440), f64_from(SR));
+assert(naad_is_err(op_d) == 0, "operator constructed");
+# rust-old/src/synth/fm.rs:57-68 -- every field of the Rust struct literal.
+assert_eq(FmOperator_frequency(op_d), f64_from(440), "ctor keeps the frequency argument");
+assert_eq(FmOperator_phase(op_d), 0, "ctor phase is exactly +0.0");
+assert_eq(FmOperator_output_level(op_d), F64_ONE, "ctor output_level is exactly 1.0");
+assert_eq(FmOperator_feedback(op_d), 0, "ctor feedback is exactly 0.0");
+assert_eq(FmOperator_feedback_state(op_d), 0, "ctor feedback_state is exactly 0.0");
+assert_eq(FmOperator_sample_rate(op_d), f64_from(SR), "ctor keeps the sample_rate argument");
+
+# envelope() and envelope_mut() are exact aliases -- Cyrius has no &/&mut, so
+# both must hand back the one stored Adsr pointer.
+var env_d = fm_operator_envelope(op_d);
+assert(env_d != 0, "envelope() is non-null");
+assert_eq(env_d, FmOperator_envelope(op_d), "envelope() returns the stored pointer");
+assert_eq(fm_operator_envelope_mut(op_d), env_d, "envelope_mut() is the same pointer as envelope()");
+
+# rust-old/src/synth/fm.rs:58 -- Adsr::with_sample_rate(0.01, 0.1, 0.8, 0.3, sr).
+assert_eq(Adsr_attack_time(env_d), C0_01, "default attack is 0.01 s");
+assert_eq(Adsr_decay_time(env_d), C0_1, "default decay is 0.1 s");
+assert_eq(Adsr_sustain_level(env_d), C0_8, "default sustain is 0.8");
+assert_eq(Adsr_release_time(env_d), C0_3T, "default release is 0.3 s");
+assert_eq(Adsr_sample_rate(env_d), f64_from(SR), "operator envelope runs at the operator sample rate");
+assert_eq(envelope_adsr_state(env_d), ENV_STATE_IDLE, "a fresh operator envelope is idle");
+
+# The `?` on Adsr::with_sample_rate propagates: a bad sample rate is an error,
+# not a half-built operator.
+assert(naad_is_err(fm_operator_new(f64_from(440), 0)) == 1, "zero sample rate is an error");
+assert(naad_is_err(fm_operator_new(f64_from(440), f64_sub(0, f64_from(SR)))) == 1, "negative sample rate is an error");
+
+# ================================================================
+test_group("fm_operator setter round-trips");
+var op_s = fm_operator_new(f64_from(440), f64_from(SR));
+# set_frequency stores verbatim -- no clamping (rust-old/src/synth/fm.rs:71).
+fm_operator_set_frequency(op_s, f64_from(880));
+assert_eq(FmOperator_frequency(op_s), f64_from(880), "set_frequency round-trips 880 Hz");
+fm_operator_set_frequency(op_s, C0_25);
+assert_eq(FmOperator_frequency(op_s), C0_25, "set_frequency round-trips 0.25 Hz unclamped");
+# ...and the stored value is the one that drives phase_inc = freq / sample_rate.
+fm_operator_set_frequency(op_s, f64_from(11025));
+var s_adv = fm_operator_next_sample(op_s, 0);
+assert_eq(FmOperator_phase(op_s), C0_25, "11025/44100 advances phase by exactly 0.25");
+
+# set_level clamps to 0.0..=1.0 (rust-old/src/synth/fm.rs:77).
+var op_l = fm_operator_new(f64_from(440), f64_from(SR));
+fm_operator_set_level(op_l, F64_HALF);
+assert_eq(FmOperator_output_level(op_l), F64_HALF, "set_level round-trips 0.5");
+fm_operator_set_level(op_l, f64_from(2));
+assert_eq(FmOperator_output_level(op_l), F64_ONE, "set_level clamps 2.0 -> 1.0");
+fm_operator_set_level(op_l, f64_sub(0, F64_ONE));
+assert_eq(FmOperator_output_level(op_l), 0, "set_level clamps -1.0 -> 0.0");
+fm_operator_set_level(op_l, C0_75);
+assert_eq(FmOperator_output_level(op_l), C0_75, "set_level round-trips 0.75");
+
+# set_feedback clamps identically (rust-old/src/synth/fm.rs:82).
+fm_operator_set_feedback(op_l, C0_25);
+assert_eq(FmOperator_feedback(op_l), C0_25, "set_feedback round-trips 0.25");
+fm_operator_set_feedback(op_l, f64_from(5));
+assert_eq(FmOperator_feedback(op_l), F64_ONE, "set_feedback clamps 5.0 -> 1.0");
+fm_operator_set_feedback(op_l, f64_sub(0, F64_HALF));
+assert_eq(FmOperator_feedback(op_l), 0, "set_feedback clamps -0.5 -> 0.0");
+fm_operator_set_feedback(op_l, C0_75);
+assert_eq(FmOperator_feedback(op_l), C0_75, "set_feedback round-trips 0.75");
+# Neighbouring fields are untouched by either setter.
+assert_eq(FmOperator_output_level(op_l), C0_75, "set_feedback leaves output_level alone");
+assert_eq(FmOperator_frequency(op_l), f64_from(440), "level/feedback setters leave frequency alone");
+assert_eq(FmOperator_phase(op_l), 0, "setters do not advance phase");
+
+# ================================================================
+test_group("fm_operator gate_on/gate_off state machine");
+var op_g = fm_operator_new(f64_from(11025), f64_from(SR));
+var env_g = fm_operator_envelope(op_g);
+assert_eq(envelope_adsr_state(env_g), ENV_STATE_IDLE, "fresh operator is idle");
+# gate_off while idle is a no-op (envelope.cyr guards state != idle).
+fm_operator_gate_off(op_g);
+assert_eq(envelope_adsr_state(env_g), ENV_STATE_IDLE, "gate_off while idle stays idle");
+# An ungated operator emits exactly +0.0: result = out * env * level, env == 0.
+var z0 = fm_operator_next_sample(op_g, 0);
+assert_eq(z0, 0, "idle operator emits exactly +0.0");
+var z1 = fm_operator_next_sample(op_g, C0_25);
+assert_eq(z1, 0, "idle operator emits +0.0 even under phase modulation");
+assert_eq(FmOperator_phase(op_g), F64_HALF, "phase still advances while idle (0.25 + 0.25)");
+
+fm_operator_gate_on(op_g);
+assert_eq(envelope_adsr_state(env_g), ENV_STATE_ATTACK, "gate_on -> attack");
+assert_eq(envelope_adsr_is_active(env_g), 1, "gated operator is active");
+# attack_time 0.01 s * 44100 Hz = 441 samples; the 442nd call is the one whose
+# ramp value reaches 1.0 and flips the stage.
+var n_att = 0;
+while (envelope_adsr_state(env_g) == ENV_STATE_ATTACK && n_att < 5000) {
+    var s_att = fm_operator_next_sample(op_g, 0);
+    n_att = n_att + 1;
+}
+assert_eq(n_att, 442, "attack ends after exactly 442 next_sample calls");
+assert_eq(envelope_adsr_state(env_g), ENV_STATE_DECAY, "attack -> decay");
+# decay_time 0.1 s * 44100 Hz = 4410 samples; the 4411th call reaches sustain.
+var n_dec = 0;
+while (envelope_adsr_state(env_g) == ENV_STATE_DECAY && n_dec < 20000) {
+    var s_dec = fm_operator_next_sample(op_g, 0);
+    n_dec = n_dec + 1;
+}
+assert_eq(n_dec, 4411, "decay ends after exactly 4411 next_sample calls");
+assert_eq(envelope_adsr_state(env_g), ENV_STATE_SUSTAIN, "decay -> sustain");
+assert_eq(Adsr_current_value(env_g), C0_8, "sustain holds exactly 0.8");
+var s_sus = fm_operator_next_sample(op_g, 0);
+assert_eq(envelope_adsr_state(env_g), ENV_STATE_SUSTAIN, "sustain holds until gate_off");
+assert_eq(Adsr_current_value(env_g), C0_8, "sustain value unchanged by further samples");
+
+fm_operator_gate_off(op_g);
+assert_eq(envelope_adsr_state(env_g), ENV_STATE_RELEASE, "gate_off -> release");
+assert_eq(Adsr_release_start_value(env_g), C0_8, "release starts from the sustain value");
+assert_eq(envelope_adsr_is_active(env_g), 1, "a releasing operator is still active");
+# release_time 0.3 s * 44100 Hz = 13230 samples; the 13231st call hits zero.
+var n_rel = 0;
+while (envelope_adsr_state(env_g) == ENV_STATE_RELEASE && n_rel < 40000) {
+    var s_rel = fm_operator_next_sample(op_g, 0);
+    n_rel = n_rel + 1;
+}
+assert_eq(n_rel, 13231, "release ends after exactly 13231 next_sample calls");
+assert_eq(envelope_adsr_state(env_g), ENV_STATE_IDLE, "release -> idle");
+assert_eq(envelope_adsr_is_active(env_g), 0, "operator is inactive once released");
+# Re-gating from idle restarts the attack from the top.
+fm_operator_gate_on(op_g);
+assert_eq(envelope_adsr_state(env_g), ENV_STATE_ATTACK, "gate_on from idle -> attack again");
+assert_eq(Adsr_stage_samples(env_g), 0, "gate_on resets the stage counter");
+
+# ================================================================
+test_group("fm_operator_next_sample exact values");
+# 11025 Hz at 44100 Hz is a phase increment of exactly 0.25, so the sine
+# argument lands on 0, tau/4, tau/2 and 3tau/4 exactly. Once sustaining,
+# env == 0.8 exactly, so the output is sin(phase * tau) * 0.8 * level.
+var op_v = fm_operator_new(f64_from(11025), f64_from(SR));
+var env_v = fm_operator_envelope(op_v);
+fm_operator_gate_on(op_v);
+var n_sus = 0;
+while (envelope_adsr_state(env_v) != ENV_STATE_SUSTAIN && n_sus < 20000) {
+    var s_pump = fm_operator_next_sample(op_v, 0);
+    n_sus = n_sus + 1;
+}
+assert_eq(n_sus, 4853, "442 attack + 4411 decay samples reach sustain");
+assert_eq(FmOperator_phase(op_v), C0_25, "phase is exactly 0.25 after 4853 samples");
+var v1 = fm_operator_next_sample(op_v, 0);          # phase 0.25 -> sin = +1
+assert(fm_approx(v1, C0_8, C1E_9), "sin(tau/4) * 0.8 == +0.8");
+assert_eq(FmOperator_feedback_state(op_v), v1, "feedback_state records the last output verbatim");
+var v2 = fm_operator_next_sample(op_v, 0);          # phase 0.50 -> sin = 0
+assert(fm_approx(v2, 0, C1E_9), "sin(tau/2) * 0.8 == 0");
+var v3 = fm_operator_next_sample(op_v, 0);          # phase 0.75 -> sin = -1
+assert(fm_approx(v3, f64_sub(0, C0_8), C1E_9), "sin(3tau/4) * 0.8 == -0.8");
+var v4 = fm_operator_next_sample(op_v, 0);          # phase 0.00 -> sin = 0 exactly
+assert_eq(v4, 0, "sin(0) * 0.8 is exactly +0.0");
+# phase_mod shifts the sine argument by exactly its own value: each of these
+# would be the *previous* line's value if phase_mod were dropped.
+var v5 = fm_operator_next_sample(op_v, C0_25);      # phase 0.25 + 0.25 -> sin = 0
+assert(fm_approx(v5, 0, C1E_9), "phase_mod 0.25 at phase 0.25 -> 0, not +0.8");
+var v6 = fm_operator_next_sample(op_v, C0_25);      # phase 0.50 + 0.25 -> sin = -1
+assert(fm_approx(v6, f64_sub(0, C0_8), C1E_9), "phase_mod 0.25 at phase 0.5 -> -0.8, not 0");
+# output_level scales the finished sample; phase_mod wraps past a full turn.
+fm_operator_set_level(op_v, F64_HALF);
+var v7 = fm_operator_next_sample(op_v, F64_HALF);   # phase 0.75 + 0.50 -> sin = +1
+assert(fm_approx(v7, C0_4, C1E_9), "level 0.5 scales +0.8 to +0.4 (mod wraps past tau)");
+assert_eq(envelope_adsr_state(env_v), ENV_STATE_SUSTAIN, "still sustaining through the value checks");
+
+# ================================================================
+test_group("fm_operator_set_feedback drives the feedback path");
+# fb = feedback * feedback_state enters mod_phase in exactly the slot
+# phase_mod does (rust-old/src/synth/fm.rs:102-104), so an operator with
+# feedback == 1.0 must track an identical operator that is handed its own
+# previous output as phase_mod, sample for sample.
+var op_fb = fm_operator_new(f64_from(440), f64_from(SR));
+var op_rf = fm_operator_new(f64_from(440), f64_from(SR));
+var op_nf = fm_operator_new(f64_from(440), f64_from(SR));
+fm_operator_set_feedback(op_fb, F64_ONE);
+fm_operator_gate_on(op_fb);
+fm_operator_gate_on(op_rf);
+fm_operator_gate_on(op_nf);
+var fb_bad = 0;
+var fb_loud = 0;
+var fb_div = 0;
+var fb_prev = 0;
+var fb_i = 0;
+while (fb_i < 512) {
+    var fa = fm_operator_next_sample(op_fb, 0);
+    var fr = fm_operator_next_sample(op_rf, fb_prev);
+    var fn0 = fm_operator_next_sample(op_nf, 0);
+    if (fa != fr) { fb_bad = fb_bad + 1; }
+    if (f64_gt(f64_abs(fr), C0_25) == 1) { fb_loud = 1; }
+    fb_div = f64_add(fb_div, f64_abs(f64_sub(fa, fn0)));
+    fb_prev = fr;
+    fb_i = fb_i + 1;
+}
+assert_eq(fb_bad, 0, "feedback 1.0 == self phase-modulation, bit for bit");
+assert(fb_loud, "feedback reference produced real signal (match is not vacuous)");
+assert(f64_gt(fb_div, C0_1) == 1, "feedback 1.0 diverges from feedback 0.0");
+assert_eq(FmOperator_feedback(op_nf), 0, "the no-feedback control kept feedback 0.0");
+
+# ================================================================
+test_group("fm_engine_operator / fm_engine_operator_mut");
+var e_ops = fm_engine_new(3, f64_from(SR));
+var o0 = fm_engine_operator(e_ops, 0);
+var o1 = fm_engine_operator(e_ops, 1);
+var o2 = fm_engine_operator(e_ops, 2);
+assert(o0 != 0, "operator(0) is non-null");
+assert(o1 != o0, "operator(1) is a different operator from operator(0)");
+assert(o2 != o1, "operator(2) is a different operator from operator(1)");
+assert_eq(fm_engine_operator_mut(e_ops, 1), o1, "operator_mut(1) aliases operator(1)");
+assert_eq(fm_engine_operator_mut(e_ops, 2), o2, "operator_mut(2) aliases operator(2)");
+# Out-of-range -> null (Rust `Option::None`).
+assert_eq(fm_engine_operator(e_ops, 3), 0, "operator(len) is null");
+assert_eq(fm_engine_operator_mut(e_ops, 3), 0, "operator_mut(len) is null");
+assert_eq(fm_engine_operator(e_ops, 0 - 1), 0, "operator(-1) is null");
+assert_eq(fm_engine_operator_mut(e_ops, 0 - 1), 0, "operator_mut(-1) is null");
+# rust-old/src/synth/fm.rs:166 -- every operator starts as a 440 Hz sine.
+assert_eq(FmOperator_frequency(o0), f64_from(440), "operator 0 defaults to 440 Hz");
+assert_eq(FmOperator_frequency(o2), f64_from(440), "operator 2 defaults to 440 Hz");
+# The accessors hand back the engine's own storage, not a copy.
+fm_operator_set_frequency(fm_engine_operator_mut(e_ops, 2), f64_from(660));
+assert_eq(FmOperator_frequency(fm_engine_operator(e_ops, 2)), f64_from(660), "operator_mut writes through to the engine");
+assert_eq(FmOperator_frequency(o0), f64_from(440), "writing operator 2 left operator 0 alone");
+fm_engine_set_operator_level(e_ops, 1, F64_HALF);
+assert_eq(FmOperator_output_level(o1), F64_HALF, "operator(1) observes engine-side level changes");
+assert_eq(FmOperator_output_level(o0), F64_ONE, "the index-1 write did not touch operator 0");
+
+# ================================================================
+test_group("fm_engine_note_off / fm_engine_is_active");
+var e_a = fm_engine_new(4, f64_from(SR));
+assert_eq(fm_engine_is_active(e_a), 0, "a fresh engine is inactive");
+# note_off on an idle engine is a no-op for every operator.
+fm_engine_note_off(e_a);
+var idle_ok = 1;
+var ia = 0;
+while (ia < 4) {
+    if (envelope_adsr_state(fm_operator_envelope(fm_engine_operator(e_a, ia))) != ENV_STATE_IDLE) { idle_ok = 0; }
+    ia = ia + 1;
+}
+assert(idle_ok, "note_off while idle leaves all four envelopes idle");
+assert_eq(fm_engine_is_active(e_a), 0, "note_off on an idle engine stays inactive");
+
+# CUSTOM routing sums every operator, so a pump advances all four envelopes.
+fm_engine_set_algorithm(e_a, FM_ALGO_CUSTOM);
+fm_engine_note_on(e_a);
+assert_eq(fm_engine_is_active(e_a), 1, "engine is active after note_on");
+var att_ok = 1;
+ia = 0;
+while (ia < 4) {
+    if (envelope_adsr_state(fm_operator_envelope(fm_engine_operator(e_a, ia))) != ENV_STATE_ATTACK) { att_ok = 0; }
+    ia = ia + 1;
+}
+assert(att_ok, "note_on gates every operator into attack");
+var pa = 0;
+while (pa < 1000) {
+    var s_pa = fm_engine_next_sample(e_a);
+    pa = pa + 1;
+}
+# 1000 samples is past the 442-sample attack but inside the 4410-sample decay.
+var dec_ok = 1;
+ia = 0;
+while (ia < 4) {
+    if (envelope_adsr_state(fm_operator_envelope(fm_engine_operator(e_a, ia))) != ENV_STATE_DECAY) { dec_ok = 0; }
+    ia = ia + 1;
+}
+assert(dec_ok, "CUSTOM routing advanced all four envelopes into decay");
+
+fm_engine_note_off(e_a);
+var rel_ok = 1;
+var rel_val_ok = 1;
+ia = 0;
+while (ia < 4) {
+    var env_i = fm_operator_envelope(fm_engine_operator(e_a, ia));
+    if (envelope_adsr_state(env_i) != ENV_STATE_RELEASE) { rel_ok = 0; }
+    if (f64_gt(Adsr_release_start_value(env_i), 0) == 0) { rel_val_ok = 0; }
+    ia = ia + 1;
+}
+assert(rel_ok, "note_off puts every operator into release");
+assert(rel_val_ok, "each release starts from the decaying value, not 0");
+assert_eq(fm_engine_is_active(e_a), 1, "releasing operators still count as active");
+
+# is_active is `any`, not `all`: drain operator 0 only and the engine stays
+# active because operators 1..3 are still releasing.
+var d0 = 0;
+while (d0 < 13231) {
+    var s_d0 = fm_operator_next_sample(fm_engine_operator_mut(e_a, 0), 0);
+    d0 = d0 + 1;
+}
+assert_eq(envelope_adsr_state(fm_operator_envelope(fm_engine_operator(e_a, 0))), ENV_STATE_IDLE, "operator 0 drained to idle");
+assert_eq(fm_engine_is_active(e_a), 1, "engine still active while operators 1..3 release");
+var dj = 1;
+while (dj < 4) {
+    var dk = 0;
+    while (dk < 13231) {
+        var s_dk = fm_operator_next_sample(fm_engine_operator_mut(e_a, dj), 0);
+        dk = dk + 1;
+    }
+    dj = dj + 1;
+}
+assert_eq(fm_engine_is_active(e_a), 0, "engine inactive once every operator has released");
+
+# ================================================================
+test_group("fm_engine_process_serial2 routing");
+# rust-old/src/synth/fm.rs:260-268 -- op[0] modulates op[1]; op[1] is the
+# carrier. Re-derived from two hand-built operators at the same frequencies.
+var e_s2 = fm_engine_new(2, f64_from(SR));
+fm_engine_set_operator_freq(e_s2, 0, f64_from(200));
+fm_engine_set_operator_freq(e_s2, 1, f64_from(440));
+fm_engine_note_on(e_s2);
+var s2_mod = fm_ref_op(200);
+var s2_car = fm_ref_op(440);
+var s2_bad = 0;
+var s2_loud = 0;
+var s2_i = 0;
+while (s2_i < 512) {
+    var s2_got = fm_engine_process_serial2(e_s2, 2);
+    var s2_m = fm_operator_next_sample(s2_mod, 0);
+    var s2_w = fm_operator_next_sample(s2_car, s2_m);
+    if (s2_got != s2_w) { s2_bad = s2_bad + 1; }
+    if (f64_gt(f64_abs(s2_w), C0_25) == 1) { s2_loud = 1; }
+    s2_i = s2_i + 1;
+}
+assert_eq(s2_bad, 0, "serial2 == op1 phase-modulated by op0, bit for bit");
+assert(s2_loud, "serial2 reference produced real signal (match is not vacuous)");
+
+# ================================================================
+test_group("fm_engine_process_parallel2 routing");
+# rust-old/src/synth/fm.rs:272-279 -- (op[0] + op[1]) * 0.5, neither modulates.
+var e_p2 = fm_engine_new(2, f64_from(SR));
+fm_engine_set_operator_freq(e_p2, 0, f64_from(200));
+fm_engine_set_operator_freq(e_p2, 1, f64_from(440));
+fm_engine_note_on(e_p2);
+var p2_a = fm_ref_op(200);
+var p2_b = fm_ref_op(440);
+var p2_bad = 0;
+var p2_loud = 0;
+var p2_i = 0;
+while (p2_i < 512) {
+    var p2_got = fm_engine_process_parallel2(e_p2, 2);
+    var p2_x = fm_operator_next_sample(p2_a, 0);
+    var p2_y = fm_operator_next_sample(p2_b, 0);
+    var p2_w = f64_mul(f64_add(p2_x, p2_y), F64_HALF);
+    if (p2_got != p2_w) { p2_bad = p2_bad + 1; }
+    if (f64_gt(f64_abs(p2_w), C0_25) == 1) { p2_loud = 1; }
+    p2_i = p2_i + 1;
+}
+assert_eq(p2_bad, 0, "parallel2 == mean of two unmodulated operators, bit for bit");
+assert(p2_loud, "parallel2 reference produced real signal (match is not vacuous)");
+
+# ================================================================
+test_group("fm_engine_process_serial4 routing");
+# rust-old/src/synth/fm.rs:283-290 -- op0 -> op1 -> op2 -> op3, each stage
+# feeding the next stage's phase_mod; op3 is the carrier.
+var e_s4 = fm_engine_new(4, f64_from(SR));
+fm_engine_set_operator_freq(e_s4, 0, f64_from(110));
+fm_engine_set_operator_freq(e_s4, 1, f64_from(220));
+fm_engine_set_operator_freq(e_s4, 2, f64_from(330));
+fm_engine_set_operator_freq(e_s4, 3, f64_from(440));
+fm_engine_note_on(e_s4);
+var s4_0 = fm_ref_op(110);
+var s4_1 = fm_ref_op(220);
+var s4_2 = fm_ref_op(330);
+var s4_3 = fm_ref_op(440);
+var s4_bad = 0;
+var s4_loud = 0;
+var s4_i = 0;
+while (s4_i < 512) {
+    var s4_got = fm_engine_process_serial4(e_s4, 4);
+    var s4_w = fm_operator_next_sample(s4_0, 0);
+    s4_w = fm_operator_next_sample(s4_1, s4_w);
+    s4_w = fm_operator_next_sample(s4_2, s4_w);
+    s4_w = fm_operator_next_sample(s4_3, s4_w);
+    if (s4_got != s4_w) { s4_bad = s4_bad + 1; }
+    if (f64_gt(f64_abs(s4_w), C0_25) == 1) { s4_loud = 1; }
+    s4_i = s4_i + 1;
+}
+assert_eq(s4_bad, 0, "serial4 == the four-deep modulation chain, bit for bit");
+assert(s4_loud, "serial4 reference produced real signal (match is not vacuous)");
+
+# ================================================================
+test_group("fm_engine_process_stack4 routing");
+# rust-old/src/synth/fm.rs:294-305 -- (op0+op1)*0.5 modulates BOTH op2 and
+# op3, whose mean is the output.
+var e_k4 = fm_engine_new(4, f64_from(SR));
+fm_engine_set_operator_freq(e_k4, 0, f64_from(110));
+fm_engine_set_operator_freq(e_k4, 1, f64_from(220));
+fm_engine_set_operator_freq(e_k4, 2, f64_from(330));
+fm_engine_set_operator_freq(e_k4, 3, f64_from(440));
+fm_engine_note_on(e_k4);
+var k4_0 = fm_ref_op(110);
+var k4_1 = fm_ref_op(220);
+var k4_2 = fm_ref_op(330);
+var k4_3 = fm_ref_op(440);
+var k4_bad = 0;
+var k4_loud = 0;
+var k4_i = 0;
+while (k4_i < 512) {
+    var k4_got = fm_engine_process_stack4(e_k4, 4);
+    var k4_ma = fm_operator_next_sample(k4_0, 0);
+    var k4_mb = fm_operator_next_sample(k4_1, 0);
+    var k4_ms = f64_mul(f64_add(k4_ma, k4_mb), F64_HALF);
+    var k4_ca = fm_operator_next_sample(k4_2, k4_ms);
+    var k4_cb = fm_operator_next_sample(k4_3, k4_ms);
+    var k4_w = f64_mul(f64_add(k4_ca, k4_cb), F64_HALF);
+    if (k4_got != k4_w) { k4_bad = k4_bad + 1; }
+    if (f64_gt(f64_abs(k4_w), C0_25) == 1) { k4_loud = 1; }
+    k4_i = k4_i + 1;
+}
+assert_eq(k4_bad, 0, "stack4 == mean of two carriers sharing one modulator pair");
+assert(k4_loud, "stack4 reference produced real signal (match is not vacuous)");
+
+# ================================================================
+test_group("fm algorithms with degenerate operator counts");
+# n < 2: serial2 and parallel2 both collapse to operator 0 alone.
+var e_o1 = fm_engine_new(1, f64_from(SR));
+fm_engine_note_on(e_o1);
+var o1_ref = fm_ref_op(440);
+var o1_bad = 0;
+var o1_loud = 0;
+var o1_i = 0;
+while (o1_i < 128) {
+    var o1_got = fm_engine_process_serial2(e_o1, 1);
+    var o1_w = fm_operator_next_sample(o1_ref, 0);
+    if (o1_got != o1_w) { o1_bad = o1_bad + 1; }
+    if (f64_gt(f64_abs(o1_w), C0_01) == 1) { o1_loud = 1; }
+    o1_i = o1_i + 1;
+}
+assert_eq(o1_bad, 0, "serial2 with one operator is operator 0 unmodulated");
+assert(o1_loud, "one-operator serial2 reference produced signal");
+
+var e_o2 = fm_engine_new(1, f64_from(SR));
+fm_engine_note_on(e_o2);
+var o2_ref = fm_ref_op(440);
+var o2_bad = 0;
+var o2_i = 0;
+while (o2_i < 128) {
+    var o2_got = fm_engine_process_parallel2(e_o2, 1);
+    var o2_w = fm_operator_next_sample(o2_ref, 0);
+    if (o2_got != o2_w) { o2_bad = o2_bad + 1; }
+    o2_i = o2_i + 1;
+}
+assert_eq(o2_bad, 0, "parallel2 with one operator is operator 0 alone (no halving)");
+
+# count = min(n, 4): with two operators serial4 IS the serial2 chain.
+var e_c1 = fm_engine_new(2, f64_from(SR));
+fm_engine_set_operator_freq(e_c1, 0, f64_from(200));
+fm_engine_note_on(e_c1);
+var e_c2 = fm_engine_new(2, f64_from(SR));
+fm_engine_set_operator_freq(e_c2, 0, f64_from(200));
+fm_engine_note_on(e_c2);
+var c_bad = 0;
+var c_loud = 0;
+var c_i = 0;
+while (c_i < 128) {
+    var c_g4 = fm_engine_process_serial4(e_c1, 2);
+    var c_g2 = fm_engine_process_serial2(e_c2, 2);
+    if (c_g4 != c_g2) { c_bad = c_bad + 1; }
+    if (f64_gt(f64_abs(c_g2), C0_01) == 1) { c_loud = 1; }
+    c_i = c_i + 1;
+}
+assert_eq(c_bad, 0, "serial4 over 2 operators equals the serial2 chain");
+assert(c_loud, "two-operator chain produced signal");
+
+# n < 4: stack4 delegates to serial4.
+var e_g1 = fm_engine_new(3, f64_from(SR));
+fm_engine_set_operator_freq(e_g1, 0, f64_from(110));
+fm_engine_set_operator_freq(e_g1, 1, f64_from(220));
+fm_engine_note_on(e_g1);
+var e_g2 = fm_engine_new(3, f64_from(SR));
+fm_engine_set_operator_freq(e_g2, 0, f64_from(110));
+fm_engine_set_operator_freq(e_g2, 1, f64_from(220));
+fm_engine_note_on(e_g2);
+var g_bad = 0;
+var g_loud = 0;
+var g_i = 0;
+while (g_i < 128) {
+    var g_gk = fm_engine_process_stack4(e_g1, 3);
+    var g_gs = fm_engine_process_serial4(e_g2, 3);
+    if (g_gk != g_gs) { g_bad = g_bad + 1; }
+    if (f64_gt(f64_abs(g_gs), C0_01) == 1) { g_loud = 1; }
+    g_i = g_i + 1;
+}
+assert_eq(g_bad, 0, "stack4 with 3 operators delegates to serial4");
+assert(g_loud, "three-operator delegation produced signal");
+
+# The count clamp is real: with 6 operators, serial4 and stack4 must leave
+# operators 4 and 5 completely untouched (phase and envelope both).
+var e_s6 = fm_engine_new(6, f64_from(SR));
+fm_engine_note_on(e_s6);
+var s6_out = fm_engine_process_serial4(e_s6, 6);
+assert_eq(FmOperator_phase(fm_engine_operator(e_s6, 4)), 0, "serial4 left operator 4's phase at 0");
+assert_eq(FmOperator_phase(fm_engine_operator(e_s6, 5)), 0, "serial4 left operator 5's phase at 0");
+assert_eq(Adsr_stage_samples(fm_operator_envelope(fm_engine_operator(e_s6, 4))), 0, "serial4 did not pump operator 4's envelope");
+assert(FmOperator_phase(fm_engine_operator(e_s6, 3)) != 0, "serial4 did advance operator 3");
+assert_eq(Adsr_stage_samples(fm_operator_envelope(fm_engine_operator(e_s6, 3))), F64_ONE, "serial4 pumped operator 3's envelope exactly once");
+
+var e_k6 = fm_engine_new(6, f64_from(SR));
+fm_engine_note_on(e_k6);
+var k6_out = fm_engine_process_stack4(e_k6, 6);
+assert_eq(FmOperator_phase(fm_engine_operator(e_k6, 4)), 0, "stack4 left operator 4's phase at 0");
+assert_eq(Adsr_stage_samples(fm_operator_envelope(fm_engine_operator(e_k6, 5))), 0, "stack4 did not pump operator 5's envelope");
+assert_eq(Adsr_stage_samples(fm_operator_envelope(fm_engine_operator(e_k6, 3))), F64_ONE, "stack4 pumped operator 3's envelope exactly once");
+
+# ================================================================
+test_group("fm_engine_next_sample dispatches on the algorithm");
+assert_eq(fm_dispatch_mismatch_serial2(256), 0, "SERIAL2 dispatches to process_serial2");
+assert_eq(fm_dispatch_mismatch_parallel2(256), 0, "PARALLEL2 dispatches to process_parallel2");
+assert_eq(fm_dispatch_mismatch_serial4(256), 0, "SERIAL4 dispatches to process_serial4");
+assert_eq(fm_dispatch_mismatch_stack4(256), 0, "STACK4 dispatches to process_stack4");
+
+# CUSTOM has no process_* helper: it is the mean of every operator, unmodulated
+# (rust-old/src/synth/fm.rs:239-246).
+var e_cu = fm_std_engine(FM_ALGO_CUSTOM);
+var cu_0 = fm_ref_op(110);
+var cu_1 = fm_ref_op(220);
+var cu_2 = fm_ref_op(330);
+var cu_3 = fm_ref_op(440);
+var cu_bad = 0;
+var cu_loud = 0;
+var cu_i = 0;
+while (cu_i < 256) {
+    var cu_got = fm_engine_next_sample(e_cu);
+    var cu_sum = f64_add(0, fm_operator_next_sample(cu_0, 0));
+    cu_sum = f64_add(cu_sum, fm_operator_next_sample(cu_1, 0));
+    cu_sum = f64_add(cu_sum, fm_operator_next_sample(cu_2, 0));
+    cu_sum = f64_add(cu_sum, fm_operator_next_sample(cu_3, 0));
+    var cu_w = f64_div(cu_sum, f64_from(4));
+    if (cu_got != cu_w) { cu_bad = cu_bad + 1; }
+    if (f64_gt(f64_abs(cu_w), C0_01) == 1) { cu_loud = 1; }
+    cu_i = cu_i + 1;
+}
+assert_eq(cu_bad, 0, "CUSTOM == mean of all four unmodulated operators");
+assert(cu_loud, "CUSTOM reference produced real signal (match is not vacuous)");
+
+# ================================================================
+test_group("the four algorithms produce distinct output");
+# Same operators, same note, four routings: every pair must differ, or the
+# dispatch in next_sample is not actually being exercised.
+var r_s2 = fm_render(fm_std_engine(FM_ALGO_SERIAL2), 256);
+var r_p2 = fm_render(fm_std_engine(FM_ALGO_PARALLEL2), 256);
+var r_s4 = fm_render(fm_std_engine(FM_ALGO_SERIAL4), 256);
+var r_k4 = fm_render(fm_std_engine(FM_ALGO_STACK4), 256);
+assert(f64_gt(fm_sum_abs_diff(r_s2, r_p2, 256), C0_1) == 1, "serial2 differs from parallel2");
+assert(f64_gt(fm_sum_abs_diff(r_s2, r_s4, 256), C0_1) == 1, "serial2 differs from serial4");
+assert(f64_gt(fm_sum_abs_diff(r_s2, r_k4, 256), C0_1) == 1, "serial2 differs from stack4");
+assert(f64_gt(fm_sum_abs_diff(r_p2, r_s4, 256), C0_1) == 1, "parallel2 differs from serial4");
+assert(f64_gt(fm_sum_abs_diff(r_p2, r_k4, 256), C0_1) == 1, "parallel2 differs from stack4");
+assert(f64_gt(fm_sum_abs_diff(r_s4, r_k4, 256), C0_1) == 1, "serial4 differs from stack4");
+# ...and none of them is silent.
+assert(f64_gt(fm_sum_abs_diff(r_s2, r_s2, 256), 0) == 0, "self-difference is zero (diff metric sanity)");
+var r_zero = vec_new();
+var rz = 0;
+while (rz < 256) { vec_push(r_zero, 0); rz = rz + 1; }
+assert(f64_gt(fm_sum_abs_diff(r_s2, r_zero, 256), C0_1) == 1, "serial2 render is not all zeros");
+assert(f64_gt(fm_sum_abs_diff(r_k4, r_zero, 256), C0_1) == 1, "stack4 render is not all zeros");
 
 var rc = assert_summary();
 syscall(60, rc);

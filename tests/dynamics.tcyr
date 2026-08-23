@@ -29,6 +29,14 @@ var C0_5    = 0x3fe0000000000000;   # 0.5
 var C0_1    = 0x3fb999999999999a;   # 0.1
 var C6_0    = 0x4018000000000000;   # 6.0
 var C1E_3   = 0x3f50624dd2f1a9fc;   # 1e-3 (== 0.001)
+var C2_25    = 0x4002000000000000;   # 2.25
+var C0_75    = 0x3fe8000000000000;   # 0.75
+var C0_5625  = 0x3fe2000000000000;   # 0.5625
+var C0_0625  = 0x3fb0000000000000;   # 0.0625
+var C1M_E    = 0x3fe43a54e4e98864;   # 1 - e^-1  = 0.6321205588285577
+var C0_0224  = 0x3f96f56b4d13ee20;   # 1 - e^(-1/44.1) = 0.022420574740847354
+var C1E_12   = 0x3d719799812dea11;   # 1e-12 (bit-exact comparison tolerance)
+var NEG_ZERO = 0x8000000000000000;   # -0.0 (signed zero, distinct from +0.0)
 
 var SR = 44100;
 var drop = 0;
@@ -164,6 +172,293 @@ while (i < 2000) {
 }
 var out_above = dynamics_limiter_process_sample(le, above);
 assert(f64_lt(out_above, above), "input above ceiling must be reduced");
+
+# ================================================================
+# 2.2.1 coverage: exact-value assertions for the pure gain math, the
+# accessor round-trips, the buffer forms, and the gate state machine.
+# Expected values are derived from the oracle formulas in
+# rust-old/src/dynamics.rs and chosen to be exactly representable in
+# binary floating point, so they are compared as raw f64 bit patterns.
+# ================================================================
+
+test_group("time_to_coeff exact");
+# time <= 0.0 collapses to an instantaneous coefficient of exactly 1.0
+# (rust-old/src/dynamics.rs `fn time_to_coeff`: `if time <= 0.0 { 1.0 }`).
+var tc_zero = dynamics_time_to_coeff(0, f64_from(SR));
+assert_eq(tc_zero, F64_ONE, "time = 0 -> coeff exactly 1.0");
+var tc_neg = dynamics_time_to_coeff(f64_neg(C0_01), f64_from(SR));
+assert_eq(tc_neg, F64_ONE, "time < 0 -> coeff exactly 1.0");
+# time * sample_rate == 1.0 -> 1 - e^-1 = 0.6321205588285577
+var tc_one = dynamics_time_to_coeff(F64_ONE, F64_ONE);
+assert(f64_lt(f64_abs(f64_sub(tc_one, C1M_E)), C1E_12), "coeff(1 s, 1 Hz) == 1 - e^-1");
+# 1 ms at 44.1 kHz -> 1 - e^(-1/44.1) = 0.022420574740847354
+var tc_1ms = dynamics_time_to_coeff(C0_001, f64_from(SR));
+assert(f64_lt(f64_abs(f64_sub(tc_1ms, C0_0224)), C1E_12), "coeff(1 ms, 44.1 kHz) == 0.0224205747");
+# Longer times are strictly slower (smaller coefficient).
+var tc_10ms = dynamics_time_to_coeff(C0_01, f64_from(SR));
+assert(f64_lt(tc_10ms, tc_1ms), "10 ms coeff < 1 ms coeff");
+assert(f64_gt(tc_10ms, 0), "positive time -> positive coeff");
+# The detector constructor stores exactly these coefficients.
+var tc_det = dynamics_level_detector_new(C0_001, C0_01, f64_from(SR));
+assert_eq(LevelDetector_current(tc_det), 0, "fresh detector current == 0.0");
+assert_eq(LevelDetector_attack_coeff(tc_det), tc_1ms, "attack_coeff == time_to_coeff(attack)");
+assert_eq(LevelDetector_release_coeff(tc_det), tc_10ms, "release_coeff == time_to_coeff(release)");
+
+# ================================================================
+test_group("compressor hard-knee gain exact");
+var ch = dynamics_compressor_new(f64_neg(f64_from(20)), f64_from(4), C0_001, C0_01, f64_from(SR));
+assert_eq(Compressor_knee_db(ch), 0, "constructor knee_db == 0.0 (hard-knee path)");
+assert_eq(Compressor_makeup_db(ch), 0, "constructor makeup_db == 0.0");
+assert_eq(Compressor_threshold_db(ch), f64_neg(f64_from(20)), "constructor threshold_db == -20.0");
+# Below threshold -> exactly zero reduction.
+assert_eq(dynamics_compressor_compute_gain_db_hard(ch, f64_neg(f64_from(30))), 0, "-30 dB -> 0 dB reduction");
+# The branch is `input_db <= threshold_db`, so the threshold itself is unreduced.
+assert_eq(dynamics_compressor_compute_gain_db_hard(ch, f64_neg(f64_from(20))), 0, "at threshold -> 0 dB reduction");
+# Above: (t + (in - t)/r) - in = (-20 + 12/4) + 8 = -9.0 exactly.
+assert_eq(dynamics_compressor_compute_gain_db_hard(ch, f64_neg(f64_from(8))), f64_neg(f64_from(9)), "-8 dB in, 4:1 over -20 -> -9 dB");
+# 0 dBFS: (-20 + 20/4) - 0 = -15.0 exactly.
+assert_eq(dynamics_compressor_compute_gain_db_hard(ch, 0), f64_neg(f64_from(15)), "0 dB in, 4:1 over -20 -> -15 dB");
+# One dB over threshold: (-20 + 1/4) + 19 = -0.75 exactly.
+assert_eq(dynamics_compressor_compute_gain_db_hard(ch, f64_neg(f64_from(19))), f64_neg(C0_75), "1 dB over threshold -> -0.75 dB");
+# While knee == 0 the dispatch entry must be the hard path, value for value.
+assert_eq(dynamics_compressor_compute_gain_db(ch, f64_neg(f64_from(8))), f64_neg(f64_from(9)), "compute_gain_db dispatches to the hard path");
+
+# ================================================================
+test_group("compressor soft-knee gain exact");
+var cs = dynamics_compressor_new(f64_neg(f64_from(20)), f64_from(4), C0_001, C0_01, f64_from(SR));
+Compressor_set_knee_db(cs, C6_0);          # 6 dB knee -> window [-23, -17]
+# Inside the window: (1/r - 1) * x^2 / (2k) with x = in - t + k/2.
+# At the threshold, x = 3 -> -0.75 * 9 / 12 = -0.5625 exactly, while the hard
+# path applies nothing there: the knee starts reducing BEFORE the threshold.
+assert_eq(dynamics_compressor_compute_gain_db_soft(cs, f64_neg(f64_from(20))), f64_neg(C0_5625), "at threshold, 6 dB knee -> -0.5625 dB");
+assert_eq(dynamics_compressor_compute_gain_db_hard(cs, f64_neg(f64_from(20))), 0, "hard path applies nothing at the threshold");
+# Below threshold but inside the knee: x = 1 -> -0.75 / 12 = -0.0625 exactly.
+assert_eq(dynamics_compressor_compute_gain_db_soft(cs, f64_neg(f64_from(22))), f64_neg(C0_0625), "-22 dB inside knee -> -0.0625 dB");
+# Lower knee edge: |in - t| == k/2 is NOT > k/2, so the quadratic still runs
+# with x = 0. -0.75 * 0.0 * 0.0 / 12 is NEGATIVE zero, exactly as in Rust.
+assert_eq(dynamics_compressor_compute_gain_db_soft(cs, f64_neg(f64_from(23))), NEG_ZERO, "lower knee edge -> -0.0 dB (signed zero)");
+# Upper knee edge: x = 6 -> -0.75 * 36 / 12 = -2.25 exactly. The pre-existing
+# "gentle" test only bounded this into (-3, 0); this pins the value.
+assert_eq(dynamics_compressor_compute_gain_db_soft(cs, f64_neg(f64_from(17))), f64_neg(C2_25), "upper knee edge -> -2.25 dB");
+# The knee is continuous: at the upper edge the quadratic and the hard-knee
+# line agree bit for bit.
+assert_eq(dynamics_compressor_compute_gain_db_soft(cs, f64_neg(f64_from(17))), dynamics_compressor_compute_gain_db_hard(cs, f64_neg(f64_from(17))), "knee is continuous at the upper edge");
+# Outside the window, above -> hard math: (-20 + 4/4) + 16 = -3.0 exactly.
+assert_eq(dynamics_compressor_compute_gain_db_soft(cs, f64_neg(f64_from(16))), f64_neg(f64_from(3)), "above the knee -> hard math, -3 dB");
+# Outside the window, below -> the literal 0.0 return (positive zero).
+assert_eq(dynamics_compressor_compute_gain_db_soft(cs, f64_neg(f64_from(24))), 0, "below the knee window -> 0 dB");
+# knee > 0 makes the dispatch entry select the soft path.
+assert_eq(dynamics_compressor_compute_gain_db(cs, f64_neg(f64_from(20))), f64_neg(C0_5625), "compute_gain_db dispatches to the soft path");
+
+# ================================================================
+test_group("compressor ratio round-trip");
+var cq = dynamics_compressor_new(f64_neg(f64_from(20)), f64_from(4), C0_001, C0_01, f64_from(SR));
+assert_eq(dynamics_compressor_ratio(cq), f64_from(4), "constructor ratio == 4.0");
+dynamics_compressor_set_ratio(cq, f64_from(8));
+assert_eq(dynamics_compressor_ratio(cq), f64_from(8), "set_ratio(8.0) round-trips");
+# `ratio.max(1.0)` -- sub-unity and negative ratios clamp.
+dynamics_compressor_set_ratio(cq, C0_5);
+assert_eq(dynamics_compressor_ratio(cq), F64_ONE, "set_ratio(0.5) clamps to 1.0");
+dynamics_compressor_set_ratio(cq, f64_neg(f64_from(4)));
+assert_eq(dynamics_compressor_ratio(cq), F64_ONE, "set_ratio(-4.0) clamps to 1.0");
+# The constructor applies the same clamp.
+var cq_low = dynamics_compressor_new(f64_neg(f64_from(20)), C0_5, C0_001, C0_01, f64_from(SR));
+assert_eq(dynamics_compressor_ratio(cq_low), F64_ONE, "new(ratio = 0.5) clamps to 1.0");
+# The setter really drives the gain formula: 2:1 at -10 dB over -20 dB is
+# (-20 + 10/2) + 10 = -5.0 exactly.
+dynamics_compressor_set_ratio(cq, F64_TWO);
+assert_eq(dynamics_compressor_compute_gain_db_hard(cq, f64_neg(f64_from(10))), f64_neg(f64_from(5)), "set_ratio(2.0) drives the gain formula");
+# 1:1 collapses the formula to zero reduction at any level.
+dynamics_compressor_set_ratio(cq, F64_ONE);
+assert_eq(dynamics_compressor_compute_gain_db_hard(cq, 0), 0, "ratio 1:1 -> 0 dB reduction at 0 dBFS");
+
+# ================================================================
+test_group("limiter accessors round-trip");
+var lacc = dynamics_limiter_new(f64_neg(C0_1), C0_01, f64_from(SR));
+assert_eq(dynamics_limiter_ceiling_db(lacc), f64_neg(C0_1), "constructor ceiling_db == -0.1");
+assert_eq(dynamics_limiter_release(lacc), C0_01, "constructor release == 0.01 s");
+var lcomp = Limiter_compressor(lacc);
+assert_eq(Compressor_threshold_db(lcomp), f64_neg(C0_1), "ceiling mirrored into the compressor threshold");
+assert_eq(Compressor_knee_db(lcomp), 0, "limiter gain stage is hard-knee");
+assert_eq(dynamics_compressor_ratio(lcomp), DYN_F32_MAX, "limiter ratio == f32::MAX");
+# The setter round-trips AND propagates -- the whole reason ceiling_db is
+# private in the oracle.
+dynamics_limiter_set_ceiling_db(lacc, f64_neg(C6_0));
+assert_eq(dynamics_limiter_ceiling_db(lacc), f64_neg(C6_0), "set_ceiling_db(-6.0) round-trips");
+assert_eq(Compressor_threshold_db(lcomp), f64_neg(C6_0), "set_ceiling_db propagates to the gain stage");
+assert_eq(dynamics_limiter_release(lacc), C0_01, "set_ceiling_db leaves release alone");
+# ...and the new ceiling drives the gain math. At ratio f32::MAX the residual
+# (in - t)/r is ~1e-38, which vanishes in the -6.0 addition, so -3 dB in is
+# pinned back to the ceiling by exactly -3 dB.
+assert_eq(dynamics_compressor_compute_gain_db_hard(lcomp, f64_neg(f64_from(3))), f64_neg(f64_from(3)), "-3 dB over a -6 dB ceiling -> -3 dB reduction");
+assert_eq(dynamics_compressor_compute_gain_db_hard(lcomp, f64_neg(f64_from(9))), 0, "below the ceiling -> no reduction");
+
+# ================================================================
+test_group("compressor process_buffer matches process_sample");
+# Two identically constructed compressors: one driven through the buffer
+# form, one sample by sample. Every slot must match bit for bit.
+var pb_a = dynamics_compressor_new(f64_neg(f64_from(20)), f64_from(4), C0_001, C0_01, f64_from(SR));
+var pb_b = dynamics_compressor_new(f64_neg(f64_from(20)), f64_from(4), C0_001, C0_01, f64_from(SR));
+var pb_buf = vec_new();
+var pb_src = vec_new();
+var pb_k = 0;
+while (pb_k < 64) {
+    var pb_s = f64_mul(f64_from(pb_k % 5), C0_3);   # 0.0, 0.3, 0.6, 0.9, 1.2
+    vec_push(pb_buf, pb_s);
+    vec_push(pb_src, pb_s);
+    pb_k = pb_k + 1;
+}
+# A neighbouring allocation that must survive the in-place write.
+var pb_guard = vec_new();
+vec_push(pb_guard, C0_5);
+assert_eq(dynamics_compressor_process_buffer(pb_a, pb_buf), 0, "process_buffer returns 0");
+assert_eq(vec_len(pb_buf), 64, "process_buffer preserves the buffer length");
+var pb_mismatch = 0;
+var pb_changed = 0;
+pb_k = 0;
+while (pb_k < 64) {
+    var pb_want = dynamics_compressor_process_sample(pb_b, vec_get(pb_src, pb_k));
+    if (vec_get(pb_buf, pb_k) != pb_want) { pb_mismatch = pb_mismatch + 1; }
+    if (vec_get(pb_buf, pb_k) != vec_get(pb_src, pb_k)) { pb_changed = pb_changed + 1; }
+    pb_k = pb_k + 1;
+}
+assert_eq(pb_mismatch, 0, "every buffered sample equals the per-sample result");
+assert(pb_changed > 30, "process_buffer actually rewrote the buffer");
+# The settled tail is strictly quieter than the input that produced it.
+assert(f64_lt(vec_get(pb_buf, 63), vec_get(pb_src, 63)), "compressed tail is below its input sample");
+assert_eq(vec_get(pb_guard, 0), C0_5, "neighbouring allocation not corrupted");
+assert_eq(vec_len(pb_guard), 1, "neighbouring allocation length intact");
+# A zero-length buffer is a no-op, not an out-of-bounds walk.
+var pb_empty = vec_new();
+assert_eq(dynamics_compressor_process_buffer(pb_a, pb_empty), 0, "empty buffer returns 0");
+assert_eq(vec_len(pb_empty), 0, "empty buffer stays empty");
+# A single-element buffer takes the same path as the first slot of a long one.
+var pb_one_a = dynamics_compressor_new(f64_neg(f64_from(20)), f64_from(4), C0_001, C0_01, f64_from(SR));
+var pb_one_b = dynamics_compressor_new(f64_neg(f64_from(20)), f64_from(4), C0_001, C0_01, f64_from(SR));
+var pb_one = vec_new();
+vec_push(pb_one, C0_9);
+assert_eq(dynamics_compressor_process_buffer(pb_one_a, pb_one), 0, "1-sample buffer returns 0");
+var pb_one_want = dynamics_compressor_process_sample(pb_one_b, C0_9);
+assert_eq(vec_get(pb_one, 0), pb_one_want, "1-sample buffer matches process_sample");
+assert_eq(vec_len(pb_one), 1, "1-sample buffer keeps its length");
+
+# ================================================================
+test_group("limiter process_buffer matches process_sample");
+var lb_a = dynamics_limiter_new(f64_neg(C0_1), C0_01, f64_from(SR));
+var lb_b = dynamics_limiter_new(f64_neg(C0_1), C0_01, f64_from(SR));
+var lb_buf = vec_new();
+var lb_src = vec_new();
+var lb_k = 0;
+while (lb_k < 48) {
+    var lb_s = f64_mul(f64_from((lb_k % 4) + 1), C0_5);   # 0.5, 1.0, 1.5, 2.0
+    vec_push(lb_buf, lb_s);
+    vec_push(lb_src, lb_s);
+    lb_k = lb_k + 1;
+}
+assert_eq(dynamics_limiter_process_buffer(lb_a, lb_buf), 0, "limiter process_buffer returns 0");
+assert_eq(vec_len(lb_buf), 48, "limiter process_buffer preserves length");
+var lb_mismatch = 0;
+var lb_over = 0;
+lb_k = 0;
+while (lb_k < 48) {
+    var lb_want = dynamics_limiter_process_sample(lb_b, vec_get(lb_src, lb_k));
+    if (vec_get(lb_buf, lb_k) != lb_want) { lb_mismatch = lb_mismatch + 1; }
+    # Once the envelope has settled, nothing may leave above the input level.
+    if (f64_gt(vec_get(lb_buf, lb_k), vec_get(lb_src, lb_k)) == 1) { lb_over = lb_over + 1; }
+    lb_k = lb_k + 1;
+}
+assert_eq(lb_mismatch, 0, "every limited sample equals the per-sample result");
+assert_eq(lb_over, 0, "limiter never amplifies a sample");
+# The settled tail is strictly reduced (the non-strict check above would
+# have accepted an untouched buffer).
+assert(f64_lt(vec_get(lb_buf, 47), vec_get(lb_src, 47)), "limiter strictly reduced the buffer tail");
+var lb_empty = vec_new();
+assert_eq(dynamics_limiter_process_buffer(lb_a, lb_empty), 0, "limiter empty buffer returns 0");
+
+# ================================================================
+test_group("noise gate state transitions");
+# attack = 0 -> the detector tracks instantly (coeff 1.0), so the envelope is
+# exactly |input| on a rising sample and the state machine is observable.
+var ngs = dynamics_noise_gate_new(f64_neg(f64_from(10)), 0, C0_01, C0_001, f64_from(SR));
+# hold_samples = (0.01 * 44100) as u32 = 441
+assert_eq(NoiseGate_hold_samples(ngs), 441, "hold_samples == (hold * sample_rate) as u32");
+assert_eq(NoiseGate_hold_counter(ngs), 0, "fresh gate: hold_counter == 0");
+assert_eq(NoiseGate_gate_gain(ngs), 0, "fresh gate: closed (gain 0.0)");
+assert_eq(NoiseGate_threshold_db(ngs), f64_neg(f64_from(10)), "fresh gate: threshold_db == -10.0");
+assert_eq(LevelDetector_attack_coeff(NoiseGate_detector(ngs)), F64_ONE, "attack = 0 -> instant detector attack");
+# CLOSED -> ATTACK: one above-threshold sample arms the hold counter and
+# starts opening the gate.
+var ng_first = dynamics_noise_gate_process_sample(ngs, F64_ONE);
+assert_eq(LevelDetector_current(NoiseGate_detector(ngs)), F64_ONE, "instant attack: envelope == 1.0");
+assert_eq(NoiseGate_hold_counter(ngs), 441, "above threshold arms hold_counter to hold_samples");
+assert(f64_gt(NoiseGate_gate_gain(ngs), 0), "gate gain rises off zero");
+assert(f64_lt(NoiseGate_gate_gain(ngs), F64_ONE), "gate does not snap fully open in one sample");
+# The output is exactly input * gate_gain.
+assert_eq(ng_first, NoiseGate_gate_gain(ngs), "output == input * gate_gain");
+# ATTACK -> OPEN: sustained loud input opens the gate and keeps it armed.
+i = 0;
+while (i < 1000) {
+    drop = dynamics_noise_gate_process_sample(ngs, F64_ONE);
+    i = i + 1;
+}
+assert(f64_gt(NoiseGate_gate_gain(ngs), C0_9), "sustained loud input opens the gate");
+assert_eq(NoiseGate_hold_counter(ngs), 441, "hold_counter stays armed while above threshold");
+# OPEN -> HOLD: with silence the detector needs ~51 samples to fall under
+# -10 dB; after that the counter decrements once per sample and the gate
+# stays open on target = 1.0.
+i = 0;
+while (i < 200) {
+    drop = dynamics_noise_gate_process_sample(ngs, 0);
+    i = i + 1;
+}
+assert(NoiseGate_hold_counter(ngs) < 441, "sub-threshold samples decrement hold_counter");
+assert(NoiseGate_hold_counter(ngs) > 0, "hold window has not expired yet");
+assert(f64_gt(NoiseGate_gate_gain(ngs), C0_9), "gate stays open during the hold window");
+# HOLD -> RELEASE -> CLOSED: run past expiry, the counter floors at 0 and the
+# gain decays toward silence.
+i = 0;
+while (i < 3000) {
+    drop = dynamics_noise_gate_process_sample(ngs, 0);
+    i = i + 1;
+}
+assert_eq(NoiseGate_hold_counter(ngs), 0, "hold_counter floors at 0 after expiry");
+assert(f64_lt(NoiseGate_gate_gain(ngs), C1E_3), "gate closes once the hold expires");
+# CLOSED -> ATTACK again: the machine re-arms on the next loud sample.
+drop = dynamics_noise_gate_process_sample(ngs, F64_ONE);
+assert_eq(NoiseGate_hold_counter(ngs), 441, "a loud sample re-arms the hold counter");
+
+# ================================================================
+test_group("noise gate process_buffer matches process_sample");
+var gb_a = dynamics_noise_gate_new(f64_neg(f64_from(40)), C0_001, C0_01, C0_01, f64_from(SR));
+var gb_b = dynamics_noise_gate_new(f64_neg(f64_from(40)), C0_001, C0_01, C0_01, f64_from(SR));
+var gb_buf = vec_new();
+var gb_src = vec_new();
+var gb_k = 0;
+while (gb_k < 96) {
+    # 32 loud samples, then 64 near-silent ones: the buffer form has to carry
+    # the gate through open, hold and close.
+    var gb_s = C0_001;
+    if (gb_k < 32) { gb_s = C0_5; }
+    vec_push(gb_buf, gb_s);
+    vec_push(gb_src, gb_s);
+    gb_k = gb_k + 1;
+}
+assert_eq(dynamics_noise_gate_process_buffer(gb_a, gb_buf), 0, "gate process_buffer returns 0");
+assert_eq(vec_len(gb_buf), 96, "gate process_buffer preserves length");
+var gb_mismatch = 0;
+gb_k = 0;
+while (gb_k < 96) {
+    var gb_want = dynamics_noise_gate_process_sample(gb_b, vec_get(gb_src, gb_k));
+    if (vec_get(gb_buf, gb_k) != gb_want) { gb_mismatch = gb_mismatch + 1; }
+    gb_k = gb_k + 1;
+}
+assert_eq(gb_mismatch, 0, "every gated sample equals the per-sample result");
+# The first sample is attenuated (gate starts closed) and strictly smaller
+# than the input that produced it.
+assert(f64_lt(vec_get(gb_buf, 0), C0_5), "gate starts closed: first sample attenuated");
+assert(f64_gt(vec_get(gb_buf, 31), vec_get(gb_buf, 0)), "gate opens across the loud run");
+var gb_empty = vec_new();
+assert_eq(dynamics_noise_gate_process_buffer(gb_a, gb_empty), 0, "gate empty buffer returns 0");
 
 var rc = assert_summary();
 syscall(60, rc);

@@ -11,6 +11,15 @@ include "src/granular.cyr"
 var C0_01 = 0x3F847AE147AE147B;   # 0.01
 var C0_5  = 0x3FE0000000000000;   # 0.5
 var C0_3  = 0x3FD3333333333333;   # 0.3
+var C0_75 = 0x3FE8000000000000;   # 0.75
+var C1_5  = 0x3FF8000000000000;   # 1.5
+var C2_5  = 0x4004000000000000;   # 2.5
+var C7_5  = 0x401E000000000000;   # 7.5
+var CN1000_25 = 0xC08F420000000000;   # -1000.25
+# xorshift32(42) = 11355432; 11355432 / u32::MAX = 0.0026438925421433273.
+var GT_RNG0 = 0x3F65A8A50015A8A5;   # 0.0026438925421433273
+# xorshift32(11355432) = 2836018348; / u32::MAX = 0.6603119775327649.
+var GT_RNG1 = 0x3FE5214695952147;   # 0.6603119775327649
 
 # A vec of `n` zeros (an output buffer).
 fn granular_test_zeros(n) {
@@ -77,6 +86,18 @@ fn granular_test_zc(buf, n) {
         j = j + 1;
     }
     return count;
+}
+
+# Number of active slots in a grain pool.
+fn granular_test_count_active(pool) {
+    var n = vec_len(pool);
+    var c = 0;
+    var i = 0;
+    while (i < n) {
+        if (Grain_active(vec_get(pool, i)) == 1) { c = c + 1; }
+        i = i + 1;
+    }
+    return c;
 }
 
 alloc_init();
@@ -204,6 +225,169 @@ granular_fill_buffer(up, buf_up);
 var zc_unity = granular_test_zc(buf_unity, 8192);
 var zc_up = granular_test_zc(buf_up, 8192);
 assert(zc_up >= zc_unity * 3 / 2, "pitch_shift=2 must raise zero-crossing count meaningfully");
+
+
+# ================================================================
+# 2.2.1 accessor/coverage pass. Exact values throughout: every expected
+# number below is exactly representable in f64, so the comparisons are raw
+# bit-pattern assert_eq -- never f64_to, which truncates toward zero and
+# would hold for any value sharing an integer part.
+# ================================================================
+
+# ================================================================
+# rem_euclid is the two-sided remainder every grain read position goes
+# through (rust-old/src/synth/granular.rs:230 and :288 both call
+# f32::rem_euclid). The contract is that the result lands in [0, |b|) even
+# for a negative dividend -- which a plain `%` would NOT give.
+# ================================================================
+test_group("rem_euclid is two-sided");
+assert_eq(granular_rem_euclid(f64_from(7), f64_from(3)), F64_ONE, "rem_euclid(7, 3) = 1");
+assert_eq(granular_rem_euclid(f64_neg(F64_ONE), f64_from(3)), F64_TWO, "rem_euclid(-1, 3) = 2, not -1");
+assert_eq(granular_rem_euclid(f64_from(0 - 7), f64_from(3)), F64_TWO, "rem_euclid(-7, 3) = 2, not -1");
+assert_eq(granular_rem_euclid(f64_from(0 - 3), f64_from(3)), 0, "rem_euclid(-3, 3) = +0.0, not 3");
+assert_eq(granular_rem_euclid(0, f64_from(3)), 0, "rem_euclid(0, 3) = 0");
+# Non-power-of-two moduli: source buffers are rarely 2^n long, and the 2.1.3
+# audit found a latent index bug that only power-of-two lengths hid.
+assert_eq(granular_rem_euclid(f64_from(12), f64_from(5)), F64_TWO, "rem_euclid(12, 5) = 2");
+assert_eq(granular_rem_euclid(f64_from(0 - 12), f64_from(5)), f64_from(3), "rem_euclid(-12, 5) = 3");
+assert_eq(granular_rem_euclid(f64_neg(F64_ONE), f64_from(441)), f64_from(440), "rem_euclid(-1, 441) = 440");
+# Fractional dividends -- read_pos is always fractional.
+assert_eq(granular_rem_euclid(C7_5, f64_from(3)), C1_5, "rem_euclid(7.5, 3) = 1.5");
+assert_eq(granular_rem_euclid(f64_neg(F64_HALF), f64_from(3)), C2_5, "rem_euclid(-0.5, 3) = 2.5");
+# A large negative dividend still lands inside [0, b).
+var gt_wrap = granular_rem_euclid(CN1000_25, f64_from(7));
+assert_eq(gt_wrap, C0_75, "rem_euclid(-1000.25, 7) = 0.75");
+assert(f64_ge(gt_wrap, 0), "rem_euclid(-1000.25, 7) >= 0");
+assert(f64_lt(gt_wrap, f64_from(7)), "rem_euclid(-1000.25, 7) < 7");
+# Zero modulus: Rust's f32::rem_euclid(0.0) is NaN (x % 0.0 is NaN and the
+# `if r < 0` guard never fires on NaN). The port reproduces that rather than
+# silently collapsing to 0.
+assert_eq(naad_is_finite(granular_rem_euclid(f64_from(5), 0)), 0, "rem_euclid(x, 0) is NaN, matching Rust");
+
+# ================================================================
+test_group("next_rng_f32 is the seeded xorshift32 unit stream");
+var gt_rng = granular_new(f64_from(44100));
+var gt_r0 = granular_next_rng_f32(gt_rng);
+assert_eq(gt_r0, GT_RNG0, "next_rng_f32()[0] == xorshift32(42) / u32::MAX");
+var gt_r1 = granular_next_rng_f32(gt_rng);
+assert_eq(gt_r1, GT_RNG1, "next_rng_f32()[1] steps the shared PRNG slot");
+assert(gt_r0 != gt_r1, "consecutive draws differ");
+assert(f64_ge(gt_r0, 0), "draw 0 >= 0.0");
+assert(f64_lt(gt_r0, F64_ONE), "draw 0 < 1.0");
+assert(f64_ge(gt_r1, 0), "draw 1 >= 0.0");
+assert(f64_lt(gt_r1, F64_ONE), "draw 1 < 1.0");
+
+# ================================================================
+test_group("grain_default field-by-field");
+var gt_g = granular_grain_default();
+assert_eq(Grain_source_position(gt_g), 0, "default source_position = 0.0");
+assert_eq(Grain_playback_rate(gt_g), F64_ONE, "default playback_rate = 1.0");
+assert_eq(Grain_window(gt_g), GRAIN_WINDOW_HANN, "default window = Hann");
+assert_eq(Grain_duration_samples(gt_g), 0, "default duration_samples = 0");
+assert_eq(Grain_current_sample(gt_g), 0, "default current_sample = 0");
+assert_eq(Grain_amplitude(gt_g), F64_ONE, "default amplitude = 1.0");
+assert_eq(Grain_active(gt_g), 0, "default grain is inactive");
+# Rust's Grain is Copy and the pool is a `[Grain; 64]` value array; the port
+# allocates one struct per slot, so each call must hand back its own storage.
+var gt_g2 = granular_grain_default();
+assert(gt_g != gt_g2, "each grain_default() allocates distinct storage");
+Grain_set_active(gt_g, 1);
+Grain_set_playback_rate(gt_g, F64_TWO);
+assert_eq(Grain_active(gt_g2), 0, "mutating one default grain does not alias another");
+assert_eq(Grain_playback_rate(gt_g2), F64_ONE, "grain slots do not share a playback rate");
+
+# ================================================================
+test_group("set_window round-trip");
+var gt_w = granular_new(f64_from(44100));
+assert_eq(GranularEngine_window(gt_w), GRAIN_WINDOW_HANN, "a fresh engine defaults to Hann");
+granular_set_window(gt_w, GRAIN_WINDOW_TUKEY);
+assert_eq(GranularEngine_window(gt_w), GRAIN_WINDOW_TUKEY, "window round-trips (Tukey, not the Hann default)");
+granular_set_window(gt_w, GRAIN_WINDOW_GAUSSIAN);
+assert_eq(GranularEngine_window(gt_w), GRAIN_WINDOW_GAUSSIAN, "window round-trips again (Gaussian)");
+granular_set_window(gt_w, GRAIN_WINDOW_RECTANGULAR);
+assert_eq(GranularEngine_window(gt_w), GRAIN_WINDOW_RECTANGULAR, "window round-trips again (Rectangular)");
+
+# ================================================================
+test_group("spawn_grain fills the next free slot");
+var gt_s = granular_new(f64_from(44100));
+granular_set_source(gt_s, granular_test_ramp(1000));
+granular_set_window(gt_s, GRAIN_WINDOW_TUKEY);
+granular_set_grain_duration(gt_s, f64_from(10));   # 10 ms -> 441 samples
+granular_set_pitch_shift(gt_s, F64_TWO);
+var gt_pool = GranularEngine_grains(gt_s);
+assert_eq(vec_len(gt_pool), GRAIN_MAX_GRAINS, "the pool holds 64 slots");
+assert_eq(granular_test_count_active(gt_pool), 0, "no slot starts active");
+granular_spawn_grain(gt_s);
+var gt_g0 = vec_get(gt_pool, 0);
+assert_eq(Grain_active(gt_g0), 1, "spawn activates slot 0");
+assert_eq(Grain_source_position(gt_g0), 0, "spray = 0 -> source_position = time_position = 0");
+assert_eq(Grain_playback_rate(gt_g0), F64_TWO, "the grain inherits the engine pitch_shift");
+assert_eq(Grain_window(gt_g0), GRAIN_WINDOW_TUKEY, "the grain inherits the engine window");
+assert_eq(Grain_duration_samples(gt_g0), 441, "10 ms at 44.1 kHz truncates to 441 samples");
+assert_eq(Grain_current_sample(gt_g0), 0, "a new grain starts at sample 0");
+assert_eq(Grain_amplitude(gt_g0), F64_ONE, "a new grain is at unity amplitude");
+assert_eq(granular_test_count_active(gt_pool), 1, "one spawn touches exactly one slot");
+granular_spawn_grain(gt_s);
+assert_eq(Grain_active(vec_get(gt_pool, 1)), 1, "the second spawn takes slot 1");
+assert_eq(granular_test_count_active(gt_pool), 2, "two spawns, two active slots");
+
+# ================================================================
+test_group("spawn_grain drops grains when the pool is full");
+var gt_f = 2;
+while (gt_f < GRAIN_MAX_GRAINS) {
+    granular_spawn_grain(gt_s);
+    gt_f = gt_f + 1;
+}
+assert_eq(granular_test_count_active(gt_pool), GRAIN_MAX_GRAINS, "64 spawns fill every slot");
+granular_spawn_grain(gt_s);
+assert_eq(granular_test_count_active(gt_pool), GRAIN_MAX_GRAINS, "the 65th spawn is dropped, not written past the pool");
+assert_eq(vec_len(gt_pool), GRAIN_MAX_GRAINS, "the pool did not grow");
+
+# ================================================================
+test_group("spawn_grain applies spray jitter through rem_euclid");
+var gt_sp = granular_new(f64_from(44100));
+granular_set_source(gt_sp, granular_test_ramp(1000));
+granular_set_spray(gt_sp, f64_from(10));           # 10 ms -> 441 source samples
+assert_eq(GranularEngine_spray(gt_sp), f64_mul(f64_div(f64_from(10), f64_from(1000)), f64_from(44100)),
+  "set_spray converts ms to source samples");
+granular_spawn_grain(gt_sp);
+# Reproduce the jitter draw from an independent slot seeded the same way.
+var gt_slot = alloc(8);
+store64(gt_slot, 42);
+var gt_draw = xorshift32_unit_f32(gt_slot);
+var gt_jit = f64_mul(f64_mul(f64_sub(gt_draw, F64_HALF), F64_TWO), GranularEngine_spray(gt_sp));
+var gt_spos = Grain_source_position(vec_get(GranularEngine_grains(gt_sp), 0));
+assert_eq(gt_spos, granular_rem_euclid(f64_add(0, gt_jit), f64_from(1000)),
+  "sprayed position == rem_euclid(time_position + (2r-1)*spray, src_len)");
+assert(f64_lt(gt_jit, 0), "this first draw jitters BACKWARD past position 0");
+assert(f64_gt(gt_spos, 0), "...and the negative jitter wraps to the tail, not to a negative index");
+assert(f64_lt(gt_spos, f64_from(1000)), "sprayed position stays inside the source");
+
+# ================================================================
+test_group("is_active state machine");
+var gt_a = granular_new(f64_from(44100));
+assert_eq(granular_is_active(gt_a), 0, "no source loaded -> inactive");
+granular_set_source(gt_a, granular_test_ramp(1000));
+assert_eq(granular_is_active(gt_a), 0, "source loaded but no grains -> still inactive");
+granular_set_grain_rate(gt_a, GRAIN_C0_1);    # 0.1/s: no auto-spawn for ~441000 samples
+granular_set_grain_duration(gt_a, F64_ONE);   # 1 ms -> 44 samples
+granular_spawn_grain(gt_a);
+assert_eq(Grain_duration_samples(vec_get(GranularEngine_grains(gt_a), 0)), 44, "1 ms at 44.1 kHz = 44 samples");
+assert_eq(granular_is_active(gt_a), 1, "one active grain -> active");
+var gt_n = 0;
+while (gt_n < 44) {
+    var gt_x = granular_next_sample(gt_a);
+    gt_n = gt_n + 1;
+}
+assert_eq(granular_is_active(gt_a), 0, "the grain retires after exactly its 44 samples -> inactive");
+# The `!source.is_empty() &&` conjunct: a live grain alone is not enough.
+var gt_b = granular_new(f64_from(44100));
+granular_set_source(gt_b, granular_test_ramp(1000));
+granular_spawn_grain(gt_b);
+assert_eq(granular_is_active(gt_b), 1, "source + live grain -> active");
+granular_set_source(gt_b, vec_new());
+assert_eq(granular_is_active(gt_b), 0, "clearing the source reports inactive even with a live grain");
+assert_eq(Grain_active(vec_get(GranularEngine_grains(gt_b), 0)), 1, "...although the grain itself is still flagged active");
 
 var rc = assert_summary();
 syscall(60, rc);

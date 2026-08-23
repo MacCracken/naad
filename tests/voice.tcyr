@@ -10,6 +10,10 @@ alloc_init();
 var C0_8 = 0x3FE999999999999A;   # 0.8
 var C0_7 = 0x3FE6666666666666;   # 0.7
 var C0_9 = 0x3FECCCCCCCCCCCCD;   # 0.9
+var C0_5 = 0x3FE0000000000000;   # 0.5
+var C0_1 = 0x3FB999999999999A;   # 0.1
+var C0_3 = 0x3FD3333333333333;   # 0.3
+var C0_6 = 0x3FE3333333333333;   # 0.6
 
 # ================================================================
 test_group("note on / off");
@@ -58,6 +62,237 @@ var _on6 = voice_manager_note_on(vm5, 60, C0_8);
 var _on7 = voice_manager_note_on(vm5, 64, C0_7);
 voice_manager_all_notes_off(vm5);
 assert_eq(voice_manager_active_count(vm5), 0, "all_notes_off clears voices");
+
+# ================================================================
+# 2.2.1 -- voice_default had no coverage. Its every field is a contract with
+# the oracle's `impl Default for Voice` (rust-old/src/voice.rs:76-88), where
+# brightness is the one field that is NOT zero.
+# ================================================================
+test_group("voice_default field values");
+var vd = voice_default();
+assert_eq(Voice_active(vd), 0, "default voice is inactive");
+assert_eq(Voice_note(vd), 0, "default note is 0");
+assert_eq(Voice_velocity(vd), 0, "default velocity is +0.0");
+assert_eq(Voice_age(vd), 0, "default age is 0");
+assert_eq(Voice_amplitude(vd), 0, "default amplitude is +0.0");
+assert_eq(Voice_pitch_bend(vd), 0, "default pitch_bend is +0.0");
+assert_eq(Voice_pressure(vd), 0, "default pressure is +0.0");
+# The oracle's default brightness is 0.5, not 0 -- the only non-zero field.
+assert_eq(Voice_brightness(vd), C0_5, "default brightness is exactly 0.5, not 0");
+assert_neq(Voice_brightness(vd), 0, "default brightness is NOT zero");
+# Two calls must produce independent voices, not a shared singleton.
+var vd2 = voice_default();
+assert_neq(vd2, vd, "voice_default returns a fresh allocation each call");
+Voice_set_note(vd2, 99);
+assert_eq(Voice_note(vd), 0, "mutating one default voice does not touch another");
+# Every voice in a fresh pool is a default voice.
+var vmd = voice_manager_new(3, POLY_MODE_POLY, STEAL_MODE_OLDEST);
+var vmdv = voice_manager_voices(vmd);
+assert_eq(Voice_brightness(vec_get(vmdv, 2)), C0_5, "pooled voices are built from voice_default");
+
+# ================================================================
+test_group("voice_is_active round-trip");
+var va = voice_default();
+assert_eq(voice_is_active(va), 0, "constructor value: a default voice is inactive");
+Voice_set_active(va, 1);
+assert_eq(voice_is_active(va), 1, "reports 1 after active is set");
+Voice_set_active(va, 0);
+assert_eq(voice_is_active(va), 0, "reports 0 again after active is cleared");
+# Tracks the manager's own note_on / note_off, not just a raw field poke.
+var vma = voice_manager_new(2, POLY_MODE_POLY, STEAL_MODE_OLDEST);
+var iva = voice_manager_note_on(vma, 60, C0_8);
+var vav = voice_manager_voices(vma);
+assert_eq(voice_is_active(vec_get(vav, iva)), 1, "voice_is_active is 1 for the voice note_on allocated");
+assert_eq(voice_is_active(vec_get(vav, 1)), 0, "the untouched second voice is still inactive");
+var offa = voice_manager_note_off(vma, 60);
+assert_eq(offa, iva, "note_off releases the voice note_on allocated");
+assert_eq(voice_is_active(vec_get(vav, iva)), 0, "voice_is_active is 0 after note_off");
+
+# ================================================================
+# max_voices is the clamped `n`, not the argument -- oracle
+# rust-old/src/voice.rs:113 `max_voices.clamp(1, 128)`. There is no setter, so
+# the meaningful assertion is that the clamp is applied and that the pool is
+# actually that size.
+# ================================================================
+test_group("voice_manager_max_voices");
+var vm_4 = voice_manager_new(4, POLY_MODE_POLY, STEAL_MODE_OLDEST);
+assert_eq(voice_manager_max_voices(vm_4), 4, "max_voices returns the requested 4");
+assert_eq(vec_len(voice_manager_voices(vm_4)), 4, "pool holds exactly max_voices voices");
+var vm_1 = voice_manager_new(1, POLY_MODE_POLY, STEAL_MODE_OLDEST);
+assert_eq(voice_manager_max_voices(vm_1), 1, "max_voices returns 1 for 1");
+var vm_0 = voice_manager_new(0, POLY_MODE_POLY, STEAL_MODE_OLDEST);
+assert_eq(voice_manager_max_voices(vm_0), 1, "0 clamps up to 1");
+assert_eq(vec_len(voice_manager_voices(vm_0)), 1, "clamped-up pool holds 1 voice");
+var vm_neg = voice_manager_new(0 - 5, POLY_MODE_POLY, STEAL_MODE_OLDEST);
+assert_eq(voice_manager_max_voices(vm_neg), 1, "a negative count clamps up to 1");
+var vm_128 = voice_manager_new(128, POLY_MODE_POLY, STEAL_MODE_OLDEST);
+assert_eq(voice_manager_max_voices(vm_128), 128, "128 is inside the clamp and is kept");
+var vm_big = voice_manager_new(200, POLY_MODE_POLY, STEAL_MODE_OLDEST);
+assert_eq(voice_manager_max_voices(vm_big), 128, "200 clamps down to 128");
+assert_eq(vec_len(voice_manager_voices(vm_big)), 128, "clamped-down pool holds 128 voices");
+
+# ================================================================
+# voice_mut is the port's `voices.get_mut(index)` (rust-old/src/voice.rs:238):
+# Some(&mut Voice) in range, None out of range -- the port returns the null
+# pointer 0 for None.
+# ================================================================
+test_group("voice_manager_voice_mut");
+var vmm = voice_manager_new(3, POLY_MODE_POLY, STEAL_MODE_OLDEST);
+var vmmv = voice_manager_voices(vmm);
+# In range: the SAME voice object the pool holds, not a copy.
+assert_eq(voice_manager_voice_mut(vmm, 0), vec_get(vmmv, 0), "voice_mut(0) is the pool's voice 0");
+assert_eq(voice_manager_voice_mut(vmm, 2), vec_get(vmmv, 2), "voice_mut(2) is the pool's voice 2");
+assert_neq(voice_manager_voice_mut(vmm, 1), vec_get(vmmv, 0), "voice_mut(1) is not voice 0");
+# Mutable: writes through the returned handle are visible in the pool.
+var mref = voice_manager_voice_mut(vmm, 1);
+Voice_set_note(mref, 77);
+Voice_set_amplitude(mref, C0_3);
+Voice_set_active(mref, 1);
+assert_eq(Voice_note(vec_get(vmmv, 1)), 77, "note written through voice_mut is visible in the pool");
+assert_eq(Voice_amplitude(vec_get(vmmv, 1)), C0_3, "amplitude written through voice_mut is visible in the pool");
+assert_eq(voice_manager_active_count(vmm), 1, "activating via voice_mut is seen by active_count");
+# Neighbours untouched.
+assert_eq(Voice_note(vec_get(vmmv, 0)), 0, "voice_mut(1) did not spill into voice 0");
+assert_eq(Voice_note(vec_get(vmmv, 2)), 0, "voice_mut(1) did not spill into voice 2");
+# Out of range -> null (the port's None).
+assert_eq(voice_manager_voice_mut(vmm, 3), 0, "index == len is out of range -> null");
+assert_eq(voice_manager_voice_mut(vmm, 99), 0, "a far index is out of range -> null");
+assert_eq(voice_manager_voice_mut(vmm, 0 - 1), 0, "a negative index is out of range -> null");
+# The last valid index is still in range.
+assert_neq(voice_manager_voice_mut(vmm, 2), 0, "the last valid index is not null");
+
+# ================================================================
+# 2.2.1 -- voice_manager_find_steal_target: all four StealMode arms were
+# untested; only Oldest was reached indirectly, through note_on.
+# Oracle: rust-old/src/voice.rs:180-208.
+#
+# One pool, four modes. Voices 0-3 are active and each mode has a DIFFERENT
+# correct answer, so a mode that fell through to another arm cannot pass.
+# Voice 4 is the decoy: inactive, yet simultaneously the oldest (age 100),
+# the quietest (amplitude 0) and the lowest (note 0) voice in the pool -- if
+# the `.filter(|(_, v)| v.active)` were dropped, all three modes would return 4.
+# ================================================================
+test_group("find_steal_target picks per mode");
+var vms = voice_manager_new(5, POLY_MODE_POLY, STEAL_MODE_OLDEST);
+var s0 = voice_manager_voice_mut(vms, 0);
+Voice_set_active(s0, 1); Voice_set_note(s0, 72); Voice_set_age(s0, 1); Voice_set_amplitude(s0, C0_9);
+var s1 = voice_manager_voice_mut(vms, 1);
+Voice_set_active(s1, 1); Voice_set_note(s1, 60); Voice_set_age(s1, 3); Voice_set_amplitude(s1, C0_5);
+var s2 = voice_manager_voice_mut(vms, 2);
+Voice_set_active(s2, 1); Voice_set_note(s2, 64); Voice_set_age(s2, 9); Voice_set_amplitude(s2, C0_7);
+var s3 = voice_manager_voice_mut(vms, 3);
+Voice_set_active(s3, 1); Voice_set_note(s3, 67); Voice_set_age(s3, 2); Voice_set_amplitude(s3, C0_1);
+var s4 = voice_manager_voice_mut(vms, 4);
+Voice_set_active(s4, 0); Voice_set_note(s4, 0); Voice_set_age(s4, 100); Voice_set_amplitude(s4, 0);
+
+VoiceManager_set_steal_mode(vms, STEAL_MODE_OLDEST);
+var st_oldest = voice_manager_find_steal_target(vms);
+assert_eq(st_oldest, 2, "OLDEST steals voice 2 (age 9, the largest age among ACTIVE voices)");
+VoiceManager_set_steal_mode(vms, STEAL_MODE_QUIETEST);
+var st_quiet = voice_manager_find_steal_target(vms);
+assert_eq(st_quiet, 3, "QUIETEST steals voice 3 (amplitude 0.1)");
+VoiceManager_set_steal_mode(vms, STEAL_MODE_LOWEST);
+var st_low = voice_manager_find_steal_target(vms);
+assert_eq(st_low, 1, "LOWEST steals voice 1 (note 60)");
+VoiceManager_set_steal_mode(vms, STEAL_MODE_NONE);
+var st_none = voice_manager_find_steal_target(vms);
+assert_eq(st_none, NAAD_VOICE_NONE, "NONE refuses to steal even with four candidates");
+# The four answers really are four different voices -- no arm collapsed onto
+# another, and none of them is the inactive decoy.
+assert_neq(st_oldest, st_quiet, "OLDEST and QUIETEST disagree on this pool");
+assert_neq(st_oldest, st_low, "OLDEST and LOWEST disagree on this pool");
+assert_neq(st_quiet, st_low, "QUIETEST and LOWEST disagree on this pool");
+assert_neq(st_oldest, 4, "OLDEST skips the inactive voice 4 despite its age 100");
+assert_neq(st_quiet, 4, "QUIETEST skips the inactive voice 4 despite its amplitude 0");
+assert_neq(st_low, 4, "LOWEST skips the inactive voice 4 despite its note 0");
+# find_steal_target must not mutate the pool it inspects.
+assert_eq(voice_manager_active_count(vms), 4, "find_steal_target left the pool alone");
+assert_eq(Voice_note(vec_get(voice_manager_voices(vms), 2)), 64, "find_steal_target did not rewrite voice 2");
+
+# ================================================================
+# Tie-breaking mirrors Rust's iterator adaptors: max_by_key returns the LAST
+# maximum, min_by / min_by_key return the FIRST minimum. With every voice
+# identical the three modes must therefore NOT agree.
+# ================================================================
+test_group("find_steal_target tie-breaking");
+var vmt = voice_manager_new(3, POLY_MODE_POLY, STEAL_MODE_OLDEST);
+var ti = 0;
+while (ti < 3) {
+    var tv = voice_manager_voice_mut(vmt, ti);
+    Voice_set_active(tv, 1);
+    Voice_set_note(tv, 60);
+    Voice_set_age(tv, 7);
+    Voice_set_amplitude(tv, C0_5);
+    ti = ti + 1;
+}
+VoiceManager_set_steal_mode(vmt, STEAL_MODE_OLDEST);
+var tie_old = voice_manager_find_steal_target(vmt);
+assert_eq(tie_old, 2, "OLDEST tie -> LAST maximum (max_by_key), so index 2");
+VoiceManager_set_steal_mode(vmt, STEAL_MODE_QUIETEST);
+var tie_quiet = voice_manager_find_steal_target(vmt);
+assert_eq(tie_quiet, 0, "QUIETEST tie -> FIRST minimum (min_by), so index 0");
+VoiceManager_set_steal_mode(vmt, STEAL_MODE_LOWEST);
+var tie_low = voice_manager_find_steal_target(vmt);
+assert_eq(tie_low, 0, "LOWEST tie -> FIRST minimum (min_by_key), so index 0");
+assert_neq(tie_old, tie_quiet, "the two tie-break directions are genuinely opposite");
+
+# ================================================================
+test_group("find_steal_target with no candidates");
+var vme = voice_manager_new(4, POLY_MODE_POLY, STEAL_MODE_OLDEST);
+VoiceManager_set_steal_mode(vme, STEAL_MODE_OLDEST);
+var e_old = voice_manager_find_steal_target(vme);
+assert_eq(e_old, NAAD_VOICE_NONE, "OLDEST returns None when nothing is active");
+VoiceManager_set_steal_mode(vme, STEAL_MODE_QUIETEST);
+var e_quiet = voice_manager_find_steal_target(vme);
+assert_eq(e_quiet, NAAD_VOICE_NONE, "QUIETEST returns None when nothing is active");
+VoiceManager_set_steal_mode(vme, STEAL_MODE_LOWEST);
+var e_low = voice_manager_find_steal_target(vme);
+assert_eq(e_low, NAAD_VOICE_NONE, "LOWEST returns None when nothing is active");
+# One active voice: every mode must find it, whatever its index.
+var only = voice_manager_voice_mut(vme, 3);
+Voice_set_active(only, 1); Voice_set_note(only, 90); Voice_set_age(only, 0); Voice_set_amplitude(only, C0_9);
+VoiceManager_set_steal_mode(vme, STEAL_MODE_OLDEST);
+var one_old = voice_manager_find_steal_target(vme);
+assert_eq(one_old, 3, "OLDEST finds the single active voice at index 3");
+VoiceManager_set_steal_mode(vme, STEAL_MODE_QUIETEST);
+var one_quiet = voice_manager_find_steal_target(vme);
+assert_eq(one_quiet, 3, "QUIETEST finds the single active voice at index 3");
+VoiceManager_set_steal_mode(vme, STEAL_MODE_LOWEST);
+var one_low = voice_manager_find_steal_target(vme);
+assert_eq(one_low, 3, "LOWEST finds the single active voice at index 3");
+
+# ================================================================
+# note_on's steal path only ever ran under OLDEST. Prove the non-default modes
+# are actually wired through, by stealing the voice the mode names.
+# ================================================================
+test_group("note_on steals through the selected mode");
+var vmq = voice_manager_new(3, POLY_MODE_POLY, STEAL_MODE_QUIETEST);
+var q0 = voice_manager_note_on(vmq, 60, C0_8);
+var q1 = voice_manager_note_on(vmq, 64, C0_7);
+var q2 = voice_manager_note_on(vmq, 67, C0_9);
+assert_eq(voice_manager_active_count(vmq), 3, "pool is full before the steal");
+# Make voice 1 the quietest; voice 0 would win under LOWEST, voice 2 under a
+# broken OLDEST fallthrough (all ages are 0, so max_by_key takes the last).
+Voice_set_amplitude(voice_manager_voice_mut(vmq, 0), C0_9);
+Voice_set_amplitude(voice_manager_voice_mut(vmq, 1), C0_1);
+Voice_set_amplitude(voice_manager_voice_mut(vmq, 2), C0_6);
+var q3 = voice_manager_note_on(vmq, 72, C0_5);
+assert_eq(q3, 1, "QUIETEST note_on steals voice 1");
+var vmqv = voice_manager_voices(vmq);
+assert_eq(Voice_note(vec_get(vmqv, 1)), 72, "the stolen voice now plays the new note");
+assert_eq(Voice_velocity(vec_get(vmqv, 1)), C0_5, "the stolen voice took the new velocity");
+assert_eq(Voice_age(vec_get(vmqv, 1)), 0, "the stolen voice's age was reset");
+assert_eq(Voice_note(vec_get(vmqv, 0)), 60, "the untouched voice 0 still plays 60");
+assert_eq(Voice_note(vec_get(vmqv, 2)), 67, "the untouched voice 2 still plays 67");
+assert_eq(voice_manager_active_count(vmq), 3, "stealing does not change the active count");
+
+var vml = voice_manager_new(3, POLY_MODE_POLY, STEAL_MODE_LOWEST);
+var l0 = voice_manager_note_on(vml, 72, C0_8);
+var l1 = voice_manager_note_on(vml, 48, C0_7);
+var l2 = voice_manager_note_on(vml, 64, C0_9);
+var l3 = voice_manager_note_on(vml, 80, C0_5);
+assert_eq(l3, 1, "LOWEST note_on steals voice 1 (note 48)");
+assert_eq(Voice_note(vec_get(voice_manager_voices(vml), 1)), 80, "the lowest voice now plays 80");
 
 var rc = assert_summary();
 syscall(60, rc);

@@ -86,5 +86,200 @@ while (i < 512) {
 }
 assert(any3, "two-oscillator voice produces output");
 
+
+# ================================================================
+# ---- 2.2.1 accessor/coverage gap: subtractive_{amp_env,amp_env_mut,
+# ---- filter_env_mut,clear_osc2,set_cutoff,set_frequency,
+# ---- set_filter_env_depth}.
+# ================================================================
+
+var C1_5   = 0x3FF8000000000000;   # 1.5
+var CNEG4  = 0xC010000000000000;   # -4.0
+
+# ================================================================
+# amp_env / amp_env_mut / filter_env_mut. Cyrius has no &/&mut split, so
+# amp_env and amp_env_mut must hand back the SAME Adsr pointer, and
+# filter_env_mut must hand back a DIFFERENT one (rust-old/src/synth/
+# subtractive.rs:177-192).
+# ================================================================
+test_group("amp_env / amp_env_mut / filter_env_mut identity");
+var ea = subtractive_new(WAVEFORM_SAW, f64_from(440), f64_from(2000), C0_707, f64_from(44100));
+var ea_ro = subtractive_amp_env(ea);
+var ea_mut = subtractive_amp_env_mut(ea);
+var ea_fenv = subtractive_filter_env_mut(ea);
+assert_eq(ea_ro, ea_mut, "amp_env and amp_env_mut alias one Adsr");
+assert_eq(ea_ro, SubtractiveSynth_amp_env(ea), "amp_env returns the struct's amp_env field");
+assert_eq(ea_fenv, SubtractiveSynth_filter_env(ea), "filter_env_mut returns the struct's filter_env field");
+assert_neq(ea_ro, ea_fenv, "amp env and filter env are distinct objects");
+assert_neq(ea_ro, 0, "amp_env is a live pointer, not null");
+assert_neq(ea_fenv, 0, "filter_env_mut is a live pointer, not null");
+# The two envelopes carry the oracle's distinct ADSR presets -- this is what
+# catches an accessor that returns the wrong envelope.
+# amp_env  = (0.01, 0.1, 0.7, 0.3); filter_env = (0.01, 0.2, 0.5, 0.5).
+assert_eq(Adsr_decay_time(ea_ro), SUB_C0_1, "amp env decay = 0.1 s");
+assert_eq(Adsr_sustain_level(ea_ro), SUB_C0_7, "amp env sustain = 0.7");
+assert_eq(Adsr_release_time(ea_ro), SUB_C0_3, "amp env release = 0.3 s");
+assert_eq(Adsr_decay_time(ea_fenv), SUB_C0_2, "filter env decay = 0.2 s");
+assert_eq(Adsr_sustain_level(ea_fenv), F64_HALF, "filter env sustain = 0.5");
+assert_eq(Adsr_release_time(ea_fenv), F64_HALF, "filter env release = 0.5 s");
+assert_eq(Adsr_attack_time(ea_ro), SUB_C0_01, "amp env attack = 0.01 s");
+
+test_group("amp_env_mut mutations are visible through amp_env");
+assert_eq(envelope_adsr_state(ea_ro), ENV_STATE_IDLE, "fresh voice: amp env idle");
+assert_eq(envelope_adsr_state(ea_fenv), ENV_STATE_IDLE, "fresh voice: filter env idle");
+subtractive_note_on(ea);
+assert_eq(envelope_adsr_state(ea_ro), ENV_STATE_ATTACK, "note_on drives the amp env to ATTACK");
+assert_eq(envelope_adsr_state(ea_fenv), ENV_STATE_ATTACK, "note_on drives the filter env to ATTACK");
+# Gate off through the _mut handle only; the read-only handle must see it,
+# the filter envelope must NOT.
+envelope_adsr_gate_off(subtractive_amp_env_mut(ea));
+assert_eq(envelope_adsr_state(ea_ro), ENV_STATE_RELEASE, "gate_off via amp_env_mut is seen by amp_env");
+assert_eq(envelope_adsr_state(ea_fenv), ENV_STATE_ATTACK, "the filter envelope was not touched");
+assert_eq(subtractive_is_active(ea), 1, "voice still active while the amp env releases");
+# Now gate the filter envelope off through its own accessor.
+envelope_adsr_gate_off(subtractive_filter_env_mut(ea));
+assert_eq(envelope_adsr_state(ea_fenv), ENV_STATE_RELEASE, "gate_off via filter_env_mut reaches the filter env");
+assert_eq(envelope_adsr_state(ea_ro), ENV_STATE_RELEASE, "amp env unchanged by the filter-env gate");
+
+# ================================================================
+# clear_osc2 -- must actually silence osc2, restoring the exact single-
+# oscillator signal path (rust-old/src/synth/subtractive.rs clear_osc2).
+# ================================================================
+test_group("clear_osc2 restores the single-oscillator signal path");
+var co_a = subtractive_new(WAVEFORM_SAW, f64_from(440), f64_from(3000), C0_707, f64_from(44100));
+var co_b = subtractive_new(WAVEFORM_SAW, f64_from(440), f64_from(3000), C0_707, f64_from(44100));
+var co_c = subtractive_new(WAVEFORM_SAW, f64_from(440), f64_from(3000), C0_707, f64_from(44100));
+assert_eq(subtractive_set_osc2(co_a, WAVEFORM_SQUARE, f64_from(441), F64_HALF), NAAD_ERR_NONE, "co_a keeps osc2");
+assert_eq(subtractive_set_osc2(co_b, WAVEFORM_SQUARE, f64_from(441), F64_HALF), NAAD_ERR_NONE, "co_b gets osc2...");
+assert_neq(SubtractiveSynth_osc2(co_b), 0, "...osc2 present before clearing");
+subtractive_clear_osc2(co_b);
+assert_eq(SubtractiveSynth_osc2(co_b), 0, "clear_osc2 nulls the osc2 slot");
+assert_eq(SubtractiveSynth_osc2(co_c), 0, "a voice that never set osc2 has a null slot");
+subtractive_note_on(co_a);
+subtractive_note_on(co_b);
+subtractive_note_on(co_c);
+var co_diff = 0;
+var co_same = 1;
+var co_nonzero = 0;
+i = 0;
+while (i < 512) {
+    var co_sa = subtractive_next_sample(co_a);
+    var co_sb = subtractive_next_sample(co_b);
+    var co_sc = subtractive_next_sample(co_c);
+    co_diff = f64_add(co_diff, f64_abs(f64_sub(co_sa, co_sb)));
+    if (co_sb != co_sc) { co_same = 0; }
+    if (co_sb != 0) { co_nonzero = 1; }
+    i = i + 1;
+}
+assert(co_nonzero, "the cleared voice still makes sound (the comparison is not 0 == 0)");
+assert(co_same, "after clear_osc2 the output is bit-identical to a voice that never had osc2");
+assert(f64_gt(co_diff, C0_01), "clear_osc2 measurably changed the output vs. keeping osc2");
+
+# ================================================================
+# set_frequency -- retunes osc1 AND osc2; osc2's failure is swallowed.
+# ================================================================
+test_group("set_frequency retunes both oscillators");
+var sf = subtractive_new(WAVEFORM_SAW, f64_from(440), f64_from(2000), C0_707, f64_from(44100));
+assert_eq(osc_frequency(SubtractiveSynth_osc1(sf)), f64_from(440), "constructor frequency on osc1");
+assert_eq(subtractive_set_osc2(sf, WAVEFORM_SQUARE, f64_from(441), F64_HALF), NAAD_ERR_NONE, "add osc2 at 441 Hz");
+assert_eq(osc_frequency(SubtractiveSynth_osc2(sf)), f64_from(441), "osc2 starts detuned at 441 Hz");
+assert_eq(subtractive_set_frequency(sf, f64_from(880)), NAAD_ERR_NONE, "set_frequency 880 ok");
+assert_eq(osc_frequency(SubtractiveSynth_osc1(sf)), f64_from(880), "osc1 retuned to 880 Hz");
+assert_eq(osc_frequency(SubtractiveSynth_osc2(sf)), f64_from(880), "osc2 retuned to 880 Hz (detune collapses)");
+# Invalid frequency: osc1 validation fails, both oscillators keep 880.
+assert_eq(subtractive_set_frequency(sf, f64_from(30000)), NAAD_ERR_INVALID_FREQUENCY, "above-Nyquist rejected");
+assert_eq(osc_frequency(SubtractiveSynth_osc1(sf)), f64_from(880), "osc1 unchanged after a rejected retune");
+assert_eq(osc_frequency(SubtractiveSynth_osc2(sf)), f64_from(880), "osc2 unchanged after a rejected retune");
+assert_eq(subtractive_set_frequency(sf, 0), NAAD_ERR_INVALID_FREQUENCY, "zero frequency rejected");
+assert_eq(osc_frequency(SubtractiveSynth_osc1(sf)), f64_from(880), "osc1 unchanged after a zero retune");
+# ...and with no osc2 the null slot is skipped rather than dereferenced.
+var sf1 = subtractive_new(WAVEFORM_SINE, f64_from(220), f64_from(2000), C0_707, f64_from(44100));
+assert_eq(subtractive_set_frequency(sf1, f64_from(330)), NAAD_ERR_NONE, "set_frequency with no osc2 ok");
+assert_eq(osc_frequency(SubtractiveSynth_osc1(sf1)), f64_from(330), "osc1-only retune lands");
+# Retuning is audible.
+var sf_lo = subtractive_new(WAVEFORM_SAW, f64_from(110), f64_from(4000), C0_707, f64_from(44100));
+var sf_hi = subtractive_new(WAVEFORM_SAW, f64_from(110), f64_from(4000), C0_707, f64_from(44100));
+assert_eq(subtractive_set_frequency(sf_hi, f64_from(1760)), NAAD_ERR_NONE, "retune the second voice to 1760 Hz");
+subtractive_note_on(sf_lo);
+subtractive_note_on(sf_hi);
+var sf_diff = 0;
+i = 0;
+while (i < 512) {
+    var sf_a = subtractive_next_sample(sf_lo);
+    var sf_b = subtractive_next_sample(sf_hi);
+    sf_diff = f64_add(sf_diff, f64_abs(f64_sub(sf_a, sf_b)));
+    i = i + 1;
+}
+assert(f64_gt(sf_diff, C0_01), "set_frequency changes the rendered waveform");
+
+# ================================================================
+# set_cutoff -- writes base_cutoff and reapplies it to the SVF, keeping Q.
+# ================================================================
+test_group("set_cutoff updates base_cutoff and the filter, preserving Q");
+var sc = subtractive_new(WAVEFORM_SAW, f64_from(440), f64_from(2000), C0_707, f64_from(44100));
+assert_eq(SubtractiveSynth_base_cutoff(sc), f64_from(2000), "constructor base_cutoff = 2000 Hz");
+assert_eq(filter_svf_frequency(SubtractiveSynth_filter(sc)), f64_from(2000), "filter starts at 2000 Hz");
+assert_eq(filter_svf_q(SubtractiveSynth_filter(sc)), C0_707, "filter Q = 0.707 from the constructor");
+assert_eq(subtractive_set_cutoff(sc, f64_from(1500)), NAAD_ERR_NONE, "set_cutoff 1500 ok");
+assert_eq(SubtractiveSynth_base_cutoff(sc), f64_from(1500), "base_cutoff now 1500 Hz");
+assert_eq(filter_svf_frequency(SubtractiveSynth_filter(sc)), f64_from(1500), "SVF retuned to 1500 Hz");
+assert_eq(filter_svf_q(SubtractiveSynth_filter(sc)), C0_707, "set_cutoff preserved Q");
+# Resonance floor: new() applies resonance.max(0.1), so 0.0 becomes 0.1 and
+# set_cutoff must carry that same Q through.
+var sc_lo = subtractive_new(WAVEFORM_SAW, f64_from(440), f64_from(2000), 0, f64_from(44100));
+assert_eq(filter_svf_q(SubtractiveSynth_filter(sc_lo)), SUB_C0_1, "resonance floored at 0.1");
+assert_eq(subtractive_set_cutoff(sc_lo, f64_from(900)), NAAD_ERR_NONE, "set_cutoff on the floored voice ok");
+assert_eq(filter_svf_q(SubtractiveSynth_filter(sc_lo)), SUB_C0_1, "floored Q survives set_cutoff");
+# Rejected cutoff: the oracle assigns base_cutoff BEFORE the fallible
+# set_params, so base_cutoff moves even when the filter refuses.
+assert_eq(subtractive_set_cutoff(sc, f64_from(30000)), NAAD_ERR_INVALID_FREQUENCY, "above-Nyquist cutoff rejected");
+assert_eq(SubtractiveSynth_base_cutoff(sc), f64_from(30000), "base_cutoff still assigned on the error path (oracle parity)");
+assert_eq(filter_svf_frequency(SubtractiveSynth_filter(sc)), f64_from(1500), "the SVF kept its last valid cutoff");
+
+# ================================================================
+# set_filter_env_depth -- octaves, clamped to [-4, +4]. Default is 2.0.
+# ================================================================
+test_group("set_filter_env_depth round-trip and clamp");
+var fd = subtractive_new(WAVEFORM_SAW, f64_from(440), f64_from(2000), C0_707, f64_from(44100));
+assert_eq(SubtractiveSynth_filter_env_depth(fd), F64_TWO, "constructor depth = 2.0 octaves");
+subtractive_set_filter_env_depth(fd, C1_5);
+assert_eq(SubtractiveSynth_filter_env_depth(fd), C1_5, "1.5 octaves round-trips");
+subtractive_set_filter_env_depth(fd, f64_neg(C1_5));
+assert_eq(SubtractiveSynth_filter_env_depth(fd), f64_neg(C1_5), "-1.5 octaves round-trips");
+subtractive_set_filter_env_depth(fd, f64_from(10));
+assert_eq(SubtractiveSynth_filter_env_depth(fd), f64_from(4), "+10 clamps to +4");
+subtractive_set_filter_env_depth(fd, f64_neg(f64_from(10)));
+assert_eq(SubtractiveSynth_filter_env_depth(fd), CNEG4, "-10 clamps to -4");
+subtractive_set_filter_env_depth(fd, f64_from(4));
+assert_eq(SubtractiveSynth_filter_env_depth(fd), f64_from(4), "+4 is in range, not clamped away");
+subtractive_set_filter_env_depth(fd, 0);
+assert_eq(SubtractiveSynth_filter_env_depth(fd), 0, "0 octaves round-trips");
+
+test_group("filter_env_depth actually modulates the cutoff");
+# depth 0 -> 2^0 = 1 -> the modulated cutoff never leaves base_cutoff, so
+# the 0.5 Hz recompute guard never fires and the SVF stays put.
+var fd0 = subtractive_new(WAVEFORM_SAW, f64_from(440), f64_from(2000), C0_707, f64_from(44100));
+subtractive_set_filter_env_depth(fd0, 0);
+subtractive_note_on(fd0);
+i = 0;
+while (i < 200) { var fd0_s = subtractive_next_sample(fd0); i = i + 1; }
+assert_eq(filter_svf_frequency(SubtractiveSynth_filter(fd0)), f64_from(2000), "depth 0 leaves the SVF cutoff at base");
+assert_eq(SubtractiveSynth_prev_modulated_cutoff(fd0), f64_from(2000), "depth 0 leaves prev_modulated_cutoff at base");
+# depth +2 -> a rising filter envelope pushes the cutoff above base.
+var fdp = subtractive_new(WAVEFORM_SAW, f64_from(440), f64_from(2000), C0_707, f64_from(44100));
+subtractive_note_on(fdp);
+i = 0;
+while (i < 200) { var fdp_s = subtractive_next_sample(fdp); i = i + 1; }
+assert(f64_gt(filter_svf_frequency(SubtractiveSynth_filter(fdp)), f64_from(2000)), "depth +2 raises the cutoff above base");
+assert(f64_le(filter_svf_frequency(SubtractiveSynth_filter(fdp)), f64_from(8000)), "depth +2 cannot exceed base * 2^2");
+# depth -2 -> the same envelope pulls the cutoff below base.
+var fdm = subtractive_new(WAVEFORM_SAW, f64_from(440), f64_from(2000), C0_707, f64_from(44100));
+subtractive_set_filter_env_depth(fdm, f64_neg(F64_TWO));
+subtractive_note_on(fdm);
+i = 0;
+while (i < 200) { var fdm_s = subtractive_next_sample(fdm); i = i + 1; }
+assert(f64_lt(filter_svf_frequency(SubtractiveSynth_filter(fdm)), f64_from(2000)), "depth -2 drops the cutoff below base");
+assert(f64_ge(filter_svf_frequency(SubtractiveSynth_filter(fdm)), f64_from(500)), "depth -2 cannot fall below base / 2^2");
+
 var rc = assert_summary();
 syscall(60, rc);

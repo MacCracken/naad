@@ -16,6 +16,13 @@ include "src/osc_sub.cyr"
 include "src/osc_sync.cyr"
 include "src/modulation.cyr"
 
+# |a - b| < tol  ->  1. Used instead of f64_to comparisons, which truncate
+# toward zero and would hold for every value in (-1, 1).
+fn mod_approx(a, b, tol) {
+    if (f64_lt(f64_abs(f64_sub(a, b)), tol) == 1) { return 1; }
+    return 0;
+}
+
 alloc_init();
 
 var C0_01 = 0x3F847AE147AE147B;   # 0.01
@@ -122,6 +129,433 @@ assert(naad_is_finite(modulation_ring_process_sample(ring, F64_ONE)), "ring outp
 test_group("modulation source trait");
 var lfo_t = modulation_lfo_new(MODULATION_LFO_SINE, f64_from(5), f64_from(44100));
 assert(naad_is_finite(modulation_lfo_next_modulation_value(lfo_t)), "trait value finite");
+
+# ================================================================
+# 2.2.1 accessor/coverage pass. Everything below asserts an EXACT value
+# (raw f64 bit patterns via assert_eq, or an explicit tolerance) --
+# never a f64_to comparison, which truncates toward zero.
+# ================================================================
+
+var MT_0_25    = 0x3FD0000000000000;   # 0.25
+var MT_0_75    = 0x3FE8000000000000;   # 0.75
+var MT_0_125   = 0x3FC0000000000000;   # 0.125
+var MT_0_875   = 0x3FEC000000000000;   # 0.875
+var MT_0_9     = 0x3FECCCCCCCCCCCCD;   # 0.9
+var MT_NEG_0_5 = 0xBFE0000000000000;   # -0.5
+var MT_NEG_1   = 0xBFF0000000000000;   # -1.0
+var MT_TOL15   = 0x3CD203AF9EE75616;   # 1e-15
+var MT_TOL12   = 0x3D719799812DEA11;   # 1e-12
+var MT_NAN     = 0x7FF8000000000000;   # NaN (quiet)
+# sin(TAU * 440/44100) = 0.06264832417874368 -- the unmodulated second FM sample
+var MT_SIN_440 = 0x3FB009B8777F3581;
+# The oracle's initial sample-and-hold value: rng = 42; three xorshift steps
+# -> 11355432; (11355432 / u32::MAX) * 2 - 1 = -0.9947122149157134.
+# rust-old/src/modulation.rs:86-89.
+var MT_SH_INIT = 0xBFEFD4AEB5FFD4AF;
+var MT_SEVEN   = 0x401C000000000000;   # 7.0 (process_buffer overrun canary)
+
+var SR44100 = f64_from(44100);
+var HZ5     = f64_from(5);
+
+# ================================================================
+# lfo: raw_sample shape dispatch. raw_sample is the PRE-depth, PRE-mode
+# value, so each shape's characteristic waveform is asserted directly at
+# known phases -- the piecewise expressions in
+# rust-old/src/modulation.rs:154-172. This is the only place the six-way
+# shape dispatch is actually exercised; next_value() alone cannot tell a
+# saw-up from a saw-down through a range check.
+# ================================================================
+test_group("lfo: raw_sample sine");
+var lfo_rs = modulation_lfo_new(MODULATION_LFO_SINE, HZ5, SR44100);
+Lfo_set_phase(lfo_rs, 0);
+var rsv = modulation_lfo_raw_sample(lfo_rs);
+assert_eq(rsv, 0, "sine raw_sample at phase 0 is exactly +0.0");
+Lfo_set_phase(lfo_rs, MT_0_25);
+rsv = modulation_lfo_raw_sample(lfo_rs);
+assert_eq(rsv, F64_ONE, "sine raw_sample at phase 0.25 is +1.0");
+assert_eq(Lfo_phase(lfo_rs), MT_0_25, "raw_sample does not advance the phase");
+Lfo_set_phase(lfo_rs, F64_HALF);
+rsv = modulation_lfo_raw_sample(lfo_rs);
+# sin(pi) is 1.2246e-16, not a hard zero -- the one value here that needs a
+# tolerance rather than a bit comparison.
+assert(mod_approx(rsv, 0, MT_TOL15), "sine raw_sample at phase 0.5 is 0.0 within 1e-15");
+Lfo_set_phase(lfo_rs, MT_0_75);
+rsv = modulation_lfo_raw_sample(lfo_rs);
+assert_eq(rsv, MT_NEG_1, "sine raw_sample at phase 0.75 is -1.0");
+
+test_group("lfo: raw_sample triangle");
+var lfo_tri = modulation_lfo_new(MODULATION_LFO_TRIANGLE, HZ5, SR44100);
+Lfo_set_phase(lfo_tri, 0);
+var trv = modulation_lfo_raw_sample(lfo_tri);
+assert_eq(trv, 0, "triangle at phase 0 is +0.0");
+Lfo_set_phase(lfo_tri, MT_0_125);
+trv = modulation_lfo_raw_sample(lfo_tri);
+assert_eq(trv, F64_HALF, "triangle at phase 0.125 is 4t = 0.5");
+Lfo_set_phase(lfo_tri, MT_0_25);
+trv = modulation_lfo_raw_sample(lfo_tri);
+assert_eq(trv, F64_ONE, "triangle at phase 0.25 is the upper knee 2-4t = 1.0");
+Lfo_set_phase(lfo_tri, F64_HALF);
+trv = modulation_lfo_raw_sample(lfo_tri);
+assert_eq(trv, 0, "triangle at phase 0.5 is 2-4t = +0.0");
+Lfo_set_phase(lfo_tri, MT_0_75);
+trv = modulation_lfo_raw_sample(lfo_tri);
+assert_eq(trv, MT_NEG_1, "triangle at phase 0.75 is 4t-4 = -1.0");
+Lfo_set_phase(lfo_tri, MT_0_875);
+trv = modulation_lfo_raw_sample(lfo_tri);
+assert_eq(trv, MT_NEG_0_5, "triangle at phase 0.875 is 4t-4 = -0.5");
+
+test_group("lfo: raw_sample square");
+var lfo_sq = modulation_lfo_new(MODULATION_LFO_SQUARE, HZ5, SR44100);
+Lfo_set_phase(lfo_sq, 0);
+var sqv = modulation_lfo_raw_sample(lfo_sq);
+assert_eq(sqv, F64_ONE, "square at phase 0 is +1.0");
+Lfo_set_phase(lfo_sq, MT_0_25);
+sqv = modulation_lfo_raw_sample(lfo_sq);
+assert_eq(sqv, F64_ONE, "square at phase 0.25 is +1.0");
+Lfo_set_phase(lfo_sq, F64_HALF);
+sqv = modulation_lfo_raw_sample(lfo_sq);
+assert_eq(sqv, MT_NEG_1, "square flips to -1.0 exactly at phase 0.5");
+Lfo_set_phase(lfo_sq, MT_0_9);
+sqv = modulation_lfo_raw_sample(lfo_sq);
+assert_eq(sqv, MT_NEG_1, "square at phase 0.9 is -1.0");
+
+test_group("lfo: raw_sample saw up/down");
+var lfo_su = modulation_lfo_new(MODULATION_LFO_SAW_UP, HZ5, SR44100);
+Lfo_set_phase(lfo_su, 0);
+var suv = modulation_lfo_raw_sample(lfo_su);
+assert_eq(suv, MT_NEG_1, "saw-up starts at -1.0");
+Lfo_set_phase(lfo_su, MT_0_25);
+suv = modulation_lfo_raw_sample(lfo_su);
+assert_eq(suv, MT_NEG_0_5, "saw-up at phase 0.25 is -0.5");
+Lfo_set_phase(lfo_su, F64_HALF);
+suv = modulation_lfo_raw_sample(lfo_su);
+assert_eq(suv, 0, "saw-up crosses +0.0 at phase 0.5");
+Lfo_set_phase(lfo_su, MT_0_75);
+suv = modulation_lfo_raw_sample(lfo_su);
+assert_eq(suv, F64_HALF, "saw-up at phase 0.75 is +0.5");
+
+var lfo_sd = modulation_lfo_new(MODULATION_LFO_SAW_DOWN, HZ5, SR44100);
+Lfo_set_phase(lfo_sd, 0);
+var sdv = modulation_lfo_raw_sample(lfo_sd);
+assert_eq(sdv, F64_ONE, "saw-down starts at +1.0 (opposite of saw-up)");
+Lfo_set_phase(lfo_sd, MT_0_25);
+sdv = modulation_lfo_raw_sample(lfo_sd);
+assert_eq(sdv, F64_HALF, "saw-down at phase 0.25 is +0.5");
+Lfo_set_phase(lfo_sd, F64_HALF);
+sdv = modulation_lfo_raw_sample(lfo_sd);
+assert_eq(sdv, 0, "saw-down crosses +0.0 at phase 0.5");
+Lfo_set_phase(lfo_sd, MT_0_75);
+sdv = modulation_lfo_raw_sample(lfo_sd);
+assert_eq(sdv, MT_NEG_0_5, "saw-down at phase 0.75 is -0.5");
+
+test_group("lfo: raw_sample sample-and-hold");
+var lfo_sh = modulation_lfo_new(MODULATION_LFO_SAMPLE_AND_HOLD, HZ5, SR44100);
+Lfo_set_phase(lfo_sh, 0);
+var shv = modulation_lfo_raw_sample(lfo_sh);
+assert_eq(shv, MT_SH_INIT,
+  "S&H raw_sample is the seed-42 first xorshift step (-0.9947122149157134)");
+assert_eq(shv, Lfo_sh_value(lfo_sh), "S&H raw_sample returns sh_value verbatim");
+Lfo_set_phase(lfo_sh, MT_0_9);
+var shv2 = modulation_lfo_raw_sample(lfo_sh);
+assert_eq(shv2, shv, "S&H raw_sample is held -- independent of phase");
+# The held value only changes on a cycle wrap. freq == sample_rate -> dt == 1,
+# so a single next_value() wraps and re-rolls.
+modulation_lfo_set_frequency(lfo_sh, SR44100);
+Lfo_set_phase(lfo_sh, MT_0_9);
+var shn = modulation_lfo_next_value(lfo_sh);
+assert_eq(shn, shv, "next_value returns the PRE-wrap held value");
+var shv3 = modulation_lfo_raw_sample(lfo_sh);
+assert_neq(shv3, shv, "the cycle wrap re-rolled the held value");
+
+# ================================================================
+# lfo: shape / mode accessors. Constructor value first, then the exact
+# round-trip through the setter with a NON-default value.
+# ================================================================
+test_group("lfo: shape and mode accessors");
+var lfo_sm = modulation_lfo_new(MODULATION_LFO_TRIANGLE, HZ5, SR44100);
+assert_eq(modulation_lfo_shape(lfo_sm), MODULATION_LFO_TRIANGLE,
+  "shape() returns the constructed shape, not the default");
+assert_eq(modulation_lfo_mode(lfo_sm), MODULATION_LFO_BIPOLAR,
+  "mode() defaults to bipolar (rust-old/src/modulation.rs:99)");
+assert_eq(modulation_lfo_set_shape(lfo_sm, MODULATION_LFO_SAW_DOWN), 0,
+  "set_shape accepts a valid shape");
+assert_eq(modulation_lfo_shape(lfo_sm), MODULATION_LFO_SAW_DOWN,
+  "shape() round-trips set_shape");
+assert_eq(modulation_lfo_set_shape(lfo_sm, 6), NAAD_ERR_INVALID_PARAMETER,
+  "set_shape rejects shape id 6 (past SampleAndHold)");
+assert_eq(modulation_lfo_set_shape(lfo_sm, 0 - 1), NAAD_ERR_INVALID_PARAMETER,
+  "set_shape rejects a negative shape id");
+assert_eq(modulation_lfo_shape(lfo_sm), MODULATION_LFO_SAW_DOWN,
+  "a rejected set_shape leaves shape() untouched");
+
+assert_eq(modulation_lfo_set_mode(lfo_sm, MODULATION_LFO_UNIPOLAR), 0, "set_mode returns 0");
+assert_eq(modulation_lfo_mode(lfo_sm), MODULATION_LFO_UNIPOLAR, "mode() round-trips set_mode");
+# Behavioural proof the mode is actually consulted: saw-down at phase 0.75 is
+# raw -0.5; unipolar maps it to (-0.5 + 1) * 0.5 = 0.25 exactly.
+Lfo_set_phase(lfo_sm, MT_0_75);
+var uniq = modulation_lfo_next_value(lfo_sm);
+assert_eq(uniq, MT_0_25, "unipolar folds raw -0.5 to +0.25");
+# set_mode is deliberately NOT range-checked (src/modulation.cyr:206-215):
+# an unknown mode is stored verbatim and falls through to the bipolar branch.
+assert_eq(modulation_lfo_set_mode(lfo_sm, 99), 0, "set_mode accepts an unknown mode id");
+assert_eq(modulation_lfo_mode(lfo_sm), 99, "mode() reports the unknown mode verbatim");
+Lfo_set_phase(lfo_sm, MT_0_75);
+var bipq = modulation_lfo_next_value(lfo_sm);
+assert_eq(bipq, MT_NEG_0_5, "an unknown mode falls through to the bipolar branch");
+assert_eq(modulation_lfo_mode(lfo_sm), 99, "next_value does not sanitise the stored mode");
+
+# ================================================================
+# lfo: set_frequency. Uses sample_rate 4 so dt is an exact 0.25 and the
+# saw-up ramp can be asserted step for step -- proving the new frequency
+# reaches the phase accumulator, not just the field.
+# ================================================================
+test_group("lfo: set_frequency");
+var lfo_f = modulation_lfo_new(MODULATION_LFO_SAW_UP, F64_ONE, f64_from(4));
+assert_eq(Lfo_frequency(lfo_f), F64_ONE, "constructor stores the frequency");
+var q1 = modulation_lfo_next_value(lfo_f);
+var q2 = modulation_lfo_next_value(lfo_f);
+var q3 = modulation_lfo_next_value(lfo_f);
+var q4 = modulation_lfo_next_value(lfo_f);
+var q5 = modulation_lfo_next_value(lfo_f);
+assert_eq(q1, MT_NEG_1, "1 Hz at sr 4: step 1 is -1.0");
+assert_eq(q2, MT_NEG_0_5, "1 Hz at sr 4: step 2 is -0.5");
+assert_eq(q3, 0, "1 Hz at sr 4: step 3 is +0.0");
+assert_eq(q4, F64_HALF, "1 Hz at sr 4: step 4 is +0.5");
+assert_eq(q5, MT_NEG_1, "1 Hz at sr 4: step 5 wrapped back to -1.0");
+
+assert_eq(modulation_lfo_set_frequency(lfo_f, F64_TWO), NAAD_ERR_NONE,
+  "set_frequency accepts 2.0");
+assert_eq(Lfo_frequency(lfo_f), F64_TWO, "set_frequency round-trips exactly");
+Lfo_set_phase(lfo_f, 0);
+var d1 = modulation_lfo_next_value(lfo_f);
+var d2 = modulation_lfo_next_value(lfo_f);
+var d3 = modulation_lfo_next_value(lfo_f);
+assert_eq(d1, MT_NEG_1, "2 Hz at sr 4: step 1 is -1.0");
+assert_eq(d2, 0, "2 Hz at sr 4: dt doubled to 0.5, so step 2 is +0.0");
+assert_eq(d3, MT_NEG_1, "2 Hz at sr 4: step 3 wrapped back to -1.0");
+
+assert_eq(modulation_lfo_set_frequency(lfo_f, MT_NEG_1), NAAD_ERR_INVALID_PARAMETER,
+  "set_frequency rejects a negative frequency");
+assert_eq(Lfo_frequency(lfo_f), F64_TWO,
+  "a rejected negative frequency leaves the field untouched");
+assert_eq(modulation_lfo_set_frequency(lfo_f, NAAD_POS_INF), NAAD_ERR_INVALID_PARAMETER,
+  "set_frequency rejects +inf");
+assert_eq(modulation_lfo_set_frequency(lfo_f, MT_NAN), NAAD_ERR_INVALID_PARAMETER,
+  "set_frequency rejects NaN");
+assert_eq(Lfo_frequency(lfo_f), F64_TWO,
+  "a rejected non-finite frequency leaves the field untouched");
+# 0.0 is accepted -- the oracle's predicate is `freq < 0.0`, not `<= 0.0`
+# (rust-old/src/modulation.rs:180) -- and freezes the phase.
+assert_eq(modulation_lfo_set_frequency(lfo_f, 0), NAAD_ERR_NONE, "set_frequency accepts 0.0");
+assert_eq(Lfo_frequency(lfo_f), 0, "0.0 frequency is stored");
+Lfo_set_phase(lfo_f, MT_0_75);
+var z1 = modulation_lfo_next_value(lfo_f);
+var z2 = modulation_lfo_next_value(lfo_f);
+assert_eq(z1, F64_HALF, "saw-up at the frozen phase 0.75 is +0.5");
+assert_eq(z2, z1, "a 0.0 frequency freezes the phase");
+assert_eq(Lfo_phase(lfo_f), MT_0_75, "phase is literally unchanged at 0 Hz");
+
+# ================================================================
+# lfo: from_waveform. Asserts the full mapping table from
+# rust-old/src/modulation.rs:111-117, including the `_ => Sine` arm.
+# ================================================================
+test_group("lfo: from_waveform mapping");
+var w_sine = modulation_lfo_from_waveform(WAVEFORM_SINE, HZ5, SR44100);
+var w_tri  = modulation_lfo_from_waveform(WAVEFORM_TRIANGLE, HZ5, SR44100);
+var w_sq   = modulation_lfo_from_waveform(WAVEFORM_SQUARE, HZ5, SR44100);
+var w_saw  = modulation_lfo_from_waveform(WAVEFORM_SAW, HZ5, SR44100);
+var w_pul  = modulation_lfo_from_waveform(WAVEFORM_PULSE, HZ5, SR44100);
+var w_wn   = modulation_lfo_from_waveform(WAVEFORM_WHITE_NOISE, HZ5, SR44100);
+assert_eq(modulation_lfo_shape(w_sine), MODULATION_LFO_SINE, "Sine -> LfoShape::Sine");
+assert_eq(modulation_lfo_shape(w_tri), MODULATION_LFO_TRIANGLE, "Triangle -> LfoShape::Triangle");
+assert_eq(modulation_lfo_shape(w_sq), MODULATION_LFO_SQUARE, "Square -> LfoShape::Square");
+assert_eq(modulation_lfo_shape(w_saw), MODULATION_LFO_SAW_DOWN, "Saw -> LfoShape::SawDown");
+assert_eq(modulation_lfo_shape(w_pul), MODULATION_LFO_SINE, "Pulse falls through to Sine");
+assert_eq(modulation_lfo_shape(w_wn), MODULATION_LFO_SINE, "WhiteNoise falls through to Sine");
+# Saw really maps to SawDOWN, not SawUp: raw_sample at phase 0 is +1.0.
+Lfo_set_phase(w_saw, 0);
+var sawv = modulation_lfo_raw_sample(w_saw);
+assert_eq(sawv, F64_ONE, "the Saw mapping is descending (+1.0 at phase 0, not -1.0)");
+# The remaining constructor state is carried through unchanged.
+assert_eq(Lfo_frequency(w_tri), HZ5, "from_waveform carries the frequency");
+assert_eq(Lfo_sample_rate(w_tri), SR44100, "from_waveform carries the sample rate");
+assert_eq(Lfo_phase(w_tri), 0, "from_waveform starts at phase 0");
+assert_eq(Lfo_depth(w_tri), F64_ONE, "from_waveform starts at depth 1.0");
+assert_eq(modulation_lfo_mode(w_tri), MODULATION_LFO_BIPOLAR, "from_waveform starts bipolar");
+# Errors from Lfo::new propagate through unchanged.
+var w_badsr = modulation_lfo_from_waveform(WAVEFORM_SINE, HZ5, 0);
+assert_eq(w_badsr, NAAD_ERR_INVALID_SAMPLE_RATE, "from_waveform propagates a bad sample rate");
+var w_badf = modulation_lfo_from_waveform(WAVEFORM_SINE, MT_NEG_1, SR44100);
+assert_eq(w_badf, NAAD_ERR_INVALID_PARAMETER, "from_waveform propagates a bad frequency");
+
+# ================================================================
+# fm: carrier() / modulator() accessors.
+# ================================================================
+test_group("fm: carrier and modulator accessors");
+var fm_a = modulation_fm_new(f64_from(440), f64_from(220), F64_TWO, SR44100);
+var fm_car = modulation_fm_carrier(fm_a);
+var fm_mod = modulation_fm_modulator(fm_a);
+assert_neq(fm_car, fm_mod, "carrier and modulator are distinct oscillators");
+assert_eq(osc_frequency(fm_car), f64_from(440), "carrier() carries the carrier frequency");
+assert_eq(osc_frequency(fm_mod), f64_from(220), "modulator() carries the modulator frequency");
+assert_eq(osc_waveform(fm_car), WAVEFORM_SINE, "carrier is a sine oscillator");
+assert_eq(osc_waveform(fm_mod), WAVEFORM_SINE, "modulator is a sine oscillator");
+assert_eq(osc_sample_rate(fm_car), SR44100, "carrier() carries the sample rate");
+assert_eq(osc_sample_rate(fm_mod), SR44100, "modulator() carries the sample rate");
+assert_eq(osc_phase(fm_car), 0, "a fresh carrier is at phase 0");
+assert_eq(FmModulator_mod_index(fm_a), F64_TWO, "the mod index is stored");
+assert_eq(FmModulator_carrier_base_freq(fm_a), f64_from(440), "the carrier base frequency is stored");
+# The accessors hand back the LIVE inner oscillators (Rust returns &Oscillator),
+# so one FM sample must be visible through them.
+var fm_s1 = modulation_fm_next_sample(fm_a);
+assert_eq(osc_phase(fm_car), f64_div(f64_from(440), SR44100),
+  "carrier() is a live reference -- its phase advanced by 440/44100");
+assert_eq(osc_phase(fm_mod), f64_div(f64_from(220), SR44100),
+  "modulator() is a live reference -- its phase advanced by 220/44100");
+
+# ================================================================
+# fm: next_sample. Exact values, not just finiteness.
+# ================================================================
+test_group("fm: next_sample values");
+var fm_b = modulation_fm_new(f64_from(440), f64_from(220), F64_TWO, SR44100);
+var b1 = modulation_fm_next_sample(fm_b);
+assert_eq(b1, 0, "the first FM sample is exactly +0.0 (carrier phase 0)");
+# The modulator's first output is sin(0) == 0, so the deviation is 0 and the
+# second sample is an unmodulated sin(TAU * 440/44100).
+var b2 = modulation_fm_next_sample(fm_b);
+assert_eq(b2, MT_SIN_440, "the second FM sample is sin(TAU*440/44100)");
+assert_neq(b2, 0, "the second FM sample is not stuck at zero");
+
+# mod_index 0 must degenerate to a plain sine oscillator, bit for bit: the
+# deviation term vanishes and advance_phase_sine reduces to the Sine arm of
+# osc_next_sample. A single wrong operand anywhere in the FM chain breaks this.
+var fm_z = modulation_fm_new(f64_from(440), f64_from(220), 0, SR44100);
+var fm_ref = osc_new(WAVEFORM_SINE, f64_from(440), SR44100);
+var z_ok = 1;
+var z_nonzero = 0;
+var zi = 0;
+while (zi < 512) {
+    var zf = modulation_fm_next_sample(fm_z);
+    var zo = osc_next_sample(fm_ref);
+    if (zf != zo) { z_ok = 0; }
+    if (zf != 0) { z_nonzero = z_nonzero + 1; }
+    zi = zi + 1;
+}
+assert(z_ok, "mod_index 0 reproduces a plain sine oscillator bit for bit");
+assert_gt(z_nonzero, 500, "the mod_index-0 comparison ran on real (nonzero) output");
+
+# ================================================================
+# fm: the instantaneous-frequency clamp to [0.1, nyquist-1]. Driven hard
+# enough that BOTH ends fire; the phase delta is the observable.
+# ================================================================
+test_group("fm: instantaneous frequency clamp");
+var fm_c = modulation_fm_new(f64_from(100), f64_from(1000), f64_from(1000), f64_from(48000));
+var c_car = modulation_fm_carrier(fm_c);
+var dt_hi = f64_div(f64_sub(f64_div(f64_from(48000), F64_TWO), F64_ONE), f64_from(48000));
+var dt_lo = f64_div(MODULATION_C0_1, f64_from(48000));
+var hi_hits = 0;
+var lo_hits = 0;
+var c_ok = 1;
+var ci = 0;
+while (ci < 4000) {
+    var p0 = osc_phase(c_car);
+    var cs = modulation_fm_next_sample(fm_c);
+    var p1 = osc_phase(c_car);
+    var pd = f64_sub(p1, p0);
+    if (f64_lt(pd, 0) == 1) { pd = f64_add(pd, F64_ONE); }
+    if (mod_approx(pd, dt_hi, MT_TOL12) == 1) { hi_hits = hi_hits + 1; }
+    if (mod_approx(pd, dt_lo, MT_TOL12) == 1) { lo_hits = lo_hits + 1; }
+    if (f64_lt(pd, f64_sub(dt_lo, MT_TOL12)) == 1) { c_ok = 0; }
+    if (f64_gt(pd, f64_add(dt_hi, MT_TOL12)) == 1) { c_ok = 0; }
+    if (naad_is_finite(cs) == 0) { c_ok = 0; }
+    if (f64_gt(f64_abs(cs), F64_ONE) == 1) { c_ok = 0; }
+    ci = ci + 1;
+}
+assert(c_ok, "every FM phase step stays inside [0.1, nyquist-1] / sample_rate");
+assert_gt(hi_hits, 0, "the upper (nyquist-1) frequency clamp actually fires");
+assert_gt(lo_hits, 0, "the lower (0.1 Hz) frequency clamp actually fires");
+
+# ================================================================
+# ring: modulator() accessor.
+# ================================================================
+test_group("ring: modulator accessor");
+var rg = modulation_ring_new(WAVEFORM_SQUARE, f64_from(300), SR44100);
+var rmod = modulation_ring_modulator(rg);
+assert_eq(osc_waveform(rmod), WAVEFORM_SQUARE, "modulator() carries the requested waveform");
+assert_eq(osc_frequency(rmod), f64_from(300), "modulator() carries the modulator frequency");
+assert_eq(osc_sample_rate(rmod), SR44100, "modulator() carries the sample rate");
+assert_eq(osc_phase(rmod), 0, "a fresh modulator is at phase 0");
+var rs1 = modulation_ring_process_sample(rg, F64_ONE);
+assert_eq(osc_phase(rmod), f64_div(f64_from(300), SR44100),
+  "modulator() is a live reference -- process_sample advanced its phase");
+# ring_new has no validation of its own -- it propagates whatever osc_new
+# returns, and osc_new checks the sample rate BEFORE the frequency.
+var rg_bad_sr = modulation_ring_new(WAVEFORM_SINE, f64_from(300), 0);
+assert_eq(rg_bad_sr, NAAD_ERR_INVALID_SAMPLE_RATE, "ring_new propagates a bad sample rate");
+var rg_bad_f = modulation_ring_new(WAVEFORM_SINE, f64_from(30000), SR44100);
+assert_eq(rg_bad_f, NAAD_ERR_INVALID_FREQUENCY, "ring_new propagates an above-nyquist frequency");
+
+# ================================================================
+# ring: process_buffer. Must (a) equal the per-sample form slot for slot,
+# (b) write every slot in place, (c) leave the length alone, (d) not
+# touch memory outside its own vec, and (e) consume exactly len
+# modulator samples for len 0 and len 1.
+# ================================================================
+test_group("ring: process_buffer");
+var PB_LEN = 257;
+var pb_a = modulation_ring_new(WAVEFORM_SINE, f64_from(4410), SR44100);
+var pb_b = modulation_ring_new(WAVEFORM_SINE, f64_from(4410), SR44100);
+var pb_in = vec_new();
+var pb_buf = vec_new();
+var pb_guard = vec_new();
+var pi = 0;
+while (pi < PB_LEN) {
+    var pv = f64_add(F64_HALF, f64_from(pi));    # 0.5, 1.5, 2.5, ...
+    vec_push(pb_in, pv);
+    vec_push(pb_buf, pv);
+    pi = pi + 1;
+}
+var gi = 0;
+while (gi < 8) { vec_push(pb_guard, MT_SEVEN); gi = gi + 1; }
+
+assert_eq(modulation_ring_process_buffer(pb_a, pb_buf), 0, "process_buffer returns 0");
+assert_eq(vec_len(pb_buf), PB_LEN, "process_buffer leaves the vec length alone");
+
+var pb_ok = 1;
+var pb_written = 0;
+pi = 0;
+while (pi < PB_LEN) {
+    var want = modulation_ring_process_sample(pb_b, vec_get(pb_in, pi));
+    if (vec_get(pb_buf, pi) != want) { pb_ok = 0; }
+    if (vec_get(pb_buf, pi) != vec_get(pb_in, pi)) { pb_written = pb_written + 1; }
+    pi = pi + 1;
+}
+assert(pb_ok, "process_buffer matches process_sample slot for slot");
+assert_eq(pb_written, PB_LEN, "process_buffer overwrote every slot in place");
+
+var pg_ok = 1;
+gi = 0;
+while (gi < 8) {
+    if (vec_get(pb_guard, gi) != MT_SEVEN) { pg_ok = 0; }
+    gi = gi + 1;
+}
+assert(pg_ok, "process_buffer wrote nothing outside its own vec");
+assert_eq(vec_len(pb_guard), 8, "the guard vec length is untouched");
+
+var pb_e = modulation_ring_new(WAVEFORM_SINE, f64_from(4410), SR44100);
+var pb_emod = modulation_ring_modulator(pb_e);
+var pb_empty = vec_new();
+assert_eq(modulation_ring_process_buffer(pb_e, pb_empty), 0, "process_buffer on an empty vec returns 0");
+assert_eq(vec_len(pb_empty), 0, "an empty vec stays empty");
+assert_eq(osc_phase(pb_emod), 0, "an empty buffer consumes no modulator samples");
+
+var pb_one = vec_new();
+vec_push(pb_one, F64_TWO);
+modulation_ring_process_buffer(pb_e, pb_one);
+assert_eq(vec_get(pb_one, 0), 0, "2.0 * sin(0) = +0.0 in a 1-slot buffer");
+assert_eq(vec_len(pb_one), 1, "a 1-slot buffer keeps its length");
+assert_eq(osc_phase(pb_emod), f64_div(f64_from(4410), SR44100),
+  "a 1-slot buffer consumes exactly one modulator sample");
 
 var rc = assert_summary();
 syscall(60, rc);

@@ -39,6 +39,15 @@ fn make_room(length, material) {
 
 fn live_room() { return make_room(f64_from(8), "concrete"); }
 
+# --- distinct field values for the struct-literal round-trips (IEEE-754) ---
+var AN_C50  = 0x4029000000000000;   # 12.5   (dB)
+var AN_C80  = 0xc01d000000000000;   # -7.25  (dB)
+var AN_D50  = 0x3fec000000000000;   # 0.875
+var AN_STI  = 0x3fdae147ae147ae1;   # 0.42
+var AN_RT60 = 0x400e000000000000;   # 3.75   (seconds)
+var AN_SENS = 0xc00c000000000000;   # -3.5   (s per unit absorption)
+var AN_ABS  = 0x3fe3333333333333;   # 0.6
+
 alloc_init();
 
 # ================================================================
@@ -121,6 +130,84 @@ assert_eq(naad_is_err(naad_analysis_analyze_impulse_response(tn_ir, 0 - 48000)),
 # Raw f64 bits, not f64_to: +0.0 is the bit pattern 0. Comparing through
 # f64_to would truncate and hold for the whole open interval (-1.0, 1.0).
 assert_eq(naad_analysis_estimate_rt60(synthetic_ir(48000, F64_TWO, f64_from(3)), 0 - 48000), 0, "negative rate RT60 = +0.0");
+
+# ================================================================
+# naad_analysis_room_metrics_new is the RoomMetrics struct literal. The only
+# meaningful assertion is the exact field round-trip, so give all five fields
+# DISTINCT, non-zero, differently-signed values: any field crossed with
+# another, or a dropped store, changes at least one readback. Bits are
+# compared raw (a Cyrius f64 is an i64 pattern) -- f64_to would truncate every
+# one of these toward zero and pass on almost any wrong answer.
+# ================================================================
+test_group("room_metrics_new_field_roundtrip");
+var rm = naad_analysis_room_metrics_new(AN_C50, AN_C80, AN_D50, AN_STI, AN_RT60);
+assert_eq(RoomMetrics_c50(rm), AN_C50, "c50 stored exactly (12.5 dB)");
+assert_eq(RoomMetrics_c80(rm), AN_C80, "c80 stored exactly (-7.25 dB)");
+assert_eq(RoomMetrics_d50(rm), AN_D50, "d50 stored exactly (0.875)");
+assert_eq(RoomMetrics_sti(rm), AN_STI, "sti stored exactly (0.42)");
+assert_eq(RoomMetrics_rt60(rm), AN_RT60, "rt60 stored exactly (3.75 s)");
+# No two fields alias each other.
+assert_neq(RoomMetrics_c50(rm), RoomMetrics_c80(rm), "c50 and c80 are distinct slots");
+assert_neq(RoomMetrics_d50(rm), RoomMetrics_sti(rm), "d50 and sti are distinct slots");
+assert_neq(RoomMetrics_sti(rm), RoomMetrics_rt60(rm), "sti and rt60 are distinct slots");
+# +0.0 must survive as +0.0, not be confused with an unwritten slot: build a
+# second record whose fields are all zero except one and read every slot back.
+var rm0 = naad_analysis_room_metrics_new(0, 0, 0, 0, AN_RT60);
+assert_eq(RoomMetrics_c50(rm0), 0, "zero c50 stored as +0.0");
+assert_eq(RoomMetrics_c80(rm0), 0, "zero c80 stored as +0.0");
+assert_eq(RoomMetrics_d50(rm0), 0, "zero d50 stored as +0.0");
+assert_eq(RoomMetrics_sti(rm0), 0, "zero sti stored as +0.0");
+assert_eq(RoomMetrics_rt60(rm0), AN_RT60, "rt60 unaffected by zeroed neighbours");
+# Two records are independent allocations.
+assert_neq(rm, rm0, "each call allocates a distinct RoomMetrics");
+assert_eq(RoomMetrics_c50(rm), AN_C50, "first record survives a second construction");
+
+# ================================================================
+# naad_analysis_wall_absorption_advice_new is the WallAbsorptionAdvice struct
+# literal. wall_index is a plain integer, rt60_sensitivity is SIGNED (negative
+# = treating this wall shortens reverb, the useful direction), and
+# current_absorption is a 0..1 fraction. Exact round-trip on all three.
+# ================================================================
+test_group("wall_absorption_advice_new_field_roundtrip");
+var wa = naad_analysis_wall_absorption_advice_new(3, AN_SENS, AN_ABS);
+assert_eq(WallAbsorptionAdvice_wall_index(wa), 3, "wall_index stored exactly");
+assert_eq(WallAbsorptionAdvice_rt60_sensitivity(wa), AN_SENS, "negative sensitivity stored exactly (-3.5)");
+assert_eq(WallAbsorptionAdvice_current_absorption(wa), AN_ABS, "current_absorption stored exactly (0.6)");
+assert_neq(WallAbsorptionAdvice_rt60_sensitivity(wa), WallAbsorptionAdvice_current_absorption(wa),
+  "sensitivity and absorption are distinct slots");
+# Index 0 (the floor) is a real wall, not a missing value.
+var wa0 = naad_analysis_wall_absorption_advice_new(0, 0, AN_D50);
+assert_eq(WallAbsorptionAdvice_wall_index(wa0), 0, "wall_index 0 (floor) stored exactly");
+assert_eq(WallAbsorptionAdvice_rt60_sensitivity(wa0), 0, "zero sensitivity stored as +0.0");
+assert_eq(WallAbsorptionAdvice_current_absorption(wa0), AN_D50, "absorption unaffected by a zeroed neighbour");
+assert_neq(wa, wa0, "each call allocates a distinct WallAbsorptionAdvice");
+assert_eq(WallAbsorptionAdvice_wall_index(wa), 3, "first record survives a second construction");
+
+# The two constructors are what naad_analysis_suggest_absorption /
+# analyze_impulse_response build their results with, so the advice vec's
+# records must carry goonj's values through unchanged, field for field.
+test_group("constructors_carry_goonj_values_through");
+var cg_room = live_room();
+var cg_material = naad_acoustics_material_by_name("concrete");
+var cg_goonj = suggest_absorption_placement(
+  acoustic_room_shoebox(f64_from(8), f64_from(6), f64_from(4), cg_material), F64_HALF);
+var cg_advice = naad_analysis_suggest_absorption(cg_room, F64_HALF);
+assert_eq(naad_is_err(cg_advice), 0, "suggest_absorption should succeed");
+assert_eq(vec_len(cg_advice), vec_len(cg_goonj), "one advice record per goonj suggestion");
+# Non-vacuity guard: with both vecs empty the field-by-field loop below never
+# runs and cg_ok stays 1, so the comparison would assert nothing.
+assert_gt(vec_len(cg_goonj), 0, "goonj returned at least one suggestion to compare against");
+var cg_ok = 1;
+var cg_i = 0;
+while (cg_i < vec_len(cg_goonj)) {
+    var cg_s = vec_get(cg_goonj, cg_i);
+    var cg_a = vec_get(cg_advice, cg_i);
+    if (WallAbsorptionAdvice_wall_index(cg_a) != AbsorptionSuggestion_wall_index(cg_s)) { cg_ok = 0; }
+    if (WallAbsorptionAdvice_rt60_sensitivity(cg_a) != AbsorptionSuggestion_rt60_sensitivity(cg_s)) { cg_ok = 0; }
+    if (WallAbsorptionAdvice_current_absorption(cg_a) != AbsorptionSuggestion_current_absorption(cg_s)) { cg_ok = 0; }
+    cg_i = cg_i + 1;
+}
+assert_eq(cg_ok, 1, "advice fields are goonj's values, bit for bit and in order");
 
 var rc = assert_summary();
 syscall(60, rc);

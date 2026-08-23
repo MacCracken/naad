@@ -62,5 +62,181 @@ assert(added_all, "all MAX_ROUTINGS routings added");
 assert_eq(mod_matrix_add_routing(m4, mod_matrix_routing_new(MOD_SOURCE_LFO1, MOD_DEST_PITCH, C0_1)), 0,
   "17th routing fails");
 
+# ================================================================
+# 2.2.1 accessor/coverage pass: num_routings, remove_routing, clear,
+# routings, routing_mut. All exact-value assertions -- the depths are
+# chosen so every sum lands on a representable f64 and can be compared
+# by raw bit pattern.
+# ================================================================
+
+# ================================================================
+test_group("num_routings and remove_routing");
+var mr = mod_matrix_new();
+assert_eq(mod_matrix_num_routings(mr), 0, "a fresh matrix has no routings");
+assert_eq(vec_len(mod_matrix_routings(mr)), 0, "routings() on a fresh matrix is empty");
+
+# Three routings with distinct destinations/depths so a removal is identifiable.
+mod_matrix_add_routing(mr, mod_matrix_routing_new(MOD_SOURCE_LFO1, MOD_DEST_PITCH, C0_1));
+assert_eq(mod_matrix_num_routings(mr), 1, "num_routings counts the first add");
+mod_matrix_add_routing(mr, mod_matrix_routing_new(MOD_SOURCE_LFO2, MOD_DEST_PAN, C0_4));
+mod_matrix_add_routing(mr, mod_matrix_routing_new(MOD_SOURCE_VELOCITY, MOD_DEST_AMPLITUDE, C0_7));
+assert_eq(mod_matrix_num_routings(mr), 3, "num_routings counts every add");
+
+# Removing the middle routing shifts the tail down, exactly as Vec::remove does.
+mod_matrix_remove_routing(mr, 1);
+assert_eq(mod_matrix_num_routings(mr), 2, "remove_routing drops exactly one routing");
+var mr0 = mod_matrix_routing_mut(mr, 0);
+var mr1 = mod_matrix_routing_mut(mr, 1);
+assert_eq(ModRouting_destination(mr0), MOD_DEST_PITCH, "slot 0 is untouched by the removal");
+assert_eq(ModRouting_destination(mr1), MOD_DEST_AMPLITUDE, "the old slot 2 shifted down into slot 1");
+assert_eq(ModRouting_depth(mr1), C0_7, "the shifted routing kept its depth");
+assert_eq(ModRouting_source(mr1), MOD_SOURCE_VELOCITY, "the shifted routing kept its source");
+assert_eq(mod_matrix_routing_mut(mr, 2), 0, "the vacated slot 2 is gone");
+
+# Out-of-range and negative indices must NO-OP, not abort. The oracle's index
+# is a usize guarded by `index < len` (rust-old/src/mod_matrix.rs:178-182); the
+# Cyrius index is a signed i64, so the negative case is a port-specific risk.
+mod_matrix_remove_routing(mr, 2);
+assert_eq(mod_matrix_num_routings(mr), 2, "remove_routing at index == len is a no-op");
+mod_matrix_remove_routing(mr, 99);
+assert_eq(mod_matrix_num_routings(mr), 2, "remove_routing past the end is a no-op");
+mod_matrix_remove_routing(mr, 0 - 1);
+assert_eq(mod_matrix_num_routings(mr), 2, "remove_routing at index -1 is a no-op");
+mod_matrix_remove_routing(mr, 0 - 100000);
+assert_eq(mod_matrix_num_routings(mr), 2, "remove_routing far below zero is a no-op");
+assert_eq(mod_matrix_routing_mut(mr, 0), mr0, "no-op removals left slot 0 alone");
+assert_eq(mod_matrix_routing_mut(mr, 1), mr1, "no-op removals left slot 1 alone");
+
+mod_matrix_remove_routing(mr, 1);
+mod_matrix_remove_routing(mr, 0);
+assert_eq(mod_matrix_num_routings(mr), 0, "removing every routing empties the matrix");
+mod_matrix_remove_routing(mr, 0);
+assert_eq(mod_matrix_num_routings(mr), 0, "remove_routing on an empty matrix is a no-op");
+
+# ================================================================
+test_group("remove_routing stops the contribution");
+# The count is not enough: the removed routing must stop reaching compute().
+var mrb = mod_matrix_new();
+mod_matrix_add_routing(mrb, mod_matrix_routing_new(MOD_SOURCE_LFO1, MOD_DEST_PITCH, C0_5));
+mod_matrix_add_routing(mrb, mod_matrix_routing_new(MOD_SOURCE_LFO2, MOD_DEST_PITCH, C0_5));
+mod_matrix_set_source(mrb, MOD_SOURCE_LFO1, F64_ONE);
+mod_matrix_set_source(mrb, MOD_SOURCE_LFO2, F64_ONE);
+mod_matrix_compute(mrb);
+assert_eq(mod_matrix_get_destination(mrb, MOD_DEST_PITCH), F64_ONE,
+  "two 0.5 routings sum to exactly 1.0");
+mod_matrix_remove_routing(mrb, 0);
+mod_matrix_compute(mrb);
+assert_eq(mod_matrix_get_destination(mrb, MOD_DEST_PITCH), C0_5,
+  "after one removal only the surviving 0.5 contributes");
+mod_matrix_remove_routing(mrb, 0);
+mod_matrix_compute(mrb);
+assert_eq(mod_matrix_get_destination(mrb, MOD_DEST_PITCH), 0,
+  "with no routings left the destination is exactly +0.0");
+
+# ================================================================
+test_group("clear");
+var mc = mod_matrix_new();
+mod_matrix_add_routing(mc, mod_matrix_routing_new(MOD_SOURCE_LFO1, MOD_DEST_PITCH, F64_ONE));
+mod_matrix_add_routing(mc, mod_matrix_routing_new(MOD_SOURCE_LFO1, MOD_DEST_PAN, F64_ONE));
+mod_matrix_set_source(mc, MOD_SOURCE_LFO1, F64_ONE);
+mod_matrix_compute(mc);
+assert_eq(mod_matrix_get_destination(mc, MOD_DEST_PITCH), F64_ONE, "pitch is modulated before the clear");
+assert_eq(mod_matrix_get_destination(mc, MOD_DEST_PAN), F64_ONE, "pan is modulated before the clear");
+
+assert_eq(mod_matrix_clear(mc), 0, "clear returns 0");
+assert_eq(mod_matrix_num_routings(mc), 0, "clear empties the routing list");
+assert_eq(vec_len(mod_matrix_routings(mc)), 0, "routings() agrees the list is empty");
+assert_eq(mod_matrix_routing_mut(mc, 0), 0, "routing_mut(0) is None (0) after a clear");
+mod_matrix_compute(mc);
+assert_eq(mod_matrix_get_destination(mc, MOD_DEST_PITCH), 0, "compute after clear zeroes pitch");
+assert_eq(mod_matrix_get_destination(mc, MOD_DEST_PAN), 0, "compute after clear zeroes pan");
+# clear touches ONLY the routings -- the per-frame source scratch survives.
+assert_eq(vec_get(ModMatrix_source_values(mc), MOD_SOURCE_LFO1), F64_ONE,
+  "clear leaves the source values alone");
+assert_eq(vec_len(ModMatrix_source_values(mc)), MOD_MATRIX_NUM_SOURCES,
+  "clear leaves the source scratch sized");
+assert_eq(vec_len(ModMatrix_destination_values(mc)), MOD_MATRIX_NUM_DESTINATIONS,
+  "clear leaves the destination scratch sized");
+# The matrix is reusable afterwards.
+mod_matrix_add_routing(mc, mod_matrix_routing_new(MOD_SOURCE_LFO1, MOD_DEST_PITCH, C0_5));
+assert_eq(mod_matrix_num_routings(mc), 1, "the matrix accepts routings again after a clear");
+mod_matrix_compute(mc);
+assert_eq(mod_matrix_get_destination(mc, MOD_DEST_PITCH), C0_5, "the re-added routing contributes 1.0 * 0.5");
+mod_matrix_clear(mc);
+mod_matrix_clear(mc);
+assert_eq(mod_matrix_num_routings(mc), 0, "clear is idempotent on an empty matrix");
+
+# ================================================================
+test_group("routings");
+var mrt = mod_matrix_new();
+# The pointer is taken BEFORE the adds: Rust returns &[ModRouting], a live
+# view, so the adds must be visible through it.
+var rl = mod_matrix_routings(mrt);
+assert_eq(vec_len(rl), 0, "routings() starts empty");
+var ra = mod_matrix_routing_new(MOD_SOURCE_MOD_WHEEL, MOD_DEST_FM_INDEX, C0_5);
+var rb = mod_matrix_routing_new(MOD_SOURCE_AFTERTOUCH, MOD_DEST_LFO_RATE, C0_8);
+mod_matrix_add_routing(mrt, ra);
+mod_matrix_add_routing(mrt, rb);
+assert_eq(vec_len(rl), 2, "routings() is a live view, not a snapshot");
+assert_eq(vec_len(rl), mod_matrix_num_routings(mrt), "routings() length agrees with num_routings");
+assert_eq(vec_get(rl, 0), ra, "routings()[0] is the first routing added");
+assert_eq(vec_get(rl, 1), rb, "routings()[1] is the second routing added");
+assert_eq(vec_get(rl, 0), mod_matrix_routing_mut(mrt, 0), "routings()[i] and routing_mut(i) agree");
+assert_eq(ModRouting_source(vec_get(rl, 1)), MOD_SOURCE_AFTERTOUCH, "routings() exposes the stored source id");
+assert_eq(ModRouting_destination(vec_get(rl, 1)), MOD_DEST_LFO_RATE, "routings() exposes the stored destination id");
+assert_eq(ModRouting_depth(vec_get(rl, 1)), C0_8, "routings() exposes the stored depth");
+assert_eq(ModRouting_enabled(vec_get(rl, 0)), 1, "routing_new enables the routing by default");
+mod_matrix_remove_routing(mrt, 0);
+assert_eq(vec_len(rl), 1, "routings() reflects a removal through the same view");
+assert_eq(vec_get(rl, 0), rb, "routings() shifted the survivor into slot 0");
+
+# ================================================================
+test_group("routing_mut");
+var mrm = mod_matrix_new();
+assert_eq(mod_matrix_routing_mut(mrm, 0), 0, "routing_mut on an empty matrix is None (0)");
+assert_eq(mod_matrix_routing_mut(mrm, 0 - 1), 0, "routing_mut at index -1 is None (0)");
+var rm0 = mod_matrix_routing_new(MOD_SOURCE_LFO1, MOD_DEST_PITCH, C0_5);
+mod_matrix_add_routing(mrm, rm0);
+assert_eq(mod_matrix_routing_mut(mrm, 0), rm0, "routing_mut(0) hands back the stored routing");
+assert_eq(mod_matrix_routing_mut(mrm, 1), 0, "routing_mut at index == len is None (0)");
+assert_eq(mod_matrix_routing_mut(mrm, 0 - 1), 0, "routing_mut at a negative index is still None (0)");
+assert_eq(mod_matrix_routing_mut(mrm, 99), 0, "routing_mut far past the end is None (0)");
+
+# It is a MUTABLE reference (Option<&mut ModRouting>): edits made through it
+# must be visible to compute().
+mod_matrix_set_source(mrm, MOD_SOURCE_LFO1, F64_ONE);
+mod_matrix_compute(mrm);
+assert_eq(mod_matrix_get_destination(mrm, MOD_DEST_PITCH), C0_5, "baseline: 1.0 * 0.5 = 0.5");
+var rmut = mod_matrix_routing_mut(mrm, 0);
+ModRouting_set_depth(rmut, C0_8);
+mod_matrix_compute(mrm);
+assert_eq(mod_matrix_get_destination(mrm, MOD_DEST_PITCH), C0_8,
+  "a depth edit through routing_mut reaches compute");
+ModRouting_set_enabled(rmut, 0);
+mod_matrix_compute(mrm);
+assert_eq(mod_matrix_get_destination(mrm, MOD_DEST_PITCH), 0,
+  "disabling through routing_mut reaches compute");
+ModRouting_set_enabled(rmut, 1);
+ModRouting_set_destination(rmut, MOD_DEST_PAN);
+mod_matrix_compute(mrm);
+assert_eq(mod_matrix_get_destination(mrm, MOD_DEST_PITCH), 0,
+  "the retargeted routing no longer feeds pitch");
+assert_eq(mod_matrix_get_destination(mrm, MOD_DEST_PAN), C0_8,
+  "the retargeted routing now feeds pan");
+
+# Index boundary at a full matrix.
+var mfull = mod_matrix_new();
+var mfi = 0;
+while (mfi < MOD_MATRIX_MAX_ROUTINGS) {
+    mod_matrix_add_routing(mfull, mod_matrix_routing_new(MOD_SOURCE_LFO1, MOD_DEST_PITCH, C0_1));
+    mfi = mfi + 1;
+}
+assert_eq(mod_matrix_num_routings(mfull), MOD_MATRIX_MAX_ROUTINGS, "num_routings reaches MAX_ROUTINGS");
+assert_neq(mod_matrix_routing_mut(mfull, MOD_MATRIX_MAX_ROUTINGS - 1), 0, "the last slot is addressable");
+assert_eq(mod_matrix_routing_mut(mfull, MOD_MATRIX_MAX_ROUTINGS), 0, "one past the last slot is None (0)");
+mod_matrix_add_routing(mfull, mod_matrix_routing_new(MOD_SOURCE_LFO1, MOD_DEST_PITCH, C0_1));
+assert_eq(mod_matrix_num_routings(mfull), MOD_MATRIX_MAX_ROUTINGS, "a rejected add leaves the count alone");
+assert_eq(vec_len(mod_matrix_routings(mfull)), MOD_MATRIX_MAX_ROUTINGS, "a rejected add leaves routings() alone");
+
 var rc = assert_summary();
 syscall(60, rc);

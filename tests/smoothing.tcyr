@@ -43,5 +43,154 @@ smoothing_set_target(ss, F64_HALF);
 smoothing_snap(ss);
 assert(f64_lt(f64_abs(f64_sub(smoothing_current(ss), F64_HALF)), NAAD_EPSILON), "snap jumps to target");
 
+# ================================================================
+# 2.2.1 accessor/coverage pass: target(), is_settled(), set_smooth_time().
+# Values are compared as raw f64 bit patterns (a Cyrius f64 IS an i64 bit
+# pattern, and +0.0 is 0) or against an explicit tolerance -- never
+# through f64_to, which truncates toward zero.
+# ================================================================
+
+var SM_0_25    = 0x3FD0000000000000;   # 0.25
+var SM_0_75    = 0x3FE8000000000000;   # 0.75
+var SM_0_05    = 0x3FA999999999999A;   # 0.05
+var SM_1EM7    = 0x3E7AD7F29ABCAF48;   # 1e-7  (inside the 1e-6 settle window)
+var SM_1EM5    = 0x3EE4F8B588E368F1;   # 1e-5  (outside it)
+var SM_NEG_1   = 0xBFF0000000000000;   # -1.0
+var SM_NAN     = 0x7FF8000000000000;   # NaN (quiet)
+# 1 - exp(-1 / (0.01 * 44100)) = 0.002265004693079553
+var SM_COEFF_001 = 0x3F628E0F22A04300;
+# 1 - exp(-1 / (0.05 * 44100)) = 0.0004534119169640194
+var SM_COEFF_005 = 0x3F3DB6FD5ADFC800;
+
+# ================================================================
+test_group("target");
+var st = smoothing_new(C0_01, C44100, SM_0_25);
+assert_eq(smoothing_target(st), SM_0_25, "target() starts at the initial value, not 0.0");
+assert_eq(smoothing_current(st), SM_0_25, "current() starts at the initial value");
+smoothing_set_target(st, SM_0_75);
+assert_eq(smoothing_target(st), SM_0_75, "target() round-trips set_target exactly");
+assert_eq(smoothing_current(st), SM_0_25, "set_target does not move current()");
+# Non-finite targets are ignored (rust-old/src/smoothing.rs:50-54).
+smoothing_set_target(st, NAAD_POS_INF);
+assert_eq(smoothing_target(st), SM_0_75, "set_target(+inf) is ignored");
+smoothing_set_target(st, NAAD_NEG_INF);
+assert_eq(smoothing_target(st), SM_0_75, "set_target(-inf) is ignored");
+smoothing_set_target(st, SM_NAN);
+assert_eq(smoothing_target(st), SM_0_75, "set_target(NaN) is ignored");
+# Negative and zero targets ARE finite and must be accepted.
+smoothing_set_target(st, SM_NEG_1);
+assert_eq(smoothing_target(st), SM_NEG_1, "a negative target is accepted");
+smoothing_set_target(st, 0);
+assert_eq(smoothing_target(st), 0, "a zero target is accepted");
+# snap() reads target(); afterwards the two must agree exactly.
+smoothing_set_target(st, SM_0_75);
+smoothing_snap(st);
+assert_eq(smoothing_current(st), smoothing_target(st), "snap makes current() equal target()");
+assert_eq(smoothing_target(st), SM_0_75, "snap does not disturb target()");
+# next_value() never moves the target either.
+smoothing_set_target(st, F64_ONE);
+var tnv = smoothing_next_value(st);
+assert_eq(smoothing_target(st), F64_ONE, "next_value leaves target() alone");
+assert_neq(smoothing_current(st), smoothing_target(st), "one step has not reached the target yet");
+
+# ================================================================
+test_group("is_settled");
+var ss2 = smoothing_new(C0_01, C44100, 0);
+assert_eq(smoothing_is_settled(ss2), 1, "a fresh smoother is settled (current == target)");
+smoothing_set_target(ss2, F64_ONE);
+assert_eq(smoothing_is_settled(ss2), 0, "a target 1.0 away is not settled");
+var iv1 = smoothing_next_value(ss2);
+assert_eq(smoothing_is_settled(ss2), 0, "one step of a 0.01 s ramp does not settle it");
+
+# It must actually flip 0 -> 1 as the value converges, and record WHEN.
+var steps = 0;
+var settled_at = 0;
+while (steps < 40000) {
+    if (settled_at == 0) {
+        if (smoothing_is_settled(ss2) == 1) { settled_at = steps; }
+    }
+    var isv = smoothing_next_value(ss2);
+    steps = steps + 1;
+}
+assert_eq(smoothing_is_settled(ss2), 1, "is_settled flips to 1 once the ramp converges");
+assert_gt(settled_at, 0, "it did not claim to be settled on the very first step");
+assert_lt(settled_at, 10000, "a 0.01 s / 44.1 kHz ramp settles well inside 10k samples");
+assert(f64_lt(f64_abs(f64_sub(smoothing_current(ss2), F64_ONE)), C0_001),
+  "the settled value really is the target");
+
+# The 1e-6 window is a STRICT comparison on the absolute difference, and it is
+# symmetric about the target.
+var sb = smoothing_new(C0_01, C44100, 0);
+smoothing_set_target(sb, 0);
+ParamSmoother_set_current(sb, SM_1EM7);
+assert_eq(smoothing_is_settled(sb), 1, "|delta| = 1e-7 counts as settled");
+ParamSmoother_set_current(sb, SM_1EM5);
+assert_eq(smoothing_is_settled(sb), 0, "|delta| = 1e-5 does not count as settled");
+ParamSmoother_set_current(sb, f64_neg(SM_1EM5));
+assert_eq(smoothing_is_settled(sb), 0, "|delta| = 1e-5 BELOW the target is not settled either");
+ParamSmoother_set_current(sb, f64_neg(SM_1EM7));
+assert_eq(smoothing_is_settled(sb), 1, "|delta| = 1e-7 below the target counts as settled");
+# A large offset in either direction is decisively unsettled.
+ParamSmoother_set_current(sb, SM_NEG_1);
+assert_eq(smoothing_is_settled(sb), 0, "a -1.0 offset is not settled");
+
+# snap() settles immediately, whatever the time constant.
+var sc = smoothing_new(F64_ONE, C44100, 0);
+smoothing_set_target(sc, F64_HALF);
+assert_eq(smoothing_is_settled(sc), 0, "a 0.5 gap with a 1 s time constant is not settled");
+smoothing_snap(sc);
+assert_eq(smoothing_is_settled(sc), 1, "snap settles immediately");
+
+# ================================================================
+test_group("set_smooth_time");
+var sm = smoothing_new(C0_01, C44100, 0);
+assert_eq(ParamSmoother_smooth_time(sm), C0_01, "the constructor stores the smooth time");
+assert_eq(ParamSmoother_coeff(sm), SM_COEFF_001,
+  "the constructor coefficient is 1 - exp(-1/(0.01*44100)) = 0.002265004693079553");
+
+smoothing_set_smooth_time(sm, SM_0_05);
+assert_eq(ParamSmoother_smooth_time(sm), SM_0_05, "set_smooth_time round-trips exactly");
+# A stale coefficient would still read 0.002265; the recomputed one is 5x smaller.
+assert_eq(ParamSmoother_coeff(sm), SM_COEFF_005,
+  "set_smooth_time recomputes the coefficient to 0.0004534119169640194");
+assert_eq(ParamSmoother_sample_rate(sm), C44100, "set_smooth_time leaves the sample rate alone");
+assert_eq(ParamSmoother_current(sm), 0, "set_smooth_time leaves current() alone");
+assert_eq(smoothing_target(sm), 0, "set_smooth_time leaves target() alone");
+
+# The first step from 0 toward 1.0 is exactly the coefficient, so this pins the
+# new coefficient down through the audio path and not just through the field.
+smoothing_set_target(sm, F64_ONE);
+var step5 = smoothing_next_value(sm);
+assert_eq(step5, SM_COEFF_005,
+  "the first step from 0 toward 1.0 equals the recomputed coefficient");
+
+# time <= 0 clamps to 0 and makes the smoother instant (coeff == 1.0 exactly).
+smoothing_set_smooth_time(sm, 0);
+assert_eq(ParamSmoother_smooth_time(sm), 0, "set_smooth_time(0.0) stores +0.0");
+assert_eq(ParamSmoother_coeff(sm), F64_ONE, "smooth time 0 gives coeff exactly 1.0");
+smoothing_set_target(sm, SM_0_75);
+var instv = smoothing_next_value(sm);
+assert_eq(instv, SM_0_75, "smooth time 0 jumps to the target in one sample");
+assert_eq(smoothing_current(sm), SM_0_75, "and current() holds the target");
+assert_eq(smoothing_is_settled(sm), 1, "and it reports settled immediately");
+
+smoothing_set_smooth_time(sm, SM_NEG_1);
+assert_eq(ParamSmoother_smooth_time(sm), 0, "a negative smooth time clamps to 0 (max(time, 0.0))");
+assert_eq(ParamSmoother_coeff(sm), F64_ONE, "a negative smooth time still gives coeff exactly 1.0");
+smoothing_set_target(sm, SM_0_25);
+var negv = smoothing_next_value(sm);
+assert_eq(negv, SM_0_25, "a negative smooth time behaves as instant");
+
+# A longer smooth time genuinely slows the ramp (ordering, not just values).
+var sf = smoothing_new(C0_01, C44100, 0);
+smoothing_set_target(sf, F64_ONE);
+var fast_step = smoothing_next_value(sf);
+var sg = smoothing_new(C0_01, C44100, 0);
+smoothing_set_smooth_time(sg, SM_0_05);
+smoothing_set_target(sg, F64_ONE);
+var slow_step = smoothing_next_value(sg);
+assert(f64_lt(slow_step, fast_step), "a 5x longer smooth time moves less per sample");
+assert(f64_gt(slow_step, 0), "but it still moves toward the target");
+
 var rc = assert_summary();
 syscall(60, rc);

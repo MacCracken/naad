@@ -11,6 +11,16 @@ alloc_init();
 var TOL_0_01 = 0x3f847ae147ae147b;   # 0.01
 var TOL_0_1  = 0x3fb999999999999a;   # 0.1
 var C261_63  = 0x40705a147ae147ae;   # 261.63
+var TOL_1E_12    = 0x3d719799812dea11;   # 1e-12
+var C440         = 0x407b800000000000;   # 440.0
+var C432         = 0x407b000000000000;   # 432.0
+var C220         = 0x406b800000000000;   # 220.0
+var C880         = 0x408b800000000000;   # 880.0
+var C864         = 0x408b000000000000;   # 864.0
+var C55          = 0x404b800000000000;   # 55.0
+var C261_6255653 = 0x40705a0250c2b956;   # 261.6255653005986  = 440 * 2^(-9/12)
+var C466_1637615 = 0x407d229ec465c8a2;   # 466.1637615180899  = 440 * 2^(1/12)
+var C8_1757989   = 0x40205a0250c2b956;   # 8.175798915643707  = 440 * 2^(-69/12)
 
 # ================================================================
 test_group("midi <-> freq");
@@ -103,6 +113,55 @@ assert_streq(tuning_note_name_str(0 - 1), "", "negative pitch class -> empty, no
 assert_streq(tuning_note_name_str(12), "", "pitch class 12 -> empty");
 assert_streq(tuning_note_name_str(11), "B", "control: pitch class 11 is B");
 assert_streq(tuning_note_name_str(0), "C", "control: pitch class 0 is C");
+
+# ================================================================
+# 2.2.1 -- tuning_equal_temperament_freq had no direct coverage. Every existing
+# assertion reached it through tuning_midi_to_freq, which hardcodes a4_hz = 440,
+# so the `a4_hz` parameter itself was never exercised at all: an implementation
+# that ignored it and always used 440 passed this whole file.
+# Oracle: rust-old/src/tuning.rs:16-18 --
+#   pub fn equal_temperament_freq(note: u8, a4_hz: f32) -> f32 {
+#       a4_hz * 2.0f32.powf((note as f32 - 69.0) / 12.0)
+#   }
+# Expected values below are the correctly-rounded f64 evaluations of that
+# formula; they are asserted on the raw bit pattern (never through f64_to,
+# which truncates) wherever the port reproduces them exactly.
+# ================================================================
+test_group("equal_temperament_freq");
+# Note 69 IS the reference note, so the result must be a4_hz bit for bit --
+# for any reference, which is what pins the a4_hz parameter down.
+assert_eq(tuning_equal_temperament_freq(69, C440), C440, "etf(69, 440) is exactly 440");
+assert_eq(tuning_equal_temperament_freq(69, C432), C432, "etf(69, 432) is exactly 432 -- a4_hz is honoured");
+assert_eq(tuning_equal_temperament_freq(69, C220), C220, "etf(69, 220) is exactly 220");
+# An octave is an exact factor of two either side of the reference.
+assert_eq(tuning_equal_temperament_freq(81, C440), C880, "etf(81, 440) is exactly 880 (octave up doubles)");
+assert_eq(tuning_equal_temperament_freq(57, C440), C220, "etf(57, 440) is exactly 220 (octave down halves)");
+assert_eq(tuning_equal_temperament_freq(81, C432), C864, "etf(81, 432) is exactly 864 -- octave scales with a4_hz");
+# Non-octave notes: exact correctly-rounded values of 440 * 2^((n-69)/12).
+assert_eq(tuning_equal_temperament_freq(60, C440), C261_6255653, "etf(60, 440) = 261.6255653005986 (C4)");
+assert_eq(tuning_equal_temperament_freq(70, C440), C466_1637615, "etf(70, 440) = 466.1637615180899 (Bb4)");
+assert_eq(tuning_equal_temperament_freq(0, C440), C8_1757989, "etf(0, 440) = 8.175798915643707 (C-1)");
+# midi_to_freq is defined as etf(note, 440) -- identical bits, not merely close.
+assert_eq(tuning_midi_to_freq(60), tuning_equal_temperament_freq(60, C440), "midi_to_freq(60) == etf(60, 440) bit for bit");
+assert_eq(tuning_midi_to_freq(127), tuning_equal_temperament_freq(127, C440), "midi_to_freq(127) == etf(127, 440) bit for bit");
+# Halving the reference halves every note, not just note 69.
+assert_eq(tuning_equal_temperament_freq(60, C220), f64_div(C261_6255653, F64_TWO), "halving a4_hz halves C4");
+# Note 33 = A1 = 55 Hz. The port lands 2 ULP high (55.000000000000014): the
+# exponent is exactly -3.0 yet f64_pow(2, -3) is not exactly 0.125. Asserted to
+# 1e-12 rather than on bits so the drift is bounded, not blessed.
+assert(f64_lt(f64_abs(f64_sub(tuning_equal_temperament_freq(33, C440), C55)), TOL_1E_12), "etf(33, 440) = 55 Hz within 1e-12");
+# Strictly increasing across the whole MIDI range -- catches a sign-flipped or
+# truncated exponent that individual spot checks could still satisfy.
+var mono_ok = 1;
+var mprev = tuning_equal_temperament_freq(0, C440);
+var mn = 1;
+while (mn < 128) {
+    var mcur = tuning_equal_temperament_freq(mn, C440);
+    if (f64_gt(mcur, mprev) == 0) { mono_ok = 0; }
+    mprev = mcur;
+    mn = mn + 1;
+}
+assert(mono_ok, "etf is strictly increasing over MIDI 0..127");
 
 var rc = assert_summary();
 syscall(60, rc);

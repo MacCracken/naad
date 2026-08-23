@@ -157,5 +157,161 @@ while (pj < 3) {
 }
 assert(allfin, "smooth samples finite at positions 0.0/0.5/1.0");
 
+# ================================================================
+# 2.2.1 accessor/coverage pass -- exact-value tests for the wavetable
+# accessors and sample paths that no assertion reached.
+#
+# Exactness trick used throughout: a 4-sample table played at
+# sample_rate 4.0 / frequency 1.0 gives dt = 0.25, so every phase lands
+# exactly on a table index (frac == 0) and read_interpolated returns the
+# stored sample bit-for-bit. All comparisons below are raw f64 bit
+# patterns via assert_eq -- never f64_to (which truncates).
+# ================================================================
+var C0_75 = 0x3FE8000000000000;   # 0.75
+
+fn _cv_table4(a, b, c, d) {
+    var v = vec_new();
+    vec_push(v, a); vec_push(v, b); vec_push(v, c); vec_push(v, d);
+    return wavetable_from_samples(v);
+}
+
+# ================================================================
+test_group("wavetable_is_empty");
+var cv_wt4 = _cv_table4(0, F64_ONE, 0, f64_neg(F64_ONE));
+assert_eq(wavetable_is_empty(cv_wt4), 0, "4-sample table -> is_empty 0");
+assert_eq(wavetable_len(cv_wt4), 4, "4-sample table -> len 4");
+# from_samples rejects an empty vec, so the empty case is built through the
+# struct accessor -- the only way is_empty()'s true branch is reachable.
+var cv_raw = alloc(sizeof(Wavetable));
+Wavetable_set_samples(cv_raw, vec_new());
+assert_eq(wavetable_is_empty(cv_raw), 1, "0-sample table -> is_empty 1");
+assert_eq(wavetable_len(cv_raw), 0, "0-sample table -> len 0");
+
+# ================================================================
+test_group("wavetable_osc accessors");
+var cv_osc = wavetable_osc_new(cv_wt4, F64_ONE, f64_from(4));
+assert_eq(wavetable_osc_table(cv_osc), cv_wt4, "table() is the table passed to new()");
+assert_eq(wavetable_osc_phase(cv_osc), 0, "fresh phase() == +0.0");
+assert_eq(wavetable_osc_sample_rate(cv_osc), f64_from(4), "sample_rate() == 4.0 (constructor value)");
+assert_eq(wavetable_osc_frequency(cv_osc), F64_ONE, "frequency() == 1.0 (constructor value)");
+
+# ================================================================
+test_group("wavetable_osc_set_frequency");
+assert_eq(wavetable_osc_set_frequency(cv_osc, C0_75), NAAD_ERR_NONE, "set_frequency(0.75) ok");
+assert_eq(wavetable_osc_frequency(cv_osc), C0_75, "frequency round-trips 0.75 (not the 1.0 default)");
+# validate_frequency rejects >= nyquist (2.0 here) and <= 0, and must not mutate.
+assert(naad_is_err(wavetable_osc_set_frequency(cv_osc, f64_from(2))), "freq == nyquist rejected");
+assert_eq(wavetable_osc_frequency(cv_osc), C0_75, "rejected set leaves frequency unchanged");
+assert(naad_is_err(wavetable_osc_set_frequency(cv_osc, 0)), "freq 0 rejected");
+assert_eq(wavetable_osc_frequency(cv_osc), C0_75, "rejected set (0) leaves frequency unchanged");
+assert_eq(wavetable_osc_phase(cv_osc), 0, "set_frequency does not disturb phase");
+
+# ================================================================
+test_group("wavetable_osc_next_sample exact values");
+var cv_osc2 = wavetable_osc_new(cv_wt4, F64_ONE, f64_from(4));
+var cv_s0 = wavetable_osc_next_sample(cv_osc2);
+assert_eq(cv_s0, 0, "sample 0 == table[0] == 0.0");
+assert_eq(wavetable_osc_phase(cv_osc2), C0_25, "phase advanced to 0.25");
+var cv_s1 = wavetable_osc_next_sample(cv_osc2);
+assert_eq(cv_s1, F64_ONE, "sample 1 == table[1] == 1.0");
+assert_eq(wavetable_osc_phase(cv_osc2), C0_5, "phase advanced to 0.5");
+var cv_s2 = wavetable_osc_next_sample(cv_osc2);
+assert_eq(cv_s2, 0, "sample 2 == table[2] == 0.0");
+assert_eq(wavetable_osc_phase(cv_osc2), C0_75, "phase advanced to 0.75");
+var cv_s3 = wavetable_osc_next_sample(cv_osc2);
+assert_eq(cv_s3, f64_neg(F64_ONE), "sample 3 == table[3] == -1.0");
+assert_eq(wavetable_osc_phase(cv_osc2), 0, "phase wrapped back to 0.0 after one cycle");
+# The interpolator itself: 0.125 sits exactly halfway between index 0 and 1.
+assert_eq(wavetable_read_interpolated(cv_wt4, C0_125), C0_5, "read_interpolated(0.125) == 0.5 exactly");
+
+# ================================================================
+test_group("wavetable_osc fill_buffer == next_sample stream");
+# frequency 1.5 / sr 4 -> dt = 0.375, so the phases land BETWEEN table
+# indices and every sample is a real interpolation, not a table lookup.
+var cv_oa = wavetable_osc_new(cv_wt4, F64_ONE_HALF, f64_from(4));
+var cv_ob = wavetable_osc_new(cv_wt4, F64_ONE_HALF, f64_from(4));
+var cv_fbuf = vec_new();
+var cv_fi = 0;
+while (cv_fi < 8) { vec_push(cv_fbuf, 0); cv_fi = cv_fi + 1; }
+wavetable_osc_fill_buffer(cv_oa, cv_fbuf);
+var cv_stream_ok = 1;
+var cv_interp_seen = 0;
+cv_fi = 0;
+while (cv_fi < 8) {
+    var cv_one = wavetable_osc_next_sample(cv_ob);
+    if (vec_get(cv_fbuf, cv_fi) != cv_one) { cv_stream_ok = 0; }
+    # at least one sample must be strictly between two table entries
+    if (f64_gt(cv_one, 0) == 1) {
+        if (f64_lt(cv_one, F64_ONE) == 1) { cv_interp_seen = 1; }
+    }
+    cv_fi = cv_fi + 1;
+}
+assert(cv_stream_ok, "fill_buffer matches next_sample bit-for-bit");
+assert(cv_interp_seen, "buffer really contains interpolated (non-table) values");
+assert_eq(wavetable_osc_phase(cv_oa), wavetable_osc_phase(cv_ob), "both oscillators left at the same phase");
+
+# ================================================================
+test_group("wavetable_morph accessors");
+var cv_ma = _cv_table4(0, F64_ONE, 0, f64_neg(F64_ONE));
+var cv_mb = _cv_table4(0, C0_5, 0, f64_neg(C0_5));
+var cv_mt = vec_new();
+vec_push(cv_mt, cv_ma); vec_push(cv_mt, cv_mb);
+var cv_mo = wavetable_morph_new(cv_mt, F64_ONE, f64_from(4));
+assert_eq(wavetable_morph_tables(cv_mo), cv_mt, "tables() is the vec passed to new()");
+assert_eq(vec_len(wavetable_morph_tables(cv_mo)), 2, "tables() holds both tables");
+assert_eq(vec_get(wavetable_morph_tables(cv_mo), 0), cv_ma, "tables()[0] is the first table");
+assert_eq(vec_get(wavetable_morph_tables(cv_mo), 1), cv_mb, "tables()[1] is the second table");
+assert_eq(wavetable_morph_position(cv_mo), 0, "fresh position() == +0.0");
+assert_eq(wavetable_morph_phase(cv_mo), 0, "fresh phase() == +0.0");
+assert_eq(wavetable_morph_sample_rate(cv_mo), f64_from(4), "sample_rate() == 4.0 (constructor value)");
+assert_eq(wavetable_morph_frequency(cv_mo), F64_ONE, "frequency() == 1.0 (constructor value)");
+
+# set_morph round-trip + clamp, read back through position().
+wavetable_morph_set_morph(cv_mo, C0_75);
+assert_eq(wavetable_morph_position(cv_mo), C0_75, "position round-trips 0.75 (not the 0.0 default)");
+wavetable_morph_set_morph(cv_mo, F64_ONE_HALF);
+assert_eq(wavetable_morph_position(cv_mo), F64_ONE, "1.5 clamps to 1.0");
+wavetable_morph_set_morph(cv_mo, f64_neg(C0_5));
+assert_eq(wavetable_morph_position(cv_mo), 0, "-0.5 clamps to 0.0");
+
+# ================================================================
+test_group("wavetable_morph blend is exact at 0.0 / 0.5 / 1.0");
+# A = [0, 1, 0, -1], B = [0, 0.5, 0, -0.5]; sr 4 / freq 1 -> one sample per
+# table index, so the blend is (1-frac)*A[i] + frac*B[i] with no rounding.
+var cv_m0 = wavetable_morph_new(cv_mt, F64_ONE, f64_from(4));
+wavetable_morph_set_morph(cv_m0, 0);
+var cv_a0 = wavetable_morph_next_sample(cv_m0);
+assert_eq(wavetable_morph_phase(cv_m0), C0_25, "morph phase advanced to 0.25");
+var cv_a1 = wavetable_morph_next_sample(cv_m0);
+var cv_a2 = wavetable_morph_next_sample(cv_m0);
+var cv_a3 = wavetable_morph_next_sample(cv_m0);
+assert_eq(cv_a0, 0, "pos 0.0 -> A[0] == 0.0");
+assert_eq(cv_a1, F64_ONE, "pos 0.0 -> A[1] == 1.0");
+assert_eq(cv_a2, 0, "pos 0.0 -> A[2] == 0.0");
+assert_eq(cv_a3, f64_neg(F64_ONE), "pos 0.0 -> A[3] == -1.0");
+assert_eq(wavetable_morph_phase(cv_m0), 0, "morph phase wrapped to 0.0 after 4 samples");
+
+var cv_m1 = wavetable_morph_new(cv_mt, F64_ONE, f64_from(4));
+wavetable_morph_set_morph(cv_m1, F64_ONE);
+var cv_b0 = wavetable_morph_next_sample(cv_m1);
+var cv_b1 = wavetable_morph_next_sample(cv_m1);
+var cv_b2 = wavetable_morph_next_sample(cv_m1);
+var cv_b3 = wavetable_morph_next_sample(cv_m1);
+assert_eq(cv_b0, 0, "pos 1.0 -> B[0] == 0.0");
+assert_eq(cv_b1, C0_5, "pos 1.0 -> B[1] == 0.5");
+assert_eq(cv_b2, 0, "pos 1.0 -> B[2] == 0.0");
+assert_eq(cv_b3, f64_neg(C0_5), "pos 1.0 -> B[3] == -0.5");
+
+var cv_mh = wavetable_morph_new(cv_mt, F64_ONE, f64_from(4));
+wavetable_morph_set_morph(cv_mh, C0_5);
+var cv_h0 = wavetable_morph_next_sample(cv_mh);
+var cv_h1 = wavetable_morph_next_sample(cv_mh);
+var cv_h2 = wavetable_morph_next_sample(cv_mh);
+var cv_h3 = wavetable_morph_next_sample(cv_mh);
+assert_eq(cv_h0, 0, "pos 0.5 -> (0 + 0)/2 == 0.0");
+assert_eq(cv_h1, C0_75, "pos 0.5 -> (1.0 + 0.5)/2 == 0.75");
+assert_eq(cv_h2, 0, "pos 0.5 -> (0 + 0)/2 == 0.0");
+assert_eq(cv_h3, f64_neg(C0_75), "pos 0.5 -> (-1.0 + -0.5)/2 == -0.75");
+
 var rc = assert_summary();
 syscall(60, rc);

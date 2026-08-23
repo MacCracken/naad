@@ -225,5 +225,522 @@ while (i < 1024) {
 assert(sync_finite, "hard sync all finite");
 assert(sync_any, "hard sync any nonzero");
 
+# ================================================================
+# 2.2.1 accessor/coverage pass -- osc_sub + osc_sync.
+# Every comparison below is on raw f64 bit patterns (assert_eq) or an
+# explicit tolerance; never f64_to, which truncates toward zero.
+# ================================================================
+var C0_25   = 0x3FD0000000000000;   # 0.25
+var C0_1875 = 0x3FC8000000000000;   # 0.1875
+var C0_3125 = 0x3FD4000000000000;   # 0.3125
+var C0_875  = 0x3FEC000000000000;   # 0.875
+
+# ================================================================
+# sub: base_frequency accessor + set_base_frequency round-trip.
+# Oracle: rust-old/src/oscillator/sub.rs (base_frequency/set_base_frequency).
+# ================================================================
+test_group("sub: base_frequency round-trip");
+var cvs = subosc_new(WAVEFORM_SINE, f64_from(440), SUBOCT_DOWN1, f64_from(44100));
+assert_eq(subosc_base_frequency(cvs), f64_from(440), "fresh base_frequency() == 440 (constructor value)");
+assert_eq(subosc_octave(cvs), SUBOCT_DOWN1, "fresh octave() == Down1 (constructor value)");
+assert_eq(osc_frequency(SubOscillator_osc(cvs)), f64_from(220), "inner osc built at 440/2 == 220 Hz");
+assert_eq(subosc_set_base_frequency(cvs, f64_from(880)), NAAD_ERR_NONE, "set_base_frequency(880) ok");
+assert_eq(subosc_base_frequency(cvs), f64_from(880), "base_frequency round-trips 880 (not the 440 default)");
+assert_eq(osc_frequency(SubOscillator_osc(cvs)), f64_from(440), "sub freq follows to 880/2 == 440 Hz");
+# 100000/2 == 50000 >= nyquist(22050): rejected, and the oracle validates
+# BEFORE mutating, so both base and sub frequency must be untouched.
+assert(naad_is_err(subosc_set_base_frequency(cvs, f64_from(100000))), "base freq past 2x nyquist rejected");
+assert_eq(subosc_base_frequency(cvs), f64_from(880), "rejected set leaves base_frequency unchanged");
+assert_eq(osc_frequency(SubOscillator_osc(cvs)), f64_from(440), "rejected set leaves sub frequency unchanged");
+
+# ================================================================
+# sub: octave accessor + set_octave round-trip (and the 0.1 Hz floor).
+# ================================================================
+test_group("sub: set_octave round-trip");
+assert_eq(subosc_set_octave(cvs, SUBOCT_DOWN2), NAAD_ERR_NONE, "set_octave(Down2) ok");
+assert_eq(subosc_octave(cvs), SUBOCT_DOWN2, "octave round-trips Down2 (not the Down1 default)");
+assert_eq(osc_frequency(SubOscillator_osc(cvs)), f64_from(220), "Down2 -> base/4 == 220 Hz");
+assert_eq(subosc_base_frequency(cvs), f64_from(880), "set_octave leaves base_frequency alone");
+assert_eq(subosc_set_octave(cvs, SUBOCT_DOWN1), NAAD_ERR_NONE, "set_octave(Down1) ok");
+assert_eq(subosc_octave(cvs), SUBOCT_DOWN1, "octave round-trips back to Down1");
+assert_eq(osc_frequency(SubOscillator_osc(cvs)), f64_from(440), "Down1 -> base/2 == 440 Hz");
+# Rust `.max(0.1)`: 0.1/4 == 0.025 is floored to the 0.1 Hz minimum.
+var cv_lo = subosc_new(WAVEFORM_SINE, C0_1, SUBOCT_DOWN2, f64_from(44100));
+assert_eq(osc_frequency(SubOscillator_osc(cv_lo)), C0_1, "sub freq floored at 0.1 Hz");
+
+# ================================================================
+# sub: next_sample really is an octave down -- not merely "a sample came out".
+# A Down1 sub over 440 Hz must be bit-identical to a plain 220 Hz oscillator
+# of the same waveform (level defaults to 1.0), and must NOT track 440 Hz.
+# ================================================================
+test_group("sub: next_sample is a true octave down");
+var cv_sub1 = subosc_new(WAVEFORM_SINE, f64_from(440), SUBOCT_DOWN1, f64_from(44100));
+var cv_ref220 = osc_new(WAVEFORM_SINE, f64_from(220), f64_from(44100));
+var cv_ref440 = osc_new(WAVEFORM_SINE, f64_from(440), f64_from(44100));
+var cv_d1_match = 1;
+var cv_d1_differs = 0;
+i = 0;
+while (i < 512) {
+    var cv_sv = subosc_next_sample(cv_sub1);
+    var cv_r2 = osc_next_sample(cv_ref220);
+    var cv_r4 = osc_next_sample(cv_ref440);
+    if (cv_sv != cv_r2) { cv_d1_match = 0; }
+    if (f64_gt(f64_abs(f64_sub(cv_sv, cv_r4)), C0_1) == 1) { cv_d1_differs = 1; }
+    i = i + 1;
+}
+assert(cv_d1_match, "Down1 output == 220 Hz oscillator, sample for sample");
+assert(cv_d1_differs, "Down1 output is NOT the 440 Hz oscillator");
+
+var cv_sub2 = subosc_new(WAVEFORM_SAW, f64_from(440), SUBOCT_DOWN2, f64_from(44100));
+var cv_ref110 = osc_new(WAVEFORM_SAW, f64_from(110), f64_from(44100));
+var cv_d2_match = 1;
+i = 0;
+while (i < 512) {
+    var cv_s2v = subosc_next_sample(cv_sub2);
+    var cv_r1 = osc_next_sample(cv_ref110);
+    if (cv_s2v != cv_r1) { cv_d2_match = 0; }
+    i = i + 1;
+}
+assert(cv_d2_match, "Down2 output == 110 Hz oscillator, sample for sample");
+
+# next_sample scales by `level` (pub field in the oracle).
+var cv_subl = subosc_new(WAVEFORM_SINE, f64_from(440), SUBOCT_DOWN1, f64_from(44100));
+SubOscillator_set_level(cv_subl, F64_HALF);
+var cv_refl = osc_new(WAVEFORM_SINE, f64_from(220), f64_from(44100));
+var cv_lvl_ok = 1;
+i = 0;
+while (i < 128) {
+    var cv_lv = subosc_next_sample(cv_subl);
+    if (cv_lv != f64_mul(osc_next_sample(cv_refl), F64_HALF)) { cv_lvl_ok = 0; }
+    i = i + 1;
+}
+assert(cv_lvl_ok, "next_sample == inner sample * level");
+
+# ================================================================
+# sync: master()/slave() accessors and the two frequency setters.
+# Oracle: rust-old/src/oscillator/sync.rs -- master is ALWAYS a Saw.
+# ================================================================
+test_group("sync: master/slave accessors");
+var cv_hs = hardsync_new(f64_from(440), f64_from(880), WAVEFORM_SQUARE, f64_from(44100));
+assert_eq(osc_frequency(hardsync_master(cv_hs)), f64_from(440), "master() runs at the master frequency");
+assert_eq(osc_waveform(hardsync_master(cv_hs)), WAVEFORM_SAW, "master() is always a Saw");
+assert_eq(osc_frequency(hardsync_slave(cv_hs)), f64_from(880), "slave() runs at the slave frequency");
+assert_eq(osc_waveform(hardsync_slave(cv_hs)), WAVEFORM_SQUARE, "slave() keeps the requested waveform");
+assert_eq(osc_sample_rate(hardsync_slave(cv_hs)), f64_from(44100), "slave() shares the sample rate");
+assert_neq(hardsync_master(cv_hs), hardsync_slave(cv_hs), "master and slave are distinct oscillators");
+
+test_group("sync: set_master_freq / set_slave_freq");
+assert_eq(hardsync_set_master_freq(cv_hs, f64_from(110)), NAAD_ERR_NONE, "set_master_freq(110) ok");
+assert_eq(osc_frequency(hardsync_master(cv_hs)), f64_from(110), "master freq round-trips 110 (not the 440 default)");
+assert_eq(osc_frequency(hardsync_slave(cv_hs)), f64_from(880), "set_master_freq leaves the slave alone");
+assert_eq(hardsync_set_slave_freq(cv_hs, f64_from(1760)), NAAD_ERR_NONE, "set_slave_freq(1760) ok");
+assert_eq(osc_frequency(hardsync_slave(cv_hs)), f64_from(1760), "slave freq round-trips 1760 (not the 880 default)");
+assert_eq(osc_frequency(hardsync_master(cv_hs)), f64_from(110), "set_slave_freq leaves the master alone");
+assert(naad_is_err(hardsync_set_master_freq(cv_hs, f64_from(30000))), "master freq above nyquist rejected");
+assert_eq(osc_frequency(hardsync_master(cv_hs)), f64_from(110), "rejected master set leaves freq unchanged");
+assert(naad_is_err(hardsync_set_slave_freq(cv_hs, 0)), "slave freq 0 rejected");
+assert_eq(osc_frequency(hardsync_slave(cv_hs)), f64_from(1760), "rejected slave set leaves freq unchanged");
+
+# ================================================================
+# sync: the whole point of the module -- the slave phase RESETS on the
+# master's cycle wrap. Exact arithmetic: sample_rate 1024 with master
+# 128 Hz gives dt = 0.125 (wraps on call 8) and slave 320 Hz gives
+# dt = 0.3125; both are exact binary fractions, so every phase below is
+# an exact f64 bit pattern.
+#   free-running slave phase: .3125 .625 .9375 .25 .5625 .875 .1875 -> .5
+#   hard-synced:              same through call 7, then RESET -> .3125
+# ================================================================
+test_group("sync: slave phase resets on master wrap");
+var cv_sync = hardsync_new(f64_from(128), f64_from(320), WAVEFORM_SAW, f64_from(1024));
+var cv_free = osc_new(WAVEFORM_SAW, f64_from(320), f64_from(1024));   # unsynced control
+var cv_k = 0;
+while (cv_k < 7) {
+    var cv_hv = hardsync_next_sample(cv_sync);
+    var cv_fv = osc_next_sample(cv_free);
+    assert_eq(cv_hv, cv_fv, "pre-wrap sample tracks the free-running slave");
+    cv_k = cv_k + 1;
+}
+assert_eq(osc_phase(hardsync_master(cv_sync)), C0_875, "master phase 0.875 after 7 samples");
+assert_eq(osc_phase(hardsync_slave(cv_sync)), C0_1875, "slave phase 0.1875 after 7 samples (no reset yet)");
+assert_eq(osc_phase(cv_free), C0_1875, "unsynced control agrees through sample 7");
+
+# Sample 8: master goes 0.875 -> 0.0 (wrap), so the slave is reset first.
+var cv_s8 = hardsync_next_sample(cv_sync);
+var cv_f8 = osc_next_sample(cv_free);
+assert_eq(osc_phase(hardsync_master(cv_sync)), 0, "master wrapped to 0.0 on sample 8");
+assert_eq(osc_phase(hardsync_slave(cv_sync)), C0_3125, "slave phase reset to 0.0 then advanced one dt");
+assert_eq(osc_phase(cv_free), F64_HALF, "unsynced slave would have reached 0.5 instead");
+assert_neq(cv_s8, cv_f8, "the reset changes the emitted sample, not just the phase");
+# The post-reset sample is exactly what a fresh slave emits at phase 0.
+var cv_fresh = osc_new(WAVEFORM_SAW, f64_from(320), f64_from(1024));
+assert_eq(cv_s8, osc_next_sample(cv_fresh), "post-reset sample == fresh oscillator's phase-0 sample");
+
+# Negative control: a master too slow to wrap must NOT reset the slave --
+# without this the assertion above could pass on an always-reset bug.
+var cv_nosync = hardsync_new(F64_ONE, f64_from(320), WAVEFORM_SAW, f64_from(1024));
+var cv_j = 0;
+while (cv_j < 8) {
+    var cv_nv = hardsync_next_sample(cv_nosync);
+    cv_nv = cv_nv;
+    cv_j = cv_j + 1;
+}
+assert_eq(osc_phase(hardsync_slave(cv_nosync)), F64_HALF, "no master wrap -> slave free-runs to 0.5");
+assert_eq(osc_phase(hardsync_master(cv_nosync)), f64_mul(f64_from(8), f64_div(F64_ONE, f64_from(1024))), "slow master at 8*dt, never wrapped");
+
+# ================================================================
+# ================  osc_core accessors + osc_unison  =============
+# Coverage group "osc_core+osc_unison" (release 2.2.1). All names in this
+# section carry a uc_ (core) or un_ (unison) prefix. Oracle references are
+# rust-old/src/oscillator/{core,unison}.rs.
+# ================================================================
+
+# Extra IEEE-754 bit patterns for this section.
+var UC_0_25     = 0x3FD0000000000000;   # 0.25
+var UC_0_75     = 0x3FE8000000000000;   # 0.75
+var UC_0_125    = 0x3FC0000000000000;   # 0.125
+var UC_0_875    = 0x3FEC000000000000;   # 0.875
+var UC_0_99     = 0x3FEFAE147AE147AE;   # 0.99
+var UC_0_3      = 0x3FD3333333333333;   # 0.3
+var UC_0_005    = 0x3F747AE147AE147B;   # 0.005
+var UC_NEG_0_5  = 0xBFE0000000000000;   # -0.5
+var UC_SAW_BLEP = 0xBFE5AE147AE147AE;   # -0.6775 (saw naive -0.99 minus blep -0.3125)
+var UC_TOL      = 0x3E112E0BE826D695;   # 1e-9
+var UC_TOL_T    = 0x3D719799812DEA11;   # 1e-12
+var UC_SQRT2    = 0x3FF6A09E667F3BCD;   # 2^0.5  = 1.4142135623730951
+var UC_2_M_HALF = 0x3FE6A09E667F3BCD;   # 2^-0.5 = 0.7071067811865476
+var UC_SENTINEL = 0x408F380000000000;   # 999.0 (buffer fill sentinel)
+
+var uc_i = 0;
+var un_i = 0;
+
+# ================================================================
+# core: accessor defaults -- every getter returns the CONSTRUCTOR's value on a
+# fresh oscillator (oracle core.rs:114-123).
+# ================================================================
+test_group("core: accessor defaults");
+var uc_o = osc_new(WAVEFORM_SAW, f64_from(440), f64_from(44100));
+assert_eq(osc_waveform(uc_o), WAVEFORM_SAW, "waveform() = constructor waveform");
+assert_eq(osc_phase(uc_o), 0, "phase() = exactly 0 on a fresh oscillator");
+assert_eq(osc_sample_rate(uc_o), f64_from(44100), "sample_rate() = constructor sample rate");
+assert_eq(osc_pulse_width(uc_o), F64_HALF, "pulse_width() defaults to exactly 0.5");
+# Second oscillator with different arguments -- proves the getters read fields
+# rather than returning a fixed constant.
+var uc_o2 = osc_new(WAVEFORM_PULSE, f64_from(220), f64_from(48000));
+assert_eq(osc_waveform(uc_o2), WAVEFORM_PULSE, "waveform() distinguishes oscillators");
+assert_eq(osc_sample_rate(uc_o2), f64_from(48000), "sample_rate() distinguishes oscillators");
+
+# ================================================================
+# core: phase_increment -- frequency / sample_rate, exact at power-of-two
+# ratios (oracle core.rs:128).
+# ================================================================
+test_group("core: phase increment");
+var uc_pi = osc_new(WAVEFORM_SINE, f64_from(11025), f64_from(44100));
+assert_eq(osc_phase_increment(uc_pi), UC_0_25, "11025/44100 = exactly 0.25");
+assert_eq(osc_set_frequency(uc_pi, f64_from(4410)), NAAD_ERR_NONE, "set_frequency(4410) ok");
+assert_eq(osc_phase_increment(uc_pi), C0_1, "increment tracks set_frequency: 4410/44100 = 0.1");
+var uc_pi2 = osc_new(WAVEFORM_SINE, f64_from(11025), f64_from(88200));
+assert_eq(osc_phase_increment(uc_pi2), UC_0_125, "11025/88200 = exactly 0.125 (tracks sample rate)");
+
+# ================================================================
+# core: phase advance and wrap -- dt = 0.25 walks the phase through exact
+# quarters and wraps to exactly 0 (oracle core.rs:190-194).
+# ================================================================
+test_group("core: phase advance and wrap");
+var uc_ph = osc_new(WAVEFORM_SINE, f64_from(11025), f64_from(44100));
+var uc_s = osc_next_sample(uc_ph);
+assert_eq(osc_phase(uc_ph), UC_0_25, "phase 0 -> 0.25 after one sample");
+uc_s = osc_next_sample(uc_ph);
+assert_eq(osc_phase(uc_ph), F64_HALF, "phase 0.25 -> 0.5");
+uc_s = osc_next_sample(uc_ph);
+assert_eq(osc_phase(uc_ph), UC_0_75, "phase 0.5 -> 0.75");
+uc_s = osc_next_sample(uc_ph);
+assert_eq(osc_phase(uc_ph), 0, "phase 0.75 -> wraps to exactly 0");
+
+# ================================================================
+# core: set_phase / reset_phase. set_phase is rem_euclid(1.0), so a negative
+# phase wraps forward, NOT to a negative fract (oracle core.rs:265).
+# ================================================================
+test_group("core: set_phase / reset_phase");
+var uc_sp = osc_new(WAVEFORM_SINE, f64_from(440), f64_from(44100));
+osc_set_phase(uc_sp, UC_0_25);
+assert_eq(osc_phase(uc_sp), UC_0_25, "set_phase(0.25) round-trips exactly");
+osc_set_phase(uc_sp, f64_add(F64_ONE, UC_0_25));
+assert_eq(osc_phase(uc_sp), UC_0_25, "set_phase(1.25) wraps to exactly 0.25");
+osc_set_phase(uc_sp, f64_neg(UC_0_25));
+assert_eq(osc_phase(uc_sp), UC_0_75, "set_phase(-0.25) = 0.75 (rem_euclid, not fract)");
+osc_reset_phase(uc_sp);
+assert_eq(osc_phase(uc_sp), 0, "reset_phase() clears phase to exactly 0");
+
+# reset_phase must ALSO clear the triangle leaky integrator (oracle
+# core.rs:270-273). Record a fresh oscillator's first 8 triangle samples, run it
+# 200 more samples so triangle_sum accumulates, reset, and demand the same 8
+# samples back -- which only holds if triangle_sum went to zero too.
+var uc_tr = osc_new(WAVEFORM_TRIANGLE, f64_from(440), f64_from(44100));
+var uc_ref = vec_new();
+uc_i = 0;
+while (uc_i < 8) { vec_push(uc_ref, osc_next_sample(uc_tr)); uc_i = uc_i + 1; }
+var uc_ref_any = 0;
+uc_i = 0;
+while (uc_i < 8) {
+    if (f64_gt(f64_abs(vec_get(uc_ref, uc_i)), NAAD_EPSILON) == 1) { uc_ref_any = 1; }
+    uc_i = uc_i + 1;
+}
+assert(uc_ref_any, "triangle reference window is not all zeros (comparison is not vacuous)");
+var uc_tmp = 0;
+uc_i = 0;
+while (uc_i < 200) { uc_tmp = osc_next_sample(uc_tr); uc_i = uc_i + 1; }
+assert(f64_gt(f64_abs(uc_tmp), NAAD_EPSILON), "triangle integrator accumulated nonzero state");
+osc_reset_phase(uc_tr);
+var uc_reset_match = 1;
+uc_i = 0;
+while (uc_i < 8) {
+    if (osc_next_sample(uc_tr) != vec_get(uc_ref, uc_i)) { uc_reset_match = 0; }
+    uc_i = uc_i + 1;
+}
+assert(uc_reset_match, "reset_phase() clears triangle_sum (post-reset window == fresh window)");
+
+# ================================================================
+# core: pulse width -- round-trip, both clamp ends, and the duty cycle it
+# actually drives (oracle core.rs:259 / core.rs:176-181).
+# ================================================================
+test_group("core: pulse width");
+var uc_pw = osc_new(WAVEFORM_PULSE, f64_from(440), f64_from(44100));
+assert_eq(osc_pulse_width(uc_pw), F64_HALF, "fresh pulse_width = 0.5");
+osc_set_pulse_width(uc_pw, UC_0_25);
+assert_eq(osc_pulse_width(uc_pw), UC_0_25, "set_pulse_width(0.25) round-trips exactly");
+osc_set_pulse_width(uc_pw, 0);
+assert_eq(osc_pulse_width(uc_pw), C0_01, "set_pulse_width(0.0) clamps up to 0.01");
+osc_set_pulse_width(uc_pw, F64_ONE_HALF);
+assert_eq(osc_pulse_width(uc_pw), UC_0_99, "set_pulse_width(1.5) clamps down to 0.99");
+# Duty cycle: at phase 0.3 the naive pulse is high iff 0.3 < pulse_width. Both
+# PolyBLEP terms are 0 there (0.3 and fract(0.3 + 1 - pw) are far from any
+# discontinuity), so the sample is exactly +/-1.
+osc_set_pulse_width(uc_pw, UC_0_25);
+osc_set_phase(uc_pw, UC_0_3);
+assert_eq(osc_next_sample(uc_pw), f64_neg(F64_ONE), "pulse_width 0.25: phase 0.3 is in the low half -> -1");
+osc_set_pulse_width(uc_pw, UC_0_75);
+osc_set_phase(uc_pw, UC_0_3);
+assert_eq(osc_next_sample(uc_pw), F64_ONE, "pulse_width 0.75: phase 0.3 is in the high half -> +1");
+
+# ================================================================
+# core: advance_phase_sine -- the FM helper returns sin(2*pi*phase) BEFORE
+# advancing by the caller's dt, ignoring both the oscillator's waveform and its
+# own phase increment (oracle core.rs:286-293).
+# ================================================================
+test_group("core: advance_phase_sine");
+# A SAW oscillator: if advance_phase_sine consulted the waveform, phase 0.25
+# would give -0.5, not +1.0. Its own increment is 440/44100 ~ 0.00998, so an
+# exact 0.5 phase after the call proves the supplied dt was used.
+var uc_ap = osc_new(WAVEFORM_SAW, f64_from(440), f64_from(44100));
+osc_set_phase(uc_ap, UC_0_25);
+var uc_apv = osc_advance_phase_sine(uc_ap, UC_0_25);
+assert(f64_lt(f64_abs(f64_sub(uc_apv, F64_ONE)), UC_TOL), "advance_phase_sine at phase 0.25 = sin(pi/2) = 1");
+assert_eq(osc_phase(uc_ap), F64_HALF, "advance_phase_sine advanced phase by the supplied dt");
+uc_apv = osc_advance_phase_sine(uc_ap, UC_0_75);
+assert(f64_lt(f64_abs(uc_apv), UC_TOL), "advance_phase_sine at phase 0.5 = sin(pi) ~ 0");
+assert_eq(osc_phase(uc_ap), UC_0_25, "advance_phase_sine wraps 1.25 -> exactly 0.25");
+osc_set_phase(uc_ap, UC_0_75);
+uc_apv = osc_advance_phase_sine(uc_ap, 0);
+assert(f64_lt(f64_abs(f64_sub(uc_apv, f64_neg(F64_ONE))), UC_TOL), "advance_phase_sine at phase 0.75 = sin(3pi/2) = -1");
+assert_eq(osc_phase(uc_ap), UC_0_75, "advance_phase_sine with dt = 0 leaves the phase alone");
+
+# ================================================================
+# core: stateless_waveform_sample -- pure (waveform, t, dt) -> sample. Exact
+# values at known phases for every waveform id, including the out-of-range id
+# the Rust enum made unrepresentable (oracle core.rs:302-329).
+# ================================================================
+test_group("core: stateless waveform sample");
+# Sine.
+assert(f64_lt(f64_abs(f64_sub(osc_stateless_waveform_sample(WAVEFORM_SINE, UC_0_25, C0_01), F64_ONE)), UC_TOL), "stateless sine(0.25) = 1");
+assert(f64_lt(f64_abs(osc_stateless_waveform_sample(WAVEFORM_SINE, 0, C0_01)), UC_TOL), "stateless sine(0) = 0");
+assert(f64_lt(f64_abs(f64_sub(osc_stateless_waveform_sample(WAVEFORM_SINE, UC_0_75, C0_01), f64_neg(F64_ONE))), UC_TOL), "stateless sine(0.75) = -1");
+# Saw: naive 2t-1 in the PolyBLEP-free interior.
+assert_eq(osc_stateless_waveform_sample(WAVEFORM_SAW, F64_HALF, C0_01), 0, "stateless saw(0.5) = exactly 0");
+assert_eq(osc_stateless_waveform_sample(WAVEFORM_SAW, UC_0_25, C0_01), UC_NEG_0_5, "stateless saw(0.25) = exactly -0.5");
+assert_eq(osc_stateless_waveform_sample(WAVEFORM_SAW, UC_0_75, C0_01), F64_HALF, "stateless saw(0.75) = exactly 0.5");
+# ... and the correction IS applied inside the window: t=0.005, dt=0.01 gives
+# n=0.5, blep2=-0.25, cubic=-0.0625, so saw = -0.99 - (-0.3125) = -0.6775.
+assert(f64_lt(f64_abs(f64_sub(osc_stateless_waveform_sample(WAVEFORM_SAW, UC_0_005, C0_01), UC_SAW_BLEP)), UC_TOL_T), "stateless saw(0.005, 0.01) = -0.6775 (polyblep subtracted)");
+# Square, and Pulse -- which is a fixed 50% duty in the stateless path
+# ("Default 50% duty cycle for unison", oracle core.rs:322).
+assert_eq(osc_stateless_waveform_sample(WAVEFORM_SQUARE, UC_0_25, C0_01), F64_ONE, "stateless square(0.25) = exactly 1");
+assert_eq(osc_stateless_waveform_sample(WAVEFORM_SQUARE, UC_0_75, C0_01), f64_neg(F64_ONE), "stateless square(0.75) = exactly -1");
+assert_eq(osc_stateless_waveform_sample(WAVEFORM_PULSE, UC_0_25, C0_01), F64_ONE, "stateless pulse(0.25) = exactly 1 (50% duty)");
+assert_eq(osc_stateless_waveform_sample(WAVEFORM_PULSE, UC_0_75, C0_01), f64_neg(F64_ONE), "stateless pulse(0.75) = exactly -1 (50% duty)");
+# Triangle: naive piecewise ramp (no integrator here), all three branches.
+assert_eq(osc_stateless_waveform_sample(WAVEFORM_TRIANGLE, 0, C0_01), 0, "stateless triangle(0) = 0 (rising branch)");
+assert_eq(osc_stateless_waveform_sample(WAVEFORM_TRIANGLE, UC_0_125, C0_01), F64_HALF, "stateless triangle(0.125) = 0.5 (rising branch)");
+assert_eq(osc_stateless_waveform_sample(WAVEFORM_TRIANGLE, UC_0_25, C0_01), F64_ONE, "stateless triangle(0.25) = 1 (falling branch)");
+assert_eq(osc_stateless_waveform_sample(WAVEFORM_TRIANGLE, F64_HALF, C0_01), 0, "stateless triangle(0.5) = 0 (falling branch)");
+assert_eq(osc_stateless_waveform_sample(WAVEFORM_TRIANGLE, UC_0_875, C0_01), UC_NEG_0_5, "stateless triangle(0.875) = -0.5 (final branch)");
+# Noise ids produce silence -- detuned noise voices make no sense.
+assert_eq(osc_stateless_waveform_sample(WAVEFORM_WHITE_NOISE, UC_0_25, C0_01), 0, "stateless white noise -> 0");
+assert_eq(osc_stateless_waveform_sample(WAVEFORM_PINK_NOISE, UC_0_25, C0_01), 0, "stateless pink noise -> 0");
+assert_eq(osc_stateless_waveform_sample(WAVEFORM_BROWN_NOISE, UC_0_25, C0_01), 0, "stateless brown noise -> 0");
+# Out-of-range ids: unrepresentable in the Rust enum, so the port's fallthrough
+# is what has to hold the line -- it lands in the same silence arm.
+assert_eq(osc_stateless_waveform_sample(8, UC_0_25, C0_01), 0, "stateless waveform id 8 (out of range) -> 0");
+assert_eq(osc_stateless_waveform_sample(0 - 1, UC_0_25, C0_01), 0, "stateless waveform id -1 (out of range) -> 0");
+
+# ================================================================
+# core: the stateless path and Oscillator::next_sample are the same math for
+# the same (t, dt) -- checked both in the flat interior and at phase 0, where
+# the PolyBLEP correction is live.
+# ================================================================
+test_group("core: stateless matches Oscillator");
+var uc_x = osc_new(WAVEFORM_SAW, f64_from(440), f64_from(44100));
+var uc_dt = osc_phase_increment(uc_x);
+var uc_exp0 = osc_stateless_waveform_sample(WAVEFORM_SAW, 0, uc_dt);
+assert_eq(osc_next_sample(uc_x), uc_exp0, "saw at phase 0 (polyblep live) matches the stateless form");
+osc_set_phase(uc_x, UC_0_3);
+var uc_exp1 = osc_stateless_waveform_sample(WAVEFORM_SAW, UC_0_3, uc_dt);
+assert_eq(osc_next_sample(uc_x), uc_exp1, "saw at phase 0.3 matches the stateless form");
+assert(f64_gt(f64_abs(uc_exp1), NAAD_EPSILON), "saw(0.3) is nonzero (the match above is not 0 == 0)");
+var uc_y = osc_new(WAVEFORM_SQUARE, f64_from(440), f64_from(44100));
+osc_set_phase(uc_y, UC_0_3);
+assert_eq(osc_next_sample(uc_y), osc_stateless_waveform_sample(WAVEFORM_SQUARE, UC_0_3, uc_dt), "square at phase 0.3 matches the stateless form");
+
+# ================================================================
+# unison: accessors and setters -- constructor value, then a round-trip with a
+# value that is NOT the constructor's (oracle unison.rs:200-247).
+# ================================================================
+test_group("unison: accessors and setters");
+var un_u = unison_new(WAVEFORM_SAW, f64_from(440), 4, f64_from(10), f64_from(44100));
+assert_eq(unison_num_voices(un_u), 4, "num_voices() = constructor value");
+assert_eq(unison_frequency(un_u), f64_from(440), "frequency() = constructor value");
+assert_eq(unison_detune_cents(un_u), f64_from(10), "detune_cents() = constructor value");
+unison_set_num_voices(un_u, 3);
+assert_eq(unison_num_voices(un_u), 3, "set_num_voices(3) round-trips");
+assert_eq(unison_set_frequency(un_u, f64_from(880)), NAAD_ERR_NONE, "set_frequency(880) ok");
+assert_eq(unison_frequency(un_u), f64_from(880), "set_frequency(880) round-trips exactly");
+unison_set_detune_cents(un_u, f64_from(25));
+assert_eq(unison_detune_cents(un_u), f64_from(25), "set_detune_cents(25) round-trips exactly");
+# Clamps: n.clamp(1, 8) and cents.max(0.0).
+unison_set_num_voices(un_u, 0);
+assert_eq(unison_num_voices(un_u), 1, "set_num_voices(0) clamps up to 1");
+unison_set_num_voices(un_u, 99);
+assert_eq(unison_num_voices(un_u), 8, "set_num_voices(99) clamps down to 8");
+unison_set_num_voices(un_u, 0 - 3);
+assert_eq(unison_num_voices(un_u), 1, "set_num_voices(-3) clamps up to 1");
+unison_set_num_voices(un_u, 8);
+assert_eq(unison_num_voices(un_u), 8, "set_num_voices(8) is in range and kept");
+unison_set_num_voices(un_u, 1);
+assert_eq(unison_num_voices(un_u), 1, "set_num_voices(1) is in range and kept");
+unison_set_detune_cents(un_u, f64_neg(f64_from(5)));
+assert_eq(unison_detune_cents(un_u), 0, "set_detune_cents(-5) clamps to exactly 0");
+# The constructor applies the same clamps.
+var un_c1 = unison_new(WAVEFORM_SINE, f64_from(440), 0, 0, f64_from(44100));
+assert_eq(unison_num_voices(un_c1), 1, "constructor clamps num_voices 0 -> 1");
+var un_c8 = unison_new(WAVEFORM_SINE, f64_from(440), 99, f64_neg(f64_from(7)), f64_from(44100));
+assert_eq(unison_num_voices(un_c8), 8, "constructor clamps num_voices 99 -> 8");
+assert_eq(unison_detune_cents(un_c8), 0, "constructor clamps negative detune to exactly 0");
+# A rejected set_frequency must leave the old frequency in place.
+var un_f = unison_new(WAVEFORM_SINE, f64_from(440), 2, f64_from(10), f64_from(44100));
+assert(naad_is_err(unison_set_frequency(un_f, 0)), "unison set_frequency(0) err");
+assert_eq(unison_frequency(un_f), f64_from(440), "frequency unchanged after a rejected set_frequency(0)");
+assert(naad_is_err(unison_set_frequency(un_f, f64_from(25000))), "unison set_frequency above nyquist err");
+assert_eq(unison_frequency(un_f), f64_from(440), "frequency unchanged after a rejected above-nyquist set");
+
+# ================================================================
+# unison: recompute_ratios -- voices spread symmetrically over
+# [-cents/2, +cents/2], ratio = 2^(cents_offset/1200) (oracle unison.rs:95-109).
+# ================================================================
+test_group("unison: recompute_ratios");
+# 3 voices over 2400 cents -> offsets -1200 / 0 / +1200 -> ratios 0.5 / 1 / 2.
+var un_r = unison_new(WAVEFORM_SAW, f64_from(440), 3, f64_from(2400), f64_from(44100));
+var un_ratios = UnisonOscillator_detune_ratios(un_r);
+assert(f64_lt(f64_abs(f64_sub(vec_get(un_ratios, 0), F64_HALF)), UC_TOL), "voice 0 ratio = 2^-1 = 0.5");
+assert(f64_lt(f64_abs(f64_sub(vec_get(un_ratios, 1), F64_ONE)), UC_TOL), "voice 1 ratio = 2^0 = 1.0 (centre)");
+assert(f64_lt(f64_abs(f64_sub(vec_get(un_ratios, 2), F64_TWO)), UC_TOL), "voice 2 ratio = 2^1 = 2.0");
+assert_eq(UnisonOscillator_ratios_dirty(un_r), 0, "constructor primes the ratios (dirty flag cleared)");
+# A setter marks them dirty; recompute_ratios rebuilds and clears the flag.
+unison_set_detune_cents(un_r, f64_from(1200));
+assert_eq(UnisonOscillator_ratios_dirty(un_r), 1, "set_detune_cents marks the ratios dirty");
+unison_recompute_ratios(un_r);
+assert_eq(UnisonOscillator_ratios_dirty(un_r), 0, "recompute_ratios clears the dirty flag");
+assert(f64_lt(f64_abs(f64_sub(vec_get(un_ratios, 0), UC_2_M_HALF)), UC_TOL), "voice 0 ratio = 2^-0.5 after the 1200-cent respread");
+assert(f64_lt(f64_abs(f64_sub(vec_get(un_ratios, 1), F64_ONE)), UC_TOL), "voice 1 ratio stays 1.0 after the respread");
+assert(f64_lt(f64_abs(f64_sub(vec_get(un_ratios, 2), UC_SQRT2)), UC_TOL), "voice 2 ratio = 2^0.5 after the respread");
+unison_set_num_voices(un_r, 1);
+unison_recompute_ratios(un_r);
+assert_eq(vec_get(un_ratios, 0), F64_ONE, "single voice: ratio 0 reset to exactly 1.0");
+# Parity: the nv <= 1 branch writes ONLY slot 0, so the tail keeps stale values
+# (oracle unison.rs:97 `self.detune_ratios[0] = 1.0;`). Slots beyond
+# num_voices are never read, so this is harmless -- but it is the behaviour.
+assert(f64_lt(f64_abs(f64_sub(vec_get(un_ratios, 2), UC_SQRT2)), UC_TOL), "slots above num_voices keep stale ratios (oracle parity)");
+# Zero detune -> every active voice sits at ratio 1.0.
+var un_z = unison_new(WAVEFORM_SAW, f64_from(440), 4, 0, f64_from(44100));
+var un_zr = UnisonOscillator_detune_ratios(un_z);
+var un_z_ok = 1;
+un_i = 0;
+while (un_i < 4) {
+    if (f64_lt(f64_abs(f64_sub(vec_get(un_zr, un_i), F64_ONE)), UC_TOL) == 0) { un_z_ok = 0; }
+    un_i = un_i + 1;
+}
+assert(un_z_ok, "zero detune -> all four voice ratios are 1.0");
+
+# ================================================================
+# unison: advance_stereo -- writes the (left, right) pair at `idx` and nowhere
+# else, with the equal-power pan law of oracle unison.rs:148-181.
+# ================================================================
+test_group("unison: advance_stereo");
+# Single voice at 11025 Hz / 44100 Hz: ratio is exactly 1.0, so dt is exactly
+# 0.25 and the mono branch scales the raw sample by 1/sqrt(2) exactly.
+var un_m = unison_new(WAVEFORM_SAW, f64_from(11025), 1, 0, f64_from(44100));
+var un_m_ph0 = vec_get(UnisonOscillator_phases(un_m), 0);
+var un_m_raw = osc_stateless_waveform_sample(WAVEFORM_SAW, un_m_ph0, UC_0_25);
+var un_m_exp = f64_mul(un_m_raw, F64_FRAC_1_SQRT2);
+assert(f64_gt(f64_abs(un_m_exp), NAAD_EPSILON), "single-voice expectation is nonzero (comparisons below are not 0 == 0)");
+var un_l = vec_new();
+var un_r2 = vec_new();
+un_i = 0;
+while (un_i < 4) { vec_push(un_l, UC_SENTINEL); vec_push(un_r2, UC_SENTINEL); un_i = un_i + 1; }
+unison_advance_stereo(un_m, un_l, un_r2, 2);
+assert_eq(vec_get(un_l, 2), un_m_exp, "advance_stereo left = sample / sqrt(2) at nv = 1");
+assert_eq(vec_get(un_r2, 2), un_m_exp, "advance_stereo right = left at nv = 1 (centre pan)");
+assert_eq(vec_get(un_l, 0), UC_SENTINEL, "advance_stereo(idx=2) left slot 0 untouched");
+assert_eq(vec_get(un_l, 1), UC_SENTINEL, "advance_stereo(idx=2) left slot 1 untouched");
+assert_eq(vec_get(un_l, 3), UC_SENTINEL, "advance_stereo(idx=2) left slot 3 untouched");
+assert_eq(vec_get(un_r2, 0), UC_SENTINEL, "advance_stereo(idx=2) right slot 0 untouched");
+assert_eq(vec_get(un_r2, 3), UC_SENTINEL, "advance_stereo(idx=2) right slot 3 untouched");
+# The voice phase advanced by exactly dt, with the same >= 1 wrap.
+var un_m_exp_ph = f64_add(un_m_ph0, UC_0_25);
+if (f64_ge(un_m_exp_ph, F64_ONE) == 1) { un_m_exp_ph = f64_sub(un_m_exp_ph, F64_ONE); }
+assert_eq(vec_get(UnisonOscillator_phases(un_m), 0), un_m_exp_ph, "advance_stereo advanced the voice phase by exactly dt");
+# The mono path is the same generator: an identically-constructed unison
+# (deterministic phase seed) returns the un-panned sample.
+var un_mm = unison_new(WAVEFORM_SAW, f64_from(11025), 1, 0, f64_from(44100));
+assert_eq(unison_next_sample(un_mm), un_m_raw, "unison mono sample = the stateless sample at nv = 1");
+
+# spread = 0 collapses every voice to the centre, so both channels agree;
+# spread = 1 is already covered above by "unison: stereo spread".
+var un_s0 = unison_new(WAVEFORM_SAW, f64_from(440), 4, f64_from(10), f64_from(44100));
+unison_set_stereo_spread(un_s0, 0);
+var un_sl = vec_new();
+var un_sr = vec_new();
+vec_push(un_sl, UC_SENTINEL);
+vec_push(un_sr, UC_SENTINEL);
+unison_advance_stereo(un_s0, un_sl, un_sr, 0);
+assert(vec_get(un_sl, 0) != UC_SENTINEL, "advance_stereo actually wrote the left slot");
+assert(vec_get(un_sr, 0) != UC_SENTINEL, "advance_stereo actually wrote the right slot");
+assert(f64_gt(f64_abs(vec_get(un_sl, 0)), NAAD_EPSILON), "spread = 0 output is nonzero");
+assert(f64_lt(f64_abs(f64_sub(vec_get(un_sl, 0), vec_get(un_sr, 0))), UC_TOL), "spread = 0 -> left == right (all voices centred)");
+
+# advance_stereo is the shared core of next_sample_stereo: two identically
+# constructed oscillators must produce bit-identical pairs through both APIs.
+var un_a = unison_new(WAVEFORM_SAW, f64_from(440), 4, f64_from(10), f64_from(44100));
+var un_b = unison_new(WAVEFORM_SAW, f64_from(440), 4, f64_from(10), f64_from(44100));
+unison_set_stereo_spread(un_a, F64_ONE);
+unison_set_stereo_spread(un_b, F64_ONE);
+var un_al = vec_new();
+var un_ar = vec_new();
+vec_push(un_al, 0);
+vec_push(un_ar, 0);
+unison_advance_stereo(un_a, un_al, un_ar, 0);
+var un_pair = unison_next_sample_stereo(un_b);
+assert_eq(vec_get(un_al, 0), UnisonStereo_left(un_pair), "advance_stereo left == next_sample_stereo left");
+assert_eq(vec_get(un_ar, 0), UnisonStereo_right(un_pair), "advance_stereo right == next_sample_stereo right");
+assert(f64_gt(f64_abs(f64_sub(vec_get(un_al, 0), vec_get(un_ar, 0))), NAAD_EPSILON), "spread = 1 -> the two channels differ within a single sample");
+
 var rc = assert_summary();
 syscall(60, rc);

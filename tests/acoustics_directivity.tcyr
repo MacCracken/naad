@@ -99,5 +99,90 @@ assert(_dir_all_polar_ok(_dir_radians(90)) == 1, "polar == 3D @ 90deg");
 assert(_dir_all_polar_ok(_dir_radians(135)) == 1, "polar == 3D @ 135deg");
 assert(_dir_all_polar_ok(_dir_radians(180)) == 1, "polar == 3D @ 180deg");
 
+# ================================================================
+# naad_directivity_to_goonj -- the naad kind tag -> goonj DirectivityPattern
+# mapping every other entry point in this module funnels through. Two things
+# have to hold and neither is visible from a null check: the goonj pattern
+# must carry the tag for the SAME pattern (naad's NAAD_DIR_* and goonj's PAT_*
+# happen to share numbering today, so the tag is compared against the goonj
+# constant, not a literal), and it must behave like that pattern.
+# ================================================================
+test_group("to_goonj_maps_each_kind");
+assert_eq(DirectivityPattern_kind(naad_directivity_to_goonj(NAAD_DIR_OMNIDIRECTIONAL)), PAT_OMNI,
+  "omni -> PAT_OMNI");
+assert_eq(DirectivityPattern_kind(naad_directivity_to_goonj(NAAD_DIR_CARDIOID)), PAT_CARDIOID,
+  "cardioid -> PAT_CARDIOID");
+assert_eq(DirectivityPattern_kind(naad_directivity_to_goonj(NAAD_DIR_SUBCARDIOID)), PAT_SUBCARDIOID,
+  "subcardioid -> PAT_SUBCARDIOID");
+assert_eq(DirectivityPattern_kind(naad_directivity_to_goonj(NAAD_DIR_SUPERCARDIOID)), PAT_SUPERCARDIOID,
+  "supercardioid -> PAT_SUPERCARDIOID");
+assert_eq(DirectivityPattern_kind(naad_directivity_to_goonj(NAAD_DIR_FIGURE8)), PAT_FIGURE8,
+  "figure8 -> PAT_FIGURE8");
+# Analytical patterns carry no measured balloon (tabulated data is deliberately
+# out of naad's scope -- see the module header).
+assert_eq(DirectivityPattern_balloon(naad_directivity_to_goonj(NAAD_DIR_CARDIOID)), 0,
+  "cardioid pattern carries no balloon");
+assert_eq(DirectivityPattern_balloon(naad_directivity_to_goonj(NAAD_DIR_FIGURE8)), 0,
+  "figure8 pattern carries no balloon");
+assert_neq(DirectivityPattern_kind(naad_directivity_to_goonj(NAAD_DIR_FIGURE8)), PAT_TABULATED,
+  "naad never produces the tabulated pattern");
+
+# The Rust enum is #[non_exhaustive] and the port's dispatch ends in a bare
+# `return directivity_omnidirectional()`, so any unrecognised tag -- above the
+# range or negative -- must fall back to omni rather than to whatever happens
+# to be last in the if-chain.
+test_group("to_goonj_unknown_kind_falls_back_to_omni");
+assert_eq(DirectivityPattern_kind(naad_directivity_to_goonj(5)), PAT_OMNI, "kind 5 -> omni");
+assert_eq(DirectivityPattern_kind(naad_directivity_to_goonj(99)), PAT_OMNI, "kind 99 -> omni");
+assert_eq(DirectivityPattern_kind(naad_directivity_to_goonj(0 - 1)), PAT_OMNI, "kind -1 -> omni");
+# ...and the fallback pattern really is omni: unity in every direction.
+var fb = naad_directivity_to_goonj(99);
+var fb_front = hvec3_unit_x();
+assert(approx(directivity_gain(fb, hvec3_unit_x(), fb_front), F64_ONE, TOL_1E5),
+  "fallback pattern is unity on-axis");
+assert(approx(directivity_gain(fb, hvec3_neg(hvec3_unit_x()), fb_front), F64_ONE, TOL_1E5),
+  "fallback pattern is unity behind (omni, not cardioid)");
+assert(approx(directivity_gain(fb, hvec3_unit_y(), fb_front), F64_ONE, TOL_1E5),
+  "fallback pattern is unity to the side (omni, not figure-8)");
+
+# ================================================================
+# The mapping is only right if the mapped pattern RADIATES like the requested
+# one. Each kind is pinned at the angle that separates it from all the others:
+# rear gain is 1.0 (omni), 0.0 (cardioid), 0.5 (subcardioid), 0.0-clipped
+# (supercardioid) and 1.0 (figure-8), while side gain separates figure-8 (0.0)
+# from subcardioid (0.75). Values come from the closed forms documented on the
+# NAAD_DIR_* constants, evaluated through the goonj pattern to_goonj returned.
+# ================================================================
+test_group("to_goonj_patterns_radiate_correctly");
+var tg_front = hvec3_unit_x();
+var tg_rear = hvec3_neg(hvec3_unit_x());
+var tg_side = hvec3_unit_y();
+
+assert(approx(directivity_gain(naad_directivity_to_goonj(NAAD_DIR_OMNIDIRECTIONAL), tg_rear, tg_front),
+    F64_ONE, TOL_1E5), "omni rear gain == 1.0");
+assert(approx(directivity_gain(naad_directivity_to_goonj(NAAD_DIR_CARDIOID), tg_rear, tg_front),
+    0, TOL_1E5), "cardioid rear gain == 0.0");
+assert(approx(directivity_gain(naad_directivity_to_goonj(NAAD_DIR_CARDIOID), tg_side, tg_front),
+    F64_HALF, TOL_1E5), "cardioid side gain == 0.5");
+assert(approx(directivity_gain(naad_directivity_to_goonj(NAAD_DIR_SUBCARDIOID), tg_rear, tg_front),
+    F64_HALF, TOL_1E5), "subcardioid rear gain == 0.5");
+assert(approx(directivity_gain(naad_directivity_to_goonj(NAAD_DIR_SUBCARDIOID), tg_side, tg_front),
+    NAAD_DIR_0_75, TOL_1E5), "subcardioid side gain == 0.75");
+assert(approx(directivity_gain(naad_directivity_to_goonj(NAAD_DIR_SUPERCARDIOID), tg_side, tg_front),
+    NAAD_DIR_0_37, TOL_1E5), "supercardioid side gain == 0.37");
+assert(approx(directivity_gain(naad_directivity_to_goonj(NAAD_DIR_SUPERCARDIOID), tg_rear, tg_front),
+    0, TOL_1E5), "supercardioid rear gain == 0.0 (clipped)");
+assert(approx(directivity_gain(naad_directivity_to_goonj(NAAD_DIR_FIGURE8), tg_rear, tg_front),
+    F64_ONE, TOL_1E5), "figure8 rear gain == 1.0");
+assert(approx(directivity_gain(naad_directivity_to_goonj(NAAD_DIR_FIGURE8), tg_side, tg_front),
+    0, TOL_1E5), "figure8 side gain == 0.0");
+
+# Each call hands back its own pattern -- callers may mutate one without
+# disturbing another (naad_directivity_gain builds a fresh one per call).
+var tg_a = naad_directivity_to_goonj(NAAD_DIR_CARDIOID);
+var tg_b = naad_directivity_to_goonj(NAAD_DIR_CARDIOID);
+assert_neq(tg_a, tg_b, "to_goonj allocates a fresh pattern per call");
+assert_eq(DirectivityPattern_kind(tg_a), DirectivityPattern_kind(tg_b), "...with the same kind");
+
 var rc = assert_summary();
 syscall(60, rc);

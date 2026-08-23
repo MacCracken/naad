@@ -33,6 +33,14 @@ fn large_room() {
       "concrete", source, listener, 48000);
 }
 
+# small_room() with caller-supplied dimensions (for the per-guard checks).
+fn room_dims(length, width, height) {
+    var source = hvec3_new(F64_ONE, one_and_half(), F64_ONE);
+    var listener = hvec3_new(f64_from(4), one_and_half(), f64_from(3));
+    return naad_room_reverb_config_new(length, width, height,
+      "carpet", source, listener, 48000);
+}
+
 # Oracle small_room() with a caller-supplied wall material (for the
 # unknown-material variant).
 fn small_room_mat(material) {
@@ -88,6 +96,79 @@ assert(f64_ge(CoupledDecayResult_rt60_late(d2), CoupledDecayResult_rt60_early(d2
 test_group("invalid_material_errors");
 var bad_cfg = naad_coupled_room_config_new(small_room_mat("kryptonite"), large_room(), portal());
 assert_eq(naad_is_err(naad_coupled_analyze_decay(bad_cfg)), 1, "unknown material -> error");
+
+# ================================================================
+# naad_coupled_build_room -- the private `build_room` helper the analysis
+# calls twice. It must (a) resolve the wall material by NAME, (b) reject a bad
+# material and every non-positive dimension, and (c) hand goonj the dimensions
+# in the length/width/height ORDER the shoebox builder expects. (c) is the
+# part a "returns non-null" assertion cannot see, so the geometry is read back:
+# goonj's shoebox puts the floor first (vertices (0,0,0), (length,0,0),
+# (length,0,width), (0,0,width)) and the ceiling second at y = height, so a
+# transposed argument shows up as a swapped coordinate. Deliberately uses
+# 5 x 4 x 3 -- three DIFFERENT numbers -- so no permutation passes.
+# ================================================================
+test_group("build_room_builds_the_requested_shoebox");
+var br = naad_coupled_build_room(small_room());
+assert_eq(naad_is_err(br), 0, "valid config -> a room, not an error code");
+var br_walls = RoomGeometry_walls(AcousticRoom_geometry(br));
+assert_eq(vec_len(br_walls), 6, "shoebox has six walls");
+
+# Floor (wall 0): v1 carries length on x, v2 carries width on z.
+var br_floor = vec_get(br_walls, 0);
+var br_fv = Wall_vertices(br_floor);
+assert_eq(HVec3_x(vec_get(br_fv, 0)), 0, "floor origin x == 0");
+assert_eq(HVec3_y(vec_get(br_fv, 0)), 0, "floor origin y == 0");
+assert_eq(HVec3_z(vec_get(br_fv, 0)), 0, "floor origin z == 0");
+assert_eq(HVec3_x(vec_get(br_fv, 1)), f64_from(5), "length (5 m) went to x");
+assert_eq(HVec3_z(vec_get(br_fv, 2)), f64_from(4), "width (4 m) went to z");
+assert_eq(HVec3_y(vec_get(br_fv, 2)), 0, "the floor stays at y == 0");
+
+# Ceiling (wall 1) sits at y = height.
+var br_cv = Wall_vertices(vec_get(br_walls, 1));
+assert_eq(HVec3_y(vec_get(br_cv, 0)), f64_from(3), "height (3 m) went to y");
+
+# The material is the one the NAME resolved to, on every wall.
+var br_mat_ok = 1;
+var br_i = 0;
+while (br_i < 6) {
+    if (streq(am_name(Wall_material(vec_get(br_walls, br_i))), "carpet") == 0) { br_mat_ok = 0; }
+    br_i = br_i + 1;
+}
+assert_eq(br_mat_ok, 1, "every wall carries the carpet material named in the config");
+# ...and it really is name-driven, not a hard-coded default.
+var br_concrete = naad_coupled_build_room(large_room());
+assert_eq(naad_is_err(br_concrete), 0, "concrete config -> a room");
+assert_streq(am_name(Wall_material(vec_get(RoomGeometry_walls(AcousticRoom_geometry(br_concrete)), 0))),
+  "concrete", "a different material name yields a different material");
+# The 20 x 15 x 8 room is genuinely different geometry, not a cached 5 x 4 x 3.
+var br_cw = RoomGeometry_walls(AcousticRoom_geometry(br_concrete));
+assert_eq(HVec3_x(vec_get(Wall_vertices(vec_get(br_cw, 0)), 1)), f64_from(20), "second room's length is 20 m");
+assert_eq(HVec3_y(vec_get(Wall_vertices(vec_get(br_cw, 1)), 0)), f64_from(8), "second room's height is 8 m");
+
+# ================================================================
+# build_room's rejection paths, one guard at a time. Each returns the
+# NAAD_ERR_COMPUTATION code itself, not merely "some negative".
+# ================================================================
+test_group("build_room_rejects_invalid_configs");
+assert_eq(naad_coupled_build_room(small_room_mat("kryptonite")), NAAD_ERR_COMPUTATION,
+  "unknown material -> NAAD_ERR_COMPUTATION");
+assert_eq(naad_coupled_build_room(room_dims(0, f64_from(4), f64_from(3))), NAAD_ERR_COMPUTATION,
+  "zero length -> NAAD_ERR_COMPUTATION");
+assert_eq(naad_coupled_build_room(room_dims(f64_neg(F64_ONE), f64_from(4), f64_from(3))), NAAD_ERR_COMPUTATION,
+  "negative length -> NAAD_ERR_COMPUTATION");
+assert_eq(naad_coupled_build_room(room_dims(f64_from(5), 0, f64_from(3))), NAAD_ERR_COMPUTATION,
+  "zero width -> NAAD_ERR_COMPUTATION");
+assert_eq(naad_coupled_build_room(room_dims(f64_from(5), f64_neg(F64_ONE), f64_from(3))), NAAD_ERR_COMPUTATION,
+  "negative width -> NAAD_ERR_COMPUTATION");
+assert_eq(naad_coupled_build_room(room_dims(f64_from(5), f64_from(4), 0)), NAAD_ERR_COMPUTATION,
+  "zero height -> NAAD_ERR_COMPUTATION");
+assert_eq(naad_coupled_build_room(room_dims(f64_from(5), f64_from(4), f64_neg(F64_ONE))), NAAD_ERR_COMPUTATION,
+  "negative height -> NAAD_ERR_COMPUTATION");
+# A room that is valid on every axis still builds -- the guards are not
+# rejecting everything.
+assert_eq(naad_is_err(naad_coupled_build_room(room_dims(f64_from(5), f64_from(4), f64_from(3)))), 0,
+  "all-positive dimensions still build");
 
 var rc = assert_summary();
 syscall(60, rc);

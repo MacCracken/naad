@@ -20,6 +20,9 @@ var C0_3   = 0x3fd3333333333333;   # 0.3
 var C0_05  = 0x3fa999999999999a;   # 0.05
 var C0_2   = 0x3fc999999999999a;   # 0.2
 var C1E_3  = 0x3f50624dd2f1a9fc;   # 1e-3 (== 0.001)
+var C0_4   = 0x3fd999999999999a;   # 0.4
+var C0_45  = 0x3fdccccccccccccd;   # 0.45
+var C0_75  = 0x3fe8000000000000;   # 0.75
 
 var SR = 44100;
 var drop = 0;
@@ -169,6 +172,315 @@ var bad3 = vec_new();
 vec_push(bad3, envelope_point_new(0, 0));
 vec_push(bad3, envelope_point_new(C0_1, F64_ONE));
 assert(naad_is_err(envelope_catmull_rom_new(bad3, f64_neg(F64_ONE))), "bad sample rate err");
+
+# ================================================================
+# 2.2.1 -- envelope_adsr_state had NO coverage: every existing ADSR assertion
+# went through envelope_adsr_is_active, which collapses four distinct states
+# into a single bit. The state machine itself was therefore untested.
+# Oracle: rust-old/src/envelope.rs:133 (`state()`), :137-155 (gate_on/gate_off)
+# and the next_value arms.
+#
+# Everything below runs at 10 Hz with 1-second stages, so each stage is exactly
+# 10 samples and every intermediate value is an exact f64 -- the assertions
+# compare raw bit patterns, never f64_to.
+# ================================================================
+test_group("adsr state machine: gate_on -> attack -> decay -> sustain");
+var k2 = 0;
+var SR10 = f64_from(10);
+var eas = envelope_adsr_with_sample_rate(F64_ONE, F64_ONE, C0_5, F64_ONE, SR10);
+assert_eq(envelope_adsr_state(eas), ENV_STATE_IDLE, "constructor value: a fresh ADSR is IDLE");
+assert_eq(envelope_adsr_is_active(eas), 0, "IDLE agrees with is_active == 0");
+
+envelope_adsr_gate_on(eas);
+assert_eq(envelope_adsr_state(eas), ENV_STATE_ATTACK, "gate_on -> ATTACK (before any sample is drawn)");
+assert_eq(envelope_adsr_is_active(eas), 1, "ATTACK agrees with is_active == 1");
+
+var a0 = envelope_adsr_next_value(eas);          # attack sample 0
+assert_eq(a0, 0, "attack sample 0 is exactly +0.0");
+assert_eq(envelope_adsr_state(eas), ENV_STATE_ATTACK, "one sample in, still ATTACK");
+k2 = 0;
+while (k2 < 4) { drop = envelope_adsr_next_value(eas); k2 = k2 + 1; }   # samples 1..4
+var a5 = envelope_adsr_next_value(eas);          # attack sample 5
+assert_eq(a5, C0_5, "attack is linear: sample 5 of 10 is exactly 0.5");
+assert_eq(envelope_adsr_state(eas), ENV_STATE_ATTACK, "half way up is still ATTACK, not DECAY");
+k2 = 0;
+while (k2 < 4) { drop = envelope_adsr_next_value(eas); k2 = k2 + 1; }   # samples 6..9
+assert_eq(envelope_adsr_state(eas), ENV_STATE_ATTACK, "sample 9 of 10 is still ATTACK");
+var apeak = envelope_adsr_next_value(eas);       # attack sample 10
+assert_eq(apeak, F64_ONE, "attack peaks at exactly 1.0");
+assert_eq(envelope_adsr_state(eas), ENV_STATE_DECAY, "reaching 1.0 transitions ATTACK -> DECAY");
+
+var d0 = envelope_adsr_next_value(eas);          # decay sample 0
+assert_eq(d0, F64_ONE, "decay begins at exactly 1.0");
+assert_eq(envelope_adsr_state(eas), ENV_STATE_DECAY, "decay sample 0 stays in DECAY");
+k2 = 0;
+while (k2 < 4) { drop = envelope_adsr_next_value(eas); k2 = k2 + 1; }   # samples 1..4
+var d5 = envelope_adsr_next_value(eas);          # decay sample 5
+assert_eq(d5, C0_75, "decay is linear 1.0 -> 0.5: the midpoint is exactly 0.75");
+assert_eq(envelope_adsr_state(eas), ENV_STATE_DECAY, "the midpoint of the decay is still DECAY");
+k2 = 0;
+while (k2 < 4) { drop = envelope_adsr_next_value(eas); k2 = k2 + 1; }   # samples 6..9
+assert_eq(envelope_adsr_state(eas), ENV_STATE_DECAY, "sample 9 of the decay is still DECAY");
+var dsus = envelope_adsr_next_value(eas);        # decay sample 10
+assert_eq(dsus, C0_5, "decay lands exactly on the sustain level");
+assert_eq(envelope_adsr_state(eas), ENV_STATE_SUSTAIN, "reaching the sustain level transitions DECAY -> SUSTAIN");
+
+# SUSTAIN is a fixed point: it never advances on its own, however long it runs.
+var sus_ok = 1;
+k2 = 0;
+while (k2 < 200) {
+    var sv2 = envelope_adsr_next_value(eas);
+    if (sv2 != C0_5) { sus_ok = 0; }
+    if (envelope_adsr_state(eas) != ENV_STATE_SUSTAIN) { sus_ok = 0; }
+    k2 = k2 + 1;
+}
+assert(sus_ok, "SUSTAIN holds exactly 0.5 and never leaves the SUSTAIN state on its own");
+
+test_group("adsr state machine: gate_off -> release -> idle");
+envelope_adsr_gate_off(eas);
+assert_eq(envelope_adsr_state(eas), ENV_STATE_RELEASE, "gate_off -> RELEASE (before any sample is drawn)");
+assert_eq(envelope_adsr_is_active(eas), 1, "RELEASE agrees with is_active == 1");
+var r0 = envelope_adsr_next_value(eas);          # release sample 0
+assert_eq(r0, C0_5, "release starts from the value captured at gate_off");
+assert_eq(envelope_adsr_state(eas), ENV_STATE_RELEASE, "release sample 0 stays in RELEASE");
+k2 = 0;
+while (k2 < 4) { drop = envelope_adsr_next_value(eas); k2 = k2 + 1; }   # samples 1..4
+var r5 = envelope_adsr_next_value(eas);          # release sample 5
+assert_eq(r5, C0_25, "release is linear from 0.5: half way down is exactly 0.25");
+assert_eq(envelope_adsr_state(eas), ENV_STATE_RELEASE, "half way down is still RELEASE");
+k2 = 0;
+while (k2 < 4) { drop = envelope_adsr_next_value(eas); k2 = k2 + 1; }   # samples 6..9
+assert_eq(envelope_adsr_state(eas), ENV_STATE_RELEASE, "sample 9 of the release is still RELEASE");
+var rend = envelope_adsr_next_value(eas);        # release sample 10
+assert_eq(rend, 0, "release reaches exactly +0.0");
+assert_eq(envelope_adsr_state(eas), ENV_STATE_IDLE, "reaching zero transitions RELEASE -> IDLE");
+assert_eq(envelope_adsr_is_active(eas), 0, "IDLE agrees with is_active == 0");
+
+# IDLE is a fixed point, and gate_off on IDLE is a no-op (oracle guards on
+# `if self.state != EnvelopeState::Idle`).
+var i0 = envelope_adsr_next_value(eas);
+assert_eq(i0, 0, "IDLE emits exactly +0.0");
+assert_eq(envelope_adsr_state(eas), ENV_STATE_IDLE, "IDLE is a fixed point of next_value");
+envelope_adsr_gate_off(eas);
+assert_eq(envelope_adsr_state(eas), ENV_STATE_IDLE, "gate_off on an IDLE envelope is a no-op, NOT a jump to RELEASE");
+envelope_adsr_gate_on(eas);
+assert_eq(envelope_adsr_state(eas), ENV_STATE_ATTACK, "gate_on from IDLE re-enters ATTACK");
+var re0 = envelope_adsr_next_value(eas);
+assert_eq(re0, 0, "the retriggered attack restarts from exactly +0.0");
+
+test_group("adsr gate_off short-circuits from any stage");
+# Mid-ATTACK: gate_off must go straight to RELEASE, skipping DECAY and SUSTAIN,
+# and release from the CURRENT attack value rather than from the sustain level.
+var eaa = envelope_adsr_with_sample_rate(F64_ONE, F64_ONE, C0_5, F64_ONE, SR10);
+envelope_adsr_gate_on(eaa);
+k2 = 0;
+while (k2 < 4) { drop = envelope_adsr_next_value(eaa); k2 = k2 + 1; }   # samples 0..3
+var a3 = envelope_adsr_next_value(eaa);                                 # sample 4 -> 0.4
+assert_eq(a3, C0_4, "mid-attack value is exactly 0.4");
+assert_eq(envelope_adsr_state(eaa), ENV_STATE_ATTACK, "still mid-ATTACK");
+envelope_adsr_gate_off(eaa);
+assert_eq(envelope_adsr_state(eaa), ENV_STATE_RELEASE, "gate_off mid-ATTACK -> RELEASE, skipping DECAY and SUSTAIN");
+var ar0 = envelope_adsr_next_value(eaa);
+assert_eq(ar0, C0_4, "the release starts from the mid-attack 0.4, not from the sustain level");
+
+# Mid-DECAY: same short-circuit.
+var ead = envelope_adsr_with_sample_rate(F64_ONE, F64_ONE, C0_5, F64_ONE, SR10);
+envelope_adsr_gate_on(ead);
+k2 = 0;
+while (k2 < 11) { drop = envelope_adsr_next_value(ead); k2 = k2 + 1; }  # through the attack
+assert_eq(envelope_adsr_state(ead), ENV_STATE_DECAY, "reached DECAY");
+k2 = 0;
+while (k2 < 5) { drop = envelope_adsr_next_value(ead); k2 = k2 + 1; }   # decay samples 0..4
+var d4 = envelope_adsr_next_value(ead);                                 # decay sample 5 -> 0.75
+assert_eq(d4, C0_75, "mid-decay value is exactly 0.75");
+envelope_adsr_gate_off(ead);
+assert_eq(envelope_adsr_state(ead), ENV_STATE_RELEASE, "gate_off mid-DECAY -> RELEASE");
+var dr0 = envelope_adsr_next_value(ead);
+assert_eq(dr0, C0_75, "the release starts from the mid-decay 0.75");
+
+test_group("adsr state machine with zero-length stages");
+# A zero-length stage must still be traversed as a state, one sample per stage.
+var eaz = envelope_adsr_with_sample_rate(0, 0, C0_5, 0, SR10);
+assert_eq(envelope_adsr_state(eaz), ENV_STATE_IDLE, "zero-time ADSR still starts IDLE");
+envelope_adsr_gate_on(eaz);
+assert_eq(envelope_adsr_state(eaz), ENV_STATE_ATTACK, "gate_on -> ATTACK even with a zero attack time");
+var z0 = envelope_adsr_next_value(eaz);
+assert_eq(z0, F64_ONE, "a zero-length attack jumps to exactly 1.0");
+assert_eq(envelope_adsr_state(eaz), ENV_STATE_DECAY, "a zero-length attack leaves ATTACK after one sample");
+var z1 = envelope_adsr_next_value(eaz);
+assert_eq(z1, C0_5, "a zero-length decay drops to exactly the sustain level");
+assert_eq(envelope_adsr_state(eaz), ENV_STATE_SUSTAIN, "a zero-length decay leaves DECAY after one sample");
+envelope_adsr_gate_off(eaz);
+assert_eq(envelope_adsr_state(eaz), ENV_STATE_RELEASE, "gate_off -> RELEASE");
+var z2 = envelope_adsr_next_value(eaz);
+assert_eq(z2, 0, "a zero-length release drops to exactly +0.0");
+assert_eq(envelope_adsr_state(eaz), ENV_STATE_IDLE, "a zero-length release leaves RELEASE after one sample");
+
+# ================================================================
+# 2.2.1 -- envelope_catmull_rom_num_points (oracle rust-old/src/envelope.rs:493)
+# was referenced only by the dropped serde round-trip test, so nothing called it.
+# ================================================================
+test_group("catmull_rom num_points");
+var cp2 = vec_new();
+vec_push(cp2, envelope_point_new(0, 0));
+vec_push(cp2, envelope_point_new(C0_5, F64_ONE));
+var ecp2 = envelope_catmull_rom_new(cp2, f64_from(SR));
+assert_eq(envelope_catmull_rom_num_points(ecp2), 2, "the two-point minimum reports 2");
+var cp5 = vec_new();
+vec_push(cp5, envelope_point_new(0, 0));
+vec_push(cp5, envelope_point_new(C0_1, F64_ONE));
+vec_push(cp5, envelope_point_new(C0_2, C0_5));
+vec_push(cp5, envelope_point_new(C0_3, C0_7));
+vec_push(cp5, envelope_point_new(C0_5, 0));
+var ecp5 = envelope_catmull_rom_new(cp5, f64_from(SR));
+assert_eq(envelope_catmull_rom_num_points(ecp5), 5, "a five-point envelope reports 5");
+assert_neq(envelope_catmull_rom_num_points(ecp5), envelope_catmull_rom_num_points(ecp2),
+  "num_points is per-envelope, not a constant");
+# The count is the constructor's point list and is unaffected by the life cycle.
+envelope_catmull_rom_trigger(ecp5);
+drop = envelope_catmull_rom_next_value(ecp5);
+drop = envelope_catmull_rom_next_value(ecp5);
+assert_eq(envelope_catmull_rom_num_points(ecp5), 5, "num_points is unchanged by trigger + next_value");
+envelope_catmull_rom_release(ecp5);
+assert_eq(envelope_catmull_rom_num_points(ecp5), 5, "num_points is unchanged by release");
+# It counts the points, not the spline segments (a 5-point curve has 4).
+assert_neq(envelope_catmull_rom_num_points(ecp5), 4, "num_points counts points, not segments");
+
+# ================================================================
+# 2.2.1 -- envelope_catmull_rom_release (oracle rust-old/src/envelope.rs:424)
+# had no caller at all: nothing checked that a running envelope can be stopped.
+# ================================================================
+test_group("catmull_rom release");
+var rp = vec_new();
+vec_push(rp, envelope_point_new(0, C0_3));
+vec_push(rp, envelope_point_new(C0_1, F64_ONE));
+vec_push(rp, envelope_point_new(C0_2, C0_7));
+var erel = envelope_catmull_rom_new(rp, f64_from(SR));
+assert_eq(envelope_catmull_rom_is_active(erel), 0, "constructor value: a fresh envelope is inactive");
+envelope_catmull_rom_release(erel);
+assert_eq(envelope_catmull_rom_is_active(erel), 0, "release on an untriggered envelope leaves it inactive");
+envelope_catmull_rom_trigger(erel);
+assert_eq(envelope_catmull_rom_is_active(erel), 1, "trigger activates it");
+var cfirst = envelope_catmull_rom_next_value(erel);
+assert_eq(cfirst, C0_3, "sample 0 is the first control point's value, exactly 0.3");
+var csecond = envelope_catmull_rom_next_value(erel);
+assert_neq(csecond, 0, "the envelope is emitting non-zero values before release");
+envelope_catmull_rom_release(erel);
+assert_eq(envelope_catmull_rom_is_active(erel), 0, "release deactivates a RUNNING envelope");
+var crel = envelope_catmull_rom_next_value(erel);
+assert_eq(crel, 0, "next_value returns exactly +0.0 after release");
+# Release is sticky -- it does not merely skip one sample.
+var rel_ok = 1;
+k2 = 0;
+while (k2 < 100) {
+    var rv = envelope_catmull_rom_next_value(erel);
+    if (rv != 0) { rel_ok = 0; }
+    if (envelope_catmull_rom_is_active(erel) != 0) { rel_ok = 0; }
+    k2 = k2 + 1;
+}
+assert(rel_ok, "release is sticky: every later sample is exactly +0.0 and the envelope stays inactive");
+# ...and it is release, not exhaustion: trigger restarts the same curve from t = 0.
+envelope_catmull_rom_trigger(erel);
+assert_eq(envelope_catmull_rom_is_active(erel), 1, "trigger after release reactivates the envelope");
+var cre = envelope_catmull_rom_next_value(erel);
+assert_eq(cre, cfirst, "trigger after release restarts at t = 0, reproducing sample 0 bit for bit");
+var cre2 = envelope_catmull_rom_next_value(erel);
+assert_eq(cre2, csecond, "and reproduces sample 1 bit for bit");
+
+# ================================================================
+# 2.2.1 -- envelope_multistage_with_sample_rate (oracle
+# rust-old/src/envelope.rs:267) was only ever reached through
+# envelope_multistage_new, which hardcodes 44100, so the `sample_rate`
+# parameter and both error arms were untested.
+# ================================================================
+test_group("multistage_with_sample_rate error arms");
+# Exact error codes, not just "an error": the two arms are distinguishable.
+var msempty = vec_new();
+assert_eq(envelope_multistage_with_sample_rate(msempty, f64_from(SR)), NAAD_ERR_INVALID_PARAMETER,
+  "an empty segment list is INVALID_PARAMETER");
+var msone = vec_new();
+vec_push(msone, envelope_segment_new(F64_ONE, F64_ONE));
+assert_eq(envelope_multistage_with_sample_rate(msone, 0), NAAD_ERR_INVALID_SAMPLE_RATE,
+  "sample rate +0.0 is INVALID_SAMPLE_RATE, not INVALID_PARAMETER");
+assert_eq(envelope_multistage_with_sample_rate(msone, f64_neg(F64_ONE)), NAAD_ERR_INVALID_SAMPLE_RATE,
+  "a negative sample rate is INVALID_SAMPLE_RATE");
+# The empty-segments check runs before the sample-rate check.
+assert_eq(envelope_multistage_with_sample_rate(msempty, f64_neg(F64_ONE)), NAAD_ERR_INVALID_PARAMETER,
+  "empty segments are rejected before the sample rate is looked at");
+
+test_group("multistage_with_sample_rate honours the given rate");
+# One 1-second ramp to 1.0. At 10 Hz that is exactly 10 samples, so sample k
+# carries exactly k/10 and the sample rate is directly observable in the output.
+var sg10 = vec_new();
+vec_push(sg10, envelope_segment_new(F64_ONE, F64_ONE));
+var ms10 = envelope_multistage_with_sample_rate(sg10, SR10);
+assert_eq(MultiStageEnvelope_sample_rate(ms10), SR10, "the requested sample rate is stored, not the 44100 default");
+assert_neq(MultiStageEnvelope_sample_rate(ms10), f64_from(44100), "10 Hz is not the default rate");
+assert_eq(envelope_multistage_is_active(ms10), 0, "a freshly built multistage envelope is inactive");
+envelope_multistage_trigger(ms10);
+assert_eq(envelope_multistage_is_active(ms10), 1, "trigger activates it");
+var g0 = envelope_multistage_next_value(ms10);
+assert_eq(g0, 0, "sample 0 of the ramp is exactly +0.0");
+k2 = 0;
+while (k2 < 3) { drop = envelope_multistage_next_value(ms10); k2 = k2 + 1; }   # samples 1..3
+var g4 = envelope_multistage_next_value(ms10);                                  # sample 4
+assert_eq(g4, C0_4, "sample 4 of a 10-sample ramp is exactly 0.4");
+k2 = 0;
+while (k2 < 4) { drop = envelope_multistage_next_value(ms10); k2 = k2 + 1; }   # samples 5..8
+var g9 = envelope_multistage_next_value(ms10);                                  # sample 9 completes it
+assert_eq(g9, F64_ONE, "the 10th sample snaps exactly onto the segment target 1.0");
+assert_eq(envelope_multistage_is_active(ms10), 1, "still active on the sample that completes the last segment");
+var g10 = envelope_multistage_next_value(ms10);
+assert_eq(g10, 0, "past the last segment the value is exactly +0.0");
+assert_eq(envelope_multistage_is_active(ms10), 0, "and the envelope has marked itself inactive");
+
+# The SAME segment list at 20 Hz takes 20 samples: after 10 samples it is only
+# 0.45 and is still running. An implementation that ignored `sample_rate`
+# cannot satisfy both this and the 10 Hz block above.
+var sg20 = vec_new();
+vec_push(sg20, envelope_segment_new(F64_ONE, F64_ONE));
+var ms20 = envelope_multistage_with_sample_rate(sg20, f64_from(20));
+envelope_multistage_trigger(ms20);
+k2 = 0;
+while (k2 < 9) { drop = envelope_multistage_next_value(ms20); k2 = k2 + 1; }   # samples 0..8
+var h9 = envelope_multistage_next_value(ms20);                                  # sample 9 -> 9/20
+assert_eq(h9, C0_45, "at 20 Hz the identical segment is only 0.45 after 10 samples");
+assert_eq(envelope_multistage_is_active(ms20), 1, "at 20 Hz the segment is not finished after 10 samples");
+assert_neq(h9, F64_ONE, "20 Hz and 10 Hz genuinely disagree at the same sample index");
+
+# envelope_multistage_new is defined as with_sample_rate(segments, 44100).
+var sgd = vec_new();
+vec_push(sgd, envelope_segment_new(F64_ONE, F64_ONE));
+var msd = envelope_multistage_new(sgd);
+assert_eq(MultiStageEnvelope_sample_rate(msd), f64_from(44100), "multistage_new defaults to exactly 44100 Hz");
+
+test_group("multistage segment hand-over at an explicit rate");
+# Two segments at 10 Hz: 0 -> 1 over 10 samples, then 1 -> 0.5 over 10.
+var sg2 = vec_new();
+vec_push(sg2, envelope_segment_new(F64_ONE, F64_ONE));
+vec_push(sg2, envelope_segment_new(C0_5, F64_ONE));
+var ms2 = envelope_multistage_with_sample_rate(sg2, SR10);
+envelope_multistage_trigger(ms2);
+assert_eq(MultiStageEnvelope_current_segment(ms2), 0, "trigger starts on segment 0");
+k2 = 0;
+while (k2 < 10) { drop = envelope_multistage_next_value(ms2); k2 = k2 + 1; }
+assert_eq(MultiStageEnvelope_current_segment(ms2), 1, "segment 0 completed after exactly 10 samples and handed over");
+assert_eq(envelope_multistage_is_active(ms2), 1, "the envelope is still running on segment 1");
+var q0 = envelope_multistage_next_value(ms2);
+assert_eq(q0, F64_ONE, "segment 1 starts from segment 0's target 1.0, not from 0.0");
+k2 = 0;
+while (k2 < 4) { drop = envelope_multistage_next_value(ms2); k2 = k2 + 1; }
+var q5 = envelope_multistage_next_value(ms2);
+assert_eq(q5, C0_75, "segment 1 is linear 1.0 -> 0.5: the midpoint is exactly 0.75");
+k2 = 0;
+while (k2 < 3) { drop = envelope_multistage_next_value(ms2); k2 = k2 + 1; }
+assert_eq(MultiStageEnvelope_current_segment(ms2), 1, "segment 1 is still the current segment one sample short of its end");
+var qend = envelope_multistage_next_value(ms2);
+assert_eq(qend, C0_5, "segment 1 snaps exactly onto its target 0.5");
+assert_eq(MultiStageEnvelope_current_segment(ms2), 2, "both segments are consumed");
+var qafter = envelope_multistage_next_value(ms2);
+assert_eq(qafter, 0, "past the final segment the value is exactly +0.0");
+assert_eq(envelope_multistage_is_active(ms2), 0, "and the envelope is inactive");
 
 var rc = assert_summary();
 syscall(60, rc);

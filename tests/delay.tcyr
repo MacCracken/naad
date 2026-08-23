@@ -7,7 +7,9 @@ include "src/delay.cyr"
 
 alloc_init();
 
-var C0_5 = 0x3FE0000000000000;   # 0.5
+var C0_5  = 0x3FE0000000000000;   # 0.5
+var C0_25 = 0x3FD0000000000000;   # 0.25
+var C0_75 = 0x3FE8000000000000;   # 0.75
 
 # ================================================================
 test_group("delay_line_basic");
@@ -54,6 +56,94 @@ test_group("allpass_delay");
 var ap = allpass_delay_new(100, C0_5);
 var ao = allpass_delay_process_sample(ap, F64_ONE);
 assert(naad_is_finite(ao), "allpass output is finite");
+
+# ================================================================
+# 2.2.1 coverage: delay_line_clear and the AllpassDelay accessors.
+# The delay line holds small integers, so every read has an exactly
+# representable expected value and is compared as a raw f64 bit pattern.
+# ================================================================
+
+test_group("delay_line_clear");
+# 11 writes into an 8-slot line: the cursor wraps to 3 and the buffer holds
+# 9, 10, 11, 4, 5, 6, 7, 8 in slots 0..7.
+var dc = delay_line_new(8);
+var dc_w = 0;
+while (dc_w < 11) {
+    delay_line_write(dc, f64_from(dc_w + 1));
+    dc_w = dc_w + 1;
+}
+assert_eq(DelayLine_write_pos(dc), 3, "11 writes into an 8-slot line leave the cursor at 3");
+var dc_last = delay_line_read(dc, 0);
+assert_eq(dc_last, f64_from(11), "delay 0 reads the most recent write");
+var dc_back3 = delay_line_read(dc, f64_from(3));
+assert_eq(dc_back3, f64_from(8), "delay 3 reads the sample written 3 writes ago");
+# clear() fills the buffer with silence.
+assert_eq(delay_line_clear(dc), 0, "delay_line_clear returns 0");
+var dc_nonzero = 0;
+var dc_slot = 0;
+while (dc_slot < 8) {
+    if (vec_get(DelayLine_buffer(dc), dc_slot) != 0) { dc_nonzero = dc_nonzero + 1; }
+    dc_slot = dc_slot + 1;
+}
+assert_eq(dc_nonzero, 0, "clear zeroes every slot, not just the ones near the cursor");
+# ...so every read comes back as exactly +0.0, including a fractional one.
+assert_eq(delay_line_read(dc, 0), 0, "read at delay 0 after clear -> 0.0");
+assert_eq(delay_line_read(dc, f64_from(3)), 0, "read at delay 3 after clear -> 0.0");
+assert_eq(delay_line_read(dc, C0_5), 0, "fractional read after clear -> 0.0");
+# clear() only fills the buffer (rust-old/src/delay.rs `self.buffer.fill(0.0)`):
+# it does NOT rewind the cursor or resize the line.
+assert_eq(DelayLine_write_pos(dc), 3, "clear leaves write_pos untouched");
+assert_eq(DelayLine_max_delay_samples(dc), 8, "clear leaves the line length untouched");
+assert_eq(vec_len(DelayLine_buffer(dc)), 8, "clear leaves the backing vec length untouched");
+# The line still works after clearing: the next write lands at the preserved
+# cursor (slot 3) and is read back at delay 0.
+delay_line_write(dc, f64_from(42));
+assert_eq(vec_get(DelayLine_buffer(dc), 3), f64_from(42), "post-clear write lands at the preserved cursor");
+assert_eq(delay_line_read(dc, 0), f64_from(42), "post-clear line reads back the new write");
+assert_eq(delay_line_read(dc, f64_from(1)), 0, "one sample back is still silent after clear");
+# clear() on a 1-slot line (the floor applied by delay_line_new) is a no-op
+# beyond zeroing that slot.
+var dc_min = delay_line_new(0);
+assert_eq(DelayLine_max_delay_samples(dc_min), 1, "delay_line_new(0) floors at one slot");
+delay_line_write(dc_min, F64_ONE);
+assert_eq(delay_line_clear(dc_min), 0, "clear on a 1-slot line returns 0");
+assert_eq(vec_get(DelayLine_buffer(dc_min), 0), 0, "1-slot line cleared to 0.0");
+
+# ================================================================
+test_group("allpass accessors round-trip");
+var ap1 = allpass_delay_new(100, C0_5);
+# Constructor values, read back exactly.
+assert_eq(allpass_delay_coefficient(ap1), C0_5, "coefficient == constructor value 0.5");
+assert_eq(allpass_delay_delay_samples(ap1), f64_from(100), "delay_samples == constructor value 100.0");
+# `coefficient.clamp(-0.999, 0.999)` (rust-old/src/delay.rs) -- both ends.
+var ap_hi = allpass_delay_new(64, f64_from(5));
+assert_eq(allpass_delay_coefficient(ap_hi), DELAY_STABLE_HI, "coefficient clamps up to 0.999");
+var ap_lo = allpass_delay_new(64, f64_neg(f64_from(5)));
+assert_eq(allpass_delay_coefficient(ap_lo), DELAY_STABLE_LO, "coefficient clamps down to -0.999");
+# A value inside the range is NOT clamped.
+var ap_mid = allpass_delay_new(64, f64_neg(C0_5));
+assert_eq(allpass_delay_coefficient(ap_mid), f64_neg(C0_5), "in-range coefficient passes through unclamped");
+# delay_samples is `delay_samples as f32`, stored independently of the buffer
+# length: a 0-sample request still allocates one slot but reports 0.0.
+var ap_zero = allpass_delay_new(0, C0_5);
+assert_eq(allpass_delay_delay_samples(ap_zero), 0, "delay_samples(0) == 0.0");
+assert_eq(DelayLine_max_delay_samples(AllpassDelay_delay_line(ap_zero)), 1, "0-sample allpass still gets one slot");
+# The accessors report the values the process path actually uses. On a fresh
+# line the delayed term is 0.0, so the first output is exactly -g * x:
+# -0.5 * 1.0 = -0.5, and the buffer receives x + g*y = 1.0 + 0.5*(-0.5) = 0.75.
+var ap_p = allpass_delay_new(4, C0_5);
+var ap_out = allpass_delay_process_sample(ap_p, F64_ONE);
+assert_eq(ap_out, f64_neg(C0_5), "first allpass output == -coefficient * input");
+assert_eq(vec_get(DelayLine_buffer(AllpassDelay_delay_line(ap_p)), 0), C0_75, "allpass stores x + g*y = 0.75");
+assert_eq(allpass_delay_coefficient(ap_p), C0_5, "processing does not disturb the coefficient");
+assert_eq(allpass_delay_delay_samples(ap_p), f64_from(4), "processing does not disturb delay_samples");
+# Changing the coefficient through the accessor's setter changes the output:
+# -0.25 * 1.0 = -0.25 on a fresh line.
+var ap_s = allpass_delay_new(4, C0_5);
+AllpassDelay_set_coefficient(ap_s, C0_25);
+assert_eq(allpass_delay_coefficient(ap_s), C0_25, "coefficient setter round-trips");
+var ap_s_out = allpass_delay_process_sample(ap_s, F64_ONE);
+assert_eq(ap_s_out, f64_neg(C0_25), "the reported coefficient is the one the process path uses");
 
 var rc = assert_summary();
 syscall(60, rc);

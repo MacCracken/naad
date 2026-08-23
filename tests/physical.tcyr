@@ -26,6 +26,7 @@ var C0_001 = 0x3f50624dd2f1a9fc;   # 0.001
 var C0_4   = 0x3fd999999999999a;   # 0.4
 var C3_9   = 0x400f333333333333;   # 3.9
 var C1e_4  = 0x3f1a36e2eb1c432d;   # 1e-4
+var C0_25  = 0x3fd0000000000000;   # 0.25
 
 var SR = 44100;
 
@@ -114,6 +115,37 @@ fn _phys_measure_tail_rms(res) {
         i = i + 1;
     }
     return f64_sqrt(f64_div(sum, f64_from(1000)));
+}
+
+# Zero crossings in `buf`: adjacent samples with opposite signs.
+fn _phys_zc(buf) {
+    var n = vec_len(buf);
+    var c = 0;
+    var i = 1;
+    while (i < n) {
+        if (f64_lt(f64_mul(vec_get(buf, i - 1), vec_get(buf, i)), 0) == 1) { c = c + 1; }
+        i = i + 1;
+    }
+    return c;
+}
+
+# Excite a 220 Hz waveguide for 200 samples with junction coefficient `jc`,
+# then coast `silence` more samples; returns physical_wg_is_active.
+fn _phys_wg_ring(jc, silence) {
+    var wg = physical_wg_new(f64_from(220), C0_01, f64_from(SR));
+    physical_wg_set_junction_coeff(wg, jc);
+    var i = 0;
+    while (i < 200) {
+        physical_wg_excite(wg, F64_ONE);
+        var a = physical_wg_next_sample(wg);
+        i = i + 1;
+    }
+    var j = 0;
+    while (j < silence) {
+        var b = physical_wg_next_sample(wg);
+        j = j + 1;
+    }
+    return physical_wg_is_active(wg);
 }
 
 # ================================================================
@@ -258,6 +290,231 @@ while (mpi < 64) {
     mpi = mpi + 1;
 }
 assert(mp_ok, "moog state recovers after an over-range sample (no persistent NaN)");
+
+
+# ================================================================
+# 2.2.1 accessor/coverage pass. Everything below asserts an EXACT value
+# (raw f64 bit patterns via assert_eq -- never f64_to, which truncates) or
+# a state transition. The exciter PRNGs are seeded deterministically in the
+# constructors (54321 for KarplusStrong), so every noise sample is
+# reproducible from an independent xorshift32 slot.
+# ================================================================
+
+# ================================================================
+test_group("ks next_noise is the seeded xorshift32 stream");
+var pks_ref = alloc(8);
+store64(pks_ref, 54321);
+var pks_n0 = xorshift32_signed_f32(pks_ref);
+var pks_n1 = xorshift32_signed_f32(pks_ref);
+var pks_noise = physical_ks_new(f64_from(440), F64_HALF, F64_HALF, srf);
+assert_eq(physical_ks_next_noise(pks_noise), pks_n0, "ks next_noise[0] == xorshift32_signed_f32(seed 54321)");
+assert_eq(physical_ks_next_noise(pks_noise), pks_n1, "ks next_noise[1] steps the shared PRNG slot");
+assert(pks_n0 != pks_n1, "consecutive exciter samples differ");
+assert(f64_ge(pks_n0, f64_neg(F64_ONE)), "exciter noise >= -1.0");
+assert(f64_lt(pks_n0, F64_ONE), "exciter noise < 1.0");
+
+# ================================================================
+test_group("ks frequency getter / setter round-trip");
+var pks_f = physical_ks_new(f64_from(440), C0_9, F64_HALF, srf);
+assert_eq(physical_ks_frequency(pks_f), f64_from(440), "fresh ks reports its constructor frequency");
+assert_eq(physical_ks_set_frequency(pks_f, f64_from(220)), NAAD_ERR_NONE, "set_frequency(220) returns NAAD_ERR_NONE");
+assert_eq(physical_ks_frequency(pks_f), f64_from(220), "frequency round-trips through set_frequency");
+assert_eq(KarplusStrong_delay_samples(pks_f), f64_div(srf, f64_from(220)),
+  "set_frequency recomputes delay_samples = sample_rate / frequency");
+# A rejected update must leave BOTH the frequency and the delay length alone.
+assert_eq(physical_ks_set_frequency(pks_f, f64_from(30000)), NAAD_ERR_INVALID_FREQUENCY, "above-Nyquist rejected");
+assert_eq(physical_ks_set_frequency(pks_f, 0), NAAD_ERR_INVALID_FREQUENCY, "zero frequency rejected");
+assert_eq(physical_ks_set_frequency(pks_f, f64_neg(f64_from(100))), NAAD_ERR_INVALID_FREQUENCY, "negative frequency rejected");
+assert_eq(physical_ks_frequency(pks_f), f64_from(220), "frequency unchanged after a rejected set");
+assert_eq(KarplusStrong_delay_samples(pks_f), f64_div(srf, f64_from(220)), "delay_samples unchanged after a rejected set");
+
+# ================================================================
+test_group("ks set_frequency actually retunes the string");
+var pks_p = physical_ks_new(f64_from(200), C0_95, C0_3, srf);
+physical_ks_pluck(pks_p);
+var pks_warm = _phys_make_buf(2048);
+physical_ks_fill_buffer(pks_p, pks_warm);
+var pks_b200 = _phys_make_buf(8192);
+physical_ks_fill_buffer(pks_p, pks_b200);
+var pks_zc200 = _phys_zc(pks_b200);
+assert_eq(physical_ks_set_frequency(pks_p, f64_from(400)), NAAD_ERR_NONE, "retune to 400 Hz accepted");
+physical_ks_pluck(pks_p);
+var pks_warm2 = _phys_make_buf(2048);
+physical_ks_fill_buffer(pks_p, pks_warm2);
+var pks_b400 = _phys_make_buf(8192);
+physical_ks_fill_buffer(pks_p, pks_b400);
+var pks_zc400 = _phys_zc(pks_b400);
+# 8192 samples at 44.1 kHz is 0.1857 s; an f Hz tone crosses zero 2*f*T times
+# (74 at 200 Hz, 149 at 400 Hz). Bound both absolutely -- a set_frequency that
+# updated the field but not delay_samples would leave zc400 == zc200.
+assert(pks_zc200 > 55, "200 Hz string crosses zero at least ~55x in 8192 samples");
+assert(pks_zc200 < 115, "200 Hz string crosses zero at most ~115x in 8192 samples");
+assert(pks_zc400 > 115, "400 Hz string crosses zero at least ~115x in 8192 samples");
+assert(pks_zc400 < 230, "400 Hz string crosses zero at most ~230x in 8192 samples");
+assert(pks_zc400 * 2 > pks_zc200 * 3, "an octave up raises the crossing rate by more than 1.5x");
+
+# ================================================================
+test_group("ks next_sample / is_active state machine");
+var pks_s = physical_ks_new(f64_from(440), 0, F64_HALF, srf);
+# Fresh string: the delay line is silent and damping_prev is 0.
+assert_eq(physical_ks_is_active(pks_s), 0, "fresh ks is not active");
+assert_eq(physical_ks_next_sample(pks_s), 0, "fresh ks emits exact +0.0");
+physical_ks_pluck(pks_s);
+# pluck() re-zeroes damping_prev, so the string does not read as active until
+# a sample has actually been clocked through the damping filter.
+assert_eq(physical_ks_is_active(pks_s), 0, "pluck alone leaves damping_prev at 0");
+# First post-pluck sample: the read tap lands on noise[0] with its lower
+# neighbour still silent, so the interpolated read is exactly
+# noise[0] * (1 - frac) where frac is the fractional part of the delay.
+var pks_ds = f64_div(srf, f64_from(440));
+var pks_frac = f64_sub(pks_ds, f64_floor(pks_ds));
+var pks_ref2 = alloc(8);
+store64(pks_ref2, 54321);
+var pks_first = xorshift32_signed_f32(pks_ref2);
+assert_eq(physical_ks_next_sample(pks_s), f64_mul(pks_first, f64_sub(F64_ONE, pks_frac)),
+  "first post-pluck sample == noise[0] * (1 - fractional delay)");
+assert_eq(physical_ks_is_active(pks_s), 1, "ks is active once damping_prev is charged");
+var pks_i = 0;
+while (pks_i < 20000) {
+    var pks_x = physical_ks_next_sample(pks_s);
+    pks_i = pks_i + 1;
+}
+assert_eq(physical_ks_is_active(pks_s), 0, "ks with decay=0 falls below the 1e-6 activity floor");
+
+# ================================================================
+test_group("ks next_sample and fill_buffer are the same generator");
+var pks_a = physical_ks_new(f64_from(330), F64_HALF, C0_3, srf);
+var pks_b = physical_ks_new(f64_from(330), F64_HALF, C0_3, srf);
+physical_ks_pluck(pks_a);
+physical_ks_pluck(pks_b);
+var pks_fill = _phys_make_buf(1024);
+physical_ks_fill_buffer(pks_b, pks_fill);
+var pks_same = 1;
+var pks_nz = 0;
+var pks_q = 0;
+while (pks_q < 1024) {
+    var pks_v = physical_ks_next_sample(pks_a);
+    if (pks_v != vec_get(pks_fill, pks_q)) { pks_same = 0; }
+    if (pks_v != 0) { pks_nz = 1; }
+    pks_q = pks_q + 1;
+}
+assert_eq(pks_nz, 1, "the compared stream is not all zeros");
+assert_eq(pks_same, 1, "1024 samples bit-identical via next_sample and fill_buffer");
+
+# ================================================================
+test_group("waveguide junction coefficient round-trip");
+var pwg_j = physical_wg_new(f64_from(220), C0_01, srf);
+assert_eq(Waveguide_junction_coeff(pwg_j), PHYS_WG_JUNCTION, "fresh waveguide junction coeff is 0.99");
+physical_wg_set_junction_coeff(pwg_j, F64_HALF);
+assert_eq(Waveguide_junction_coeff(pwg_j), F64_HALF, "junction coeff round-trips (0.5, not the 0.99 default)");
+physical_wg_set_junction_coeff(pwg_j, f64_from(5));
+assert_eq(Waveguide_junction_coeff(pwg_j), F64_ONE, "junction coeff clamps to 1.0");
+physical_wg_set_junction_coeff(pwg_j, f64_neg(F64_ONE));
+assert_eq(Waveguide_junction_coeff(pwg_j), 0, "junction coeff clamps to +0.0");
+
+# ================================================================
+test_group("waveguide is_active tracks stored energy");
+var pwg_a = physical_wg_new(f64_from(220), C0_01, srf);
+assert_eq(physical_wg_is_active(pwg_a), 0, "an un-excited waveguide is inactive");
+var pwg_i = 0;
+while (pwg_i < 200) {
+    physical_wg_excite(pwg_a, F64_ONE);
+    var pwg_s = physical_wg_next_sample(pwg_a);
+    pwg_i = pwg_i + 1;
+}
+assert_eq(physical_wg_is_active(pwg_a), 1, "an excited waveguide is active");
+# junction_coeff scales BOTH reflections, so 0 means no energy survives a
+# round trip (the delay is 100.2 samples): the tube goes silent within three
+# round trips, while the 0.99 default is still ringing 5000 samples later.
+assert_eq(_phys_wg_ring(0, 300), 0, "junction_coeff = 0 -> inactive 300 samples after excitation stops");
+assert_eq(_phys_wg_ring(PHYS_WG_JUNCTION, 5000), 1, "junction_coeff = 0.99 -> still active 5000 samples later");
+
+# ================================================================
+test_group("moog cutoff getter / setter round-trip");
+var pmg_c = physical_moog_new(f64_from(1000), F64_HALF, srf);
+assert_eq(physical_moog_cutoff_hz(pmg_c), f64_from(1000), "fresh moog reports its constructor cutoff");
+assert_eq(physical_moog_set_cutoff(pmg_c, f64_from(2500)), NAAD_ERR_NONE, "set_cutoff(2500) returns NAAD_ERR_NONE");
+assert_eq(physical_moog_cutoff_hz(pmg_c), f64_from(2500), "cutoff round-trips through set_cutoff");
+assert_eq(physical_moog_set_cutoff(pmg_c, f64_neg(F64_ONE)), NAAD_ERR_INVALID_FREQUENCY, "negative cutoff rejected");
+assert_eq(physical_moog_set_cutoff(pmg_c, f64_from(50000)), NAAD_ERR_INVALID_FREQUENCY, "above-Nyquist cutoff rejected");
+assert_eq(physical_moog_cutoff_hz(pmg_c), f64_from(2500), "cutoff unchanged after a rejected set");
+# ...and the new cutoff must change the SOUND, not just the field: a 4 kHz
+# tone is buried by a 300 Hz 4-pole and passes freely at 8 kHz.
+var pmg_lo = physical_moog_new(f64_from(300), 0, srf);
+var pmg_hi = physical_moog_new(f64_from(300), 0, srf);
+assert_eq(physical_moog_set_cutoff(pmg_hi, f64_from(8000)), NAAD_ERR_NONE, "retune to 8 kHz accepted");
+var pmg_rms_lo = _phys_measure_rms(pmg_lo, f64_from(4000), srf);
+var pmg_rms_hi = _phys_measure_rms(pmg_hi, f64_from(4000), srf);
+assert(f64_gt(pmg_rms_hi, f64_mul(pmg_rms_lo, f64_from(100))),
+  "raising the cutoff to 8 kHz passes >100x more 4 kHz energy than 300 Hz does");
+
+# ================================================================
+test_group("moog deriv evaluates the ladder ODE");
+var pmg_out = alloc(32);
+var pmg_w = f64_mul(F64_TAU, f64_from(1000));
+# input 0.5 with k = 2 and y3 = 0.25 makes the resonance feedback cancel the
+# input exactly: tanh(0.5 - 2*0.25) = tanh(0) = 0, so stage 0's derivative is
+# omega*(0 - tanh(0)) = 0. A deriv that dropped the k*y3 term, or fed it back
+# from the wrong stage, would return omega*tanh(0.5) = 2904 here.
+physical_moog_deriv(pmg_w, F64_TWO, F64_HALF, 0, C0_25, C0_25, C0_25, pmg_out);
+assert_eq(load64(pmg_out), 0, "stage 0 deriv is exactly 0 when k*y3 cancels the input");
+assert_eq(load64(pmg_out + 8), f64_mul(pmg_w, f64_sub(f64_tanh(0), f64_tanh(C0_25))),
+  "stage 1 deriv == omega * (tanh(y0) - tanh(y1))");
+assert(f64_lt(load64(pmg_out + 8), 0), "stage 1 falls toward the (lower) stage 0");
+assert_eq(load64(pmg_out + 16), 0, "stage 2 deriv is exactly 0 when y1 == y2");
+assert_eq(load64(pmg_out + 24), 0, "stage 3 deriv is exactly 0 when y2 == y3");
+# k = 0 from rest: only stage 0 sees the input.
+physical_moog_deriv(pmg_w, 0, F64_HALF, 0, 0, 0, 0, pmg_out);
+assert_eq(load64(pmg_out), f64_mul(pmg_w, f64_tanh(F64_HALF)), "k=0 at rest: stage 0 deriv == omega*tanh(input)");
+assert_eq(load64(pmg_out + 8), 0, "stage 1 is still at rest");
+assert_eq(load64(pmg_out + 16), 0, "stage 2 is still at rest");
+assert_eq(load64(pmg_out + 24), 0, "stage 3 is still at rest");
+
+# ================================================================
+test_group("moog rk4_step is classic RK4, not Euler");
+var pmg_st = vec_new();
+vec_push(pmg_st, 0);
+vec_push(pmg_st, 0);
+vec_push(pmg_st, 0);
+vec_push(pmg_st, 0);
+var pmg_scr = alloc(128);
+var pmg_dt = f64_div(F64_ONE, srf);
+var pmg_h2 = f64_mul(pmg_dt, F64_HALF);
+physical_moog_rk4_step(pmg_w, 0, F64_HALF, pmg_st, pmg_dt, pmg_scr);
+# k1..k4 for stage 0, hand-rolled in the same op order the port uses.
+var pmg_ti = f64_tanh(F64_HALF);
+var pmg_k1 = f64_mul(pmg_w, f64_sub(pmg_ti, f64_tanh(0)));
+var pmg_k2 = f64_mul(pmg_w, f64_sub(pmg_ti, f64_tanh(f64_add(0, f64_mul(pmg_h2, pmg_k1)))));
+var pmg_k3 = f64_mul(pmg_w, f64_sub(pmg_ti, f64_tanh(f64_add(0, f64_mul(pmg_h2, pmg_k2)))));
+var pmg_k4 = f64_mul(pmg_w, f64_sub(pmg_ti, f64_tanh(f64_add(0, f64_mul(pmg_dt, pmg_k3)))));
+var pmg_sum = f64_add(pmg_k1, f64_add(f64_mul(F64_TWO, pmg_k2), f64_add(f64_mul(F64_TWO, pmg_k3), pmg_k4)));
+assert_eq(vec_get(pmg_st, 0), f64_add(0, f64_mul(f64_div(pmg_dt, f64_from(6)), pmg_sum)),
+  "state[0] == (dt/6)*(k1 + 2*k2 + 2*k3 + k4) -- the (1,2,2,1)/6 weights");
+# From rest, stages 1..3 can only be reached through the INTERMEDIATE RK
+# stages. A single forward-Euler step would leave all three at exactly 0.
+assert(vec_get(pmg_st, 1) != 0, "state[1] moves within one RK4 step");
+assert(vec_get(pmg_st, 2) != 0, "state[2] moves within one RK4 step");
+assert(vec_get(pmg_st, 3) != 0, "state[3] moves within one RK4 step");
+# state[3] picks up only k4's component from rest, so it is exactly
+# (dt/6) * omega*tanh(dt*omega*tanh((dt/2)*omega*tanh((dt/2)*omega*tanh(input)))).
+var pmg_s3a = f64_mul(pmg_w, f64_tanh(f64_mul(pmg_h2, f64_mul(pmg_w, pmg_ti))));
+var pmg_s3b = f64_mul(pmg_w, f64_tanh(f64_mul(pmg_h2, pmg_s3a)));
+var pmg_s3c = f64_mul(pmg_w, f64_tanh(f64_mul(pmg_dt, pmg_s3b)));
+assert_eq(vec_get(pmg_st, 3), f64_mul(f64_div(pmg_dt, f64_from(6)), pmg_s3c),
+  "state[3] == (dt/6)*k4[3] -- the full four-deep RK4 stage chain");
+
+# ================================================================
+test_group("moog rk4_step at omega = 0 is the identity");
+var pmg_z = vec_new();
+vec_push(pmg_z, F64_HALF);
+vec_push(pmg_z, C0_3);
+vec_push(pmg_z, C0_01);
+vec_push(pmg_z, F64_ONE);
+physical_moog_rk4_step(0, F64_TWO, F64_HALF, pmg_z, pmg_dt, pmg_scr);
+assert_eq(vec_get(pmg_z, 0), F64_HALF, "omega = 0 leaves state[0] untouched");
+assert_eq(vec_get(pmg_z, 1), C0_3, "omega = 0 leaves state[1] untouched");
+assert_eq(vec_get(pmg_z, 2), C0_01, "omega = 0 leaves state[2] untouched");
+assert_eq(vec_get(pmg_z, 3), F64_ONE, "omega = 0 leaves state[3] untouched");
 
 var rc = assert_summary();
 syscall(60, rc);

@@ -8,6 +8,42 @@
 `VERSION` at the repo root is the source of truth for the current number. The
 entries below are the release record.
 
+**2.2.1** — accessor coverage: 182 untested public functions to **zero**.
+
+The roadmap's largest remaining gate. Every one of naad's **440** public
+functions is now referenced by a test; suite **579 → 2340 assertions** across 40
+suites. Re-measure with the script in "Tests" below rather than trusting this
+number.
+
+Test-only release — the sole `src/` edit is a comment. The untested set was not
+random: five of the eight functions documented in 2.1.3 were in it, and the
+2.1.3 sweep found 16 defects in code the parity suite passed clean. Ported
+suites inherit the oracle's *positive* cases, and Rust's types made most
+negative cases unwritable, so whole families (all four FM algorithms, every
+`*_process_buffer`, the four voice-steal modes, the ADSR state machine) had no
+assertions behind them.
+
+⚠ The design constraint was **not writing vacuous tests**, since this repo has
+shipped one (an RT60 compared through `f64_to`, which truncates, so it held for
+every value in (−1.0, 1.0) for three releases). Expectations were re-derived
+from `rust-old/` independently rather than transcribed from what naad prints —
+transcribing would freeze any existing bug in as "correct". Fixtures were chosen
+to make values exact (11025 Hz at 44.1 kHz ⇒ a 0.25 phase step; 10 Hz sample
+rates ⇒ 10-sample envelope stages; dyadic coefficients), which is what lets 1434
+of the new assertions be raw-bit `assert_eq` rather than tolerance checks.
+
+An independent audit pass swept every added assertion: **0** `f64_to`
+comparisons, **0** tautologies, **0** buffer-by-return-code assertions, and all
+155 new IEEE-754 hex constants decoded and verified against their comments. One
+genuine vacuity was found and fixed — a flag-accumulator loop that would have
+held vacuously on an empty goonj result.
+
+Found while writing the tests and now documented in `src/granular.cyr`:
+`granular_rem_euclid` returns `+0.0` where Rust returns `−0.0` for a negative
+exact multiple. Inert (both feed `f64_floor` then `f64_to`, and `frac` is `+0.0`
+either way) and deliberately not corrected — recorded as a tested contract
+rather than an accident.
+
 **2.2.0** — the namespace wave, and parity restored on `fit_polynomial`.
 
 Everything 2.1.3 identified as real but not patch-safe. Three breaking renames,
@@ -228,8 +264,9 @@ consumed.
 
 Per-module parity tracked in [`port-audit.md`](port-audit.md). Summary:
 
-**41 / 41 modules ported — PORT COMPLETE** · **579 assertions green across 40
-suites** · `dist/naad.cyr` bundle assembled and collision-audited to zero across
+**41 / 41 modules ported — PORT COMPLETE** · **2340 assertions green across 40
+suites**, covering **all 440 public fns** (0 untested; 12 `_`-prefixed internal
+helpers are exercised through their public callers) · `dist/naad.cyr` bundle assembled and collision-audited to zero across
 all **759** top-level symbols — `fn`, `var`, `const` and `struct` alike, against
 hisab, goonj, sakshi, abaco and the whole pinned stdlib. The audit was fn-scoped
 through 2.1.2, which is how the `ERR_*` `var` collision survived three releases;
@@ -334,13 +371,15 @@ scoped — verified to fail when the 2.1.2 collision is reintroduced).
   bundle-freshness gates, `cyrius audit`, `cyrius deny`, `cyrius fuzz` and
   `cyrius test`. (`cyrius fuzz` discovers `tests/*.fcyr`; no `fuzz/` directory
   is needed, which is what the earlier note got wrong.)
-- **108 public fns have no caller outside their own definition** — almost all
-  accessors, correctly public but **untested**. Read it as a coverage signal,
-  not dead code: five of the eight fns documented in 2.1.3 were in that set, so
-  the same corners were missing both docs and tests. Entire accessor families
-  (`unison_*`, `subosc_*`, `wavetable_osc_*`, `wavetable_morph_*`, `physical_*`,
-  `modulation_lfo_*`, `hardsync_*`, `subtractive_*`, every `*_process_buffer`)
-  have zero assertions behind them.
+- ~~108 public fns have no caller outside their own definition~~ — **closed in
+  2.2.1.** 0 of 440 public fns are untested. The families that had zero
+  assertions (`unison_*`, `subosc_*`, `wavetable_osc_*`, `wavetable_morph_*`,
+  `physical_*`, `modulation_lfo_*`, `hardsync_*`, `subtractive_*`, every
+  `*_process_buffer`) are covered, as are all four FM algorithms, the four
+  voice-steal modes and the ADSR state machine. 12 `_`-prefixed internal
+  helpers remain unreferenced by design — they are exercised through their
+  public callers. Re-measure rather than trusting the number: intersect `^fn `
+  over `src/*.cyr` against the text of `tests/`.
 - ~~`FILTER_*` and `VOICE_NONE` are unprefixed~~ — **closed in 2.2.0**, along
   with the six Tier-1 bare function names. Ecosystem-wide intersection is now
   zero. ⚠ The CI gate still only covers naad's own dependency bundles and the

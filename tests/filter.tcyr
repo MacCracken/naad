@@ -73,5 +73,236 @@ while (bi < 256) {
 }
 assert(all_finite, "process_buffer outputs finite");
 
+# ================================================================
+# Constants for the shelf/peak, reset and SVF-accessor coverage below.
+var C3_5      = 0x400c000000000000;   # 3.5
+var C1_DIV3_5 = 0x3fd2492492492492;   # 0.2857142857142857  (1 / 3.5)
+var C12_DB    = 0x4028000000000000;   # 12.0  (gain in dB)
+var A_SQ_12DB = 0x400fd93c1f526ddf;   # 3.9810717055349722  == 10^(12/20)
+var C1E_9     = 0x3e112e0be826d695;   # 1e-9
+var FREQ_2500 = 2500;
+
+# ================================================================
+# filter_biquad_with_gain -- the shelf/peak constructor.
+#
+# Audio EQ Cookbook (the same formulas rust-old/src/filter.rs:135
+# compute_coefficients implements) fixes the three endpoint gains exactly:
+# with A = 10^(gain_db/40), a low shelf has |H(DC)| = A^2 and |H(Nyquist)| = 1,
+# a high shelf is the mirror image, and a peaking filter is unity at both ends
+# and A^2 at fc. Endpoint gains are read straight off the stored (a0-normalized)
+# coefficients: H(1) = (b0+b1+b2)/(1+a1+a2), H(-1) = (b0-b1+b2)/(1-a1+a2).
+# ================================================================
+test_group("with_gain: low shelf boosts DC by exactly 10^(gain/20)");
+var lsf = filter_biquad_with_gain(NAAD_FILTER_LOWSHELF, f64_from(SR), f64_from(FREQ_1K), C0_707, C12_DB);
+assert_eq(BiquadFilter_gain_db(lsf), C12_DB, "with_gain stores gain_db verbatim");
+assert_eq(BiquadFilter_filter_type(lsf), NAAD_FILTER_LOWSHELF, "with_gain stores the filter type");
+var ls_dc = f64_div(f64_add(f64_add(BiquadFilter_b0(lsf), BiquadFilter_b1(lsf)), BiquadFilter_b2(lsf)),
+  f64_add(f64_add(F64_ONE, BiquadFilter_a1(lsf)), BiquadFilter_a2(lsf)));
+assert(f64_lt(f64_abs(f64_sub(ls_dc, A_SQ_12DB)), C1E_9), "low shelf +12 dB: DC gain == 10^(12/20)");
+var ls_ny = f64_div(f64_add(f64_sub(BiquadFilter_b0(lsf), BiquadFilter_b1(lsf)), BiquadFilter_b2(lsf)),
+  f64_add(f64_sub(F64_ONE, BiquadFilter_a1(lsf)), BiquadFilter_a2(lsf)));
+assert(f64_lt(f64_abs(f64_sub(ls_ny, F64_ONE)), C1E_9), "low shelf +12 dB: Nyquist stays at unity");
+# The gain is what does this: the same shelf at 0 dB is flat at both ends.
+var ls0 = filter_biquad_new(NAAD_FILTER_LOWSHELF, f64_from(SR), f64_from(FREQ_1K), C0_707);
+assert_eq(BiquadFilter_gain_db(ls0), 0, "biquad_new defaults gain_db to +0.0");
+var ls0_dc = f64_div(f64_add(f64_add(BiquadFilter_b0(ls0), BiquadFilter_b1(ls0)), BiquadFilter_b2(ls0)),
+  f64_add(f64_add(F64_ONE, BiquadFilter_a1(ls0)), BiquadFilter_a2(ls0)));
+assert(f64_lt(f64_abs(f64_sub(ls0_dc, F64_ONE)), C1E_9), "low shelf 0 dB: DC gain == 1");
+assert(f64_gt(f64_sub(ls_dc, ls0_dc), F64_TWO), "the gain argument raises DC by ~3 dB-decades over the 0 dB shelf");
+
+# ================================================================
+test_group("with_gain: high shelf is the low shelf's mirror");
+var hsf = filter_biquad_with_gain(NAAD_FILTER_HIGHSHELF, f64_from(SR), f64_from(FREQ_1K), C0_707, C12_DB);
+assert_eq(BiquadFilter_filter_type(hsf), NAAD_FILTER_HIGHSHELF, "with_gain stores HIGHSHELF");
+var hs_dc = f64_div(f64_add(f64_add(BiquadFilter_b0(hsf), BiquadFilter_b1(hsf)), BiquadFilter_b2(hsf)),
+  f64_add(f64_add(F64_ONE, BiquadFilter_a1(hsf)), BiquadFilter_a2(hsf)));
+assert(f64_lt(f64_abs(f64_sub(hs_dc, F64_ONE)), C1E_9), "high shelf +12 dB: DC stays at unity");
+var hs_ny = f64_div(f64_add(f64_sub(BiquadFilter_b0(hsf), BiquadFilter_b1(hsf)), BiquadFilter_b2(hsf)),
+  f64_add(f64_sub(F64_ONE, BiquadFilter_a1(hsf)), BiquadFilter_a2(hsf)));
+assert(f64_lt(f64_abs(f64_sub(hs_ny, A_SQ_12DB)), C1E_9), "high shelf +12 dB: Nyquist gain == 10^(12/20)");
+# Low and high shelf must not be the same filter.
+assert_neq(BiquadFilter_b1(lsf), BiquadFilter_b1(hsf), "LOWSHELF and HIGHSHELF produce different coefficients");
+
+# ================================================================
+test_group("with_gain: peak is flat at the edges");
+var pkf = filter_biquad_with_gain(NAAD_FILTER_PEAK, f64_from(SR), f64_from(FREQ_1K), C0_707, C12_DB);
+assert_eq(BiquadFilter_filter_type(pkf), NAAD_FILTER_PEAK, "with_gain stores PEAK");
+var pk_dc = f64_div(f64_add(f64_add(BiquadFilter_b0(pkf), BiquadFilter_b1(pkf)), BiquadFilter_b2(pkf)),
+  f64_add(f64_add(F64_ONE, BiquadFilter_a1(pkf)), BiquadFilter_a2(pkf)));
+assert(f64_lt(f64_abs(f64_sub(pk_dc, F64_ONE)), C1E_9), "peak +12 dB: DC gain == 1");
+var pk_ny = f64_div(f64_add(f64_sub(BiquadFilter_b0(pkf), BiquadFilter_b1(pkf)), BiquadFilter_b2(pkf)),
+  f64_add(f64_sub(F64_ONE, BiquadFilter_a1(pkf)), BiquadFilter_a2(pkf)));
+assert(f64_lt(f64_abs(f64_sub(pk_ny, F64_ONE)), C1E_9), "peak +12 dB: Nyquist gain == 1");
+
+# ================================================================
+test_group("with_gain: a boosted peak really is louder at fc");
+# Steady-state amplitude of a unit sine at fc must reach |H(fc)| = A^2 for the
+# boosted peak and exactly 1 for the 0 dB peak (which is the identity filter,
+# b == a). 1000 Hz at 44100 Hz revisits 441 distinct phases, so the sampled
+# maximum lands within 1e-4 of the true amplitude.
+var pkg = filter_biquad_with_gain(NAAD_FILTER_PEAK, f64_from(SR), f64_from(FREQ_1K), C0_707, C12_DB);
+var pk0 = filter_biquad_new(NAAD_FILTER_PEAK, f64_from(SR), f64_from(FREQ_1K), C0_707);
+var pkg_max = 0;
+var pk0_max = 0;
+var pn = 0;
+while (pn < 14000) {
+    var sx = f64_sin(f64_div(f64_mul(f64_mul(F64_TAU, f64_from(FREQ_1K)), f64_from(pn)), f64_from(SR)));
+    var yg = filter_biquad_process_sample(pkg, sx);
+    var y0 = filter_biquad_process_sample(pk0, sx);
+    if (pn >= 5000) {
+        if (f64_gt(f64_abs(yg), pkg_max) == 1) { pkg_max = f64_abs(yg); }
+        if (f64_gt(f64_abs(y0), pk0_max) == 1) { pk0_max = f64_abs(y0); }
+    }
+    pn = pn + 1;
+}
+assert(f64_lt(f64_abs(f64_sub(pkg_max, A_SQ_12DB)), C0_01), "peak +12 dB reaches 10^(12/20) at fc");
+assert(f64_lt(f64_abs(f64_sub(pk0_max, F64_ONE)), C0_01), "peak 0 dB is unity at fc");
+assert(f64_gt(f64_sub(pkg_max, pk0_max), F64_TWO), "the boost lifts fc output well above the 0 dB peak");
+
+# ================================================================
+test_group("with_gain rejects bad parameters");
+assert(naad_is_err(filter_biquad_with_gain(NAAD_FILTER_PEAK, 0, f64_from(FREQ_1K), C0_707, C12_DB)), "with_gain zero sample rate err");
+assert(naad_is_err(filter_biquad_with_gain(NAAD_FILTER_PEAK, f64_from(SR), 0, C0_707, C12_DB)), "with_gain zero frequency err");
+assert(naad_is_err(filter_biquad_with_gain(NAAD_FILTER_PEAK, f64_from(SR), f64_from(FREQ_1K), 0, C12_DB)), "with_gain zero q err");
+assert(naad_is_err(filter_biquad_with_gain(NAAD_FILTER_PEAK, f64_from(SR), f64_from(30000), C0_707, C12_DB)), "with_gain above nyquist err");
+# Port-specific hardening (src/filter.cyr:73): the oracle matched an 8-variant
+# enum, so an out-of-range type is unrepresentable there but reachable here.
+var bad_hi = filter_biquad_with_gain(NAAD_FILTER_PEAK + 1, f64_from(SR), f64_from(FREQ_1K), C0_707, C12_DB);
+assert_eq(bad_hi, NAAD_ERR_INVALID_PARAMETER, "a type above PEAK is rejected");
+var bad_lo = filter_biquad_with_gain(NAAD_FILTER_LOWPASS - 1, f64_from(SR), f64_from(FREQ_1K), C0_707, C12_DB);
+assert_eq(bad_lo, NAAD_ERR_INVALID_PARAMETER, "a type below LOWPASS is rejected");
+
+# ================================================================
+test_group("filter_biquad_reset clears the delay line");
+var rf = filter_biquad_new(NAAD_FILTER_LOWPASS, f64_from(SR), f64_from(FREQ_1K), C0_707);
+var rtmp = 0;
+var rn = 0;
+while (rn < 500) { rtmp = filter_biquad_process_sample(rf, F64_ONE); rn = rn + 1; }
+assert(f64_lt(f64_abs(f64_sub(rtmp, F64_ONE)), C0_01), "the filter really was driven to its DC steady state");
+assert_neq(BiquadFilter_z1(rf), 0, "driving the filter leaves nonzero z1");
+assert_neq(BiquadFilter_z2(rf), 0, "driving the filter leaves nonzero z2");
+filter_biquad_reset(rf);
+assert_eq(BiquadFilter_z1(rf), 0, "reset clears z1 to +0.0");
+assert_eq(BiquadFilter_z2(rf), 0, "reset clears z2 to +0.0");
+# A reset filter must be bit-identical to a fresh one, sample for sample.
+var rfresh = filter_biquad_new(NAAD_FILTER_LOWPASS, f64_from(SR), f64_from(FREQ_1K), C0_707);
+var r_a = filter_biquad_process_sample(rf, F64_HALF);
+var r_b = filter_biquad_process_sample(rfresh, F64_HALF);
+assert_eq(r_a, r_b, "reset filter matches a fresh filter, sample 0");
+assert_neq(r_a, 0, "that comparison sample is not trivially zero");
+var r_same = 1;
+rn = 0;
+while (rn < 200) {
+    var r_c = filter_biquad_process_sample(rf, C0_7);
+    var r_d = filter_biquad_process_sample(rfresh, C0_7);
+    if (r_c != r_d) { r_same = 0; }
+    rn = rn + 1;
+}
+assert(r_same, "reset filter tracks a fresh filter for 200 more samples");
+# reset must touch state only -- never the coefficients or parameters.
+assert_eq(BiquadFilter_b0(rf), BiquadFilter_b0(rfresh), "reset leaves b0 alone");
+assert_eq(BiquadFilter_a2(rf), BiquadFilter_a2(rfresh), "reset leaves a2 alone");
+assert_eq(BiquadFilter_frequency(rf), f64_from(FREQ_1K), "reset leaves frequency alone");
+assert_eq(BiquadFilter_q(rf), C0_707, "reset leaves q alone");
+
+# ================================================================
+test_group("svf frequency/q/sample_rate accessors + set_params");
+var sv = filter_svf_new(f64_from(FREQ_1K), C0_707, f64_from(SR));
+assert_eq(filter_svf_frequency(sv), f64_from(FREQ_1K), "constructor frequency round-trips");
+assert_eq(filter_svf_q(sv), C0_707, "constructor q round-trips");
+assert_eq(filter_svf_sample_rate(sv), f64_from(SR), "constructor sample_rate round-trips");
+var g_before = StateVariableFilter_g(sv);
+assert_eq(filter_svf_set_params(sv, f64_from(FREQ_2500), C3_5), NAAD_ERR_NONE, "set_params(2500, 3.5) ok");
+assert_eq(filter_svf_frequency(sv), f64_from(FREQ_2500), "set_params updates frequency");
+assert_eq(filter_svf_q(sv), C3_5, "set_params updates q");
+assert_eq(filter_svf_sample_rate(sv), f64_from(SR), "set_params leaves sample_rate alone");
+# set_params must recompute the cached coefficients, not just store the fields.
+assert_eq(StateVariableFilter_k(sv), C1_DIV3_5, "set_params recomputed k = 1/q");
+assert_neq(StateVariableFilter_g(sv), g_before, "set_params recomputed g for the new frequency");
+# A rejected update must leave every parameter exactly as it was.
+assert(naad_is_err(filter_svf_set_params(sv, 0, C3_5)), "set_params zero frequency err");
+assert(naad_is_err(filter_svf_set_params(sv, f64_from(30000), C3_5)), "set_params above nyquist err");
+assert(naad_is_err(filter_svf_set_params(sv, f64_from(FREQ_1K), 0)), "set_params zero q err");
+assert_eq(filter_svf_frequency(sv), f64_from(FREQ_2500), "a rejected set_params leaves frequency untouched");
+assert_eq(filter_svf_q(sv), C3_5, "a rejected set_params leaves q untouched");
+assert_eq(StateVariableFilter_k(sv), C1_DIV3_5, "a rejected set_params leaves the coefficients untouched");
+
+# ================================================================
+test_group("filter_svf_reset clears the integrators");
+var svr = filter_svf_new(f64_from(FREQ_1K), C0_707, f64_from(SR));
+# Alternate the input so BOTH integrators stay energised (a DC drive decays
+# the band-pass integrator towards zero and would weaken the check below).
+var sv_in = F64_ONE;
+var sv_last = 0;
+var sn = 0;
+while (sn < 101) {
+    sv_last = filter_svf_process_sample_lowpass(svr, sv_in);
+    sv_in = f64_neg(sv_in);
+    sn = sn + 1;
+}
+assert_neq(sv_last, 0, "the drive produced a nonzero output");
+assert_neq(StateVariableFilter_ic1eq(svr), 0, "driving the svf leaves nonzero ic1eq");
+assert_neq(StateVariableFilter_ic2eq(svr), 0, "driving the svf leaves nonzero ic2eq");
+filter_svf_reset(svr);
+assert_eq(StateVariableFilter_ic1eq(svr), 0, "reset clears ic1eq to +0.0");
+assert_eq(StateVariableFilter_ic2eq(svr), 0, "reset clears ic2eq to +0.0");
+var svfresh = filter_svf_new(f64_from(FREQ_1K), C0_707, f64_from(SR));
+var so_r = filter_svf_process_sample(svr, F64_ONE);
+var so_f = filter_svf_process_sample(svfresh, F64_ONE);
+assert_eq(SvfOutput_low_pass(so_r), SvfOutput_low_pass(so_f), "reset svf low_pass matches a fresh svf");
+assert_eq(SvfOutput_high_pass(so_r), SvfOutput_high_pass(so_f), "reset svf high_pass matches a fresh svf");
+assert_eq(SvfOutput_band_pass(so_r), SvfOutput_band_pass(so_f), "reset svf band_pass matches a fresh svf");
+assert_eq(SvfOutput_notch(so_r), SvfOutput_notch(so_f), "reset svf notch matches a fresh svf");
+assert_neq(SvfOutput_low_pass(so_r), 0, "that comparison sample is not trivially zero");
+# reset must not disturb the parameters or cached coefficients.
+assert_eq(filter_svf_frequency(svr), f64_from(FREQ_1K), "reset leaves frequency alone");
+assert_eq(StateVariableFilter_a1(svr), StateVariableFilter_a1(svfresh), "reset leaves a1 alone");
+
+# ================================================================
+test_group("filter_svf_process_buffer_lowpass matches the per-sample form");
+var pbf = filter_svf_new(f64_from(FREQ_1K), C0_707, f64_from(SR));
+var pbr = filter_svf_new(f64_from(FREQ_1K), C0_707, f64_from(SR));
+var pbuf = vec_new();
+var pref = vec_new();
+var pj = 0;
+while (pj < 64) {
+    var pv = f64_sin(f64_div(f64_mul(f64_mul(F64_TAU, f64_from(FREQ_1K)), f64_from(pj + 1)), f64_from(SR)));
+    vec_push(pbuf, pv);
+    vec_push(pref, pv);
+    pj = pj + 1;
+}
+filter_svf_process_buffer_lowpass(pbf, pbuf);
+var pb_written = 1;
+var pb_match = 1;
+var pb_nonzero = 0;
+pj = 0;
+while (pj < 64) {
+    var pwant = filter_svf_process_sample_lowpass(pbr, vec_get(pref, pj));
+    if (vec_get(pbuf, pj) != pwant) { pb_match = 0; }
+    if (vec_get(pbuf, pj) == vec_get(pref, pj)) { pb_written = 0; }
+    if (vec_get(pbuf, pj) != 0) { pb_nonzero = 1; }
+    pj = pj + 1;
+}
+assert_eq(vec_len(pbuf), 64, "process_buffer_lowpass did not resize the buffer");
+assert(pb_written, "every slot was overwritten in place (none left equal to its input)");
+assert(pb_nonzero, "the compared output is not all zeros");
+assert(pb_match, "process_buffer_lowpass is bit-identical to the per-sample form");
+assert_eq(StateVariableFilter_ic1eq(pbf), StateVariableFilter_ic1eq(pbr), "buffer path leaves the same ic1eq");
+assert_eq(StateVariableFilter_ic2eq(pbf), StateVariableFilter_ic2eq(pbr), "buffer path leaves the same ic2eq");
+# A zero-length buffer must be a no-op, not a wrap-around read.
+var pempty = vec_new();
+var pe_ic1 = StateVariableFilter_ic1eq(pbf);
+var pe_ic2 = StateVariableFilter_ic2eq(pbf);
+filter_svf_process_buffer_lowpass(pbf, pempty);
+assert_eq(vec_len(pempty), 0, "an empty buffer stays empty");
+assert_eq(StateVariableFilter_ic1eq(pbf), pe_ic1, "an empty buffer leaves ic1eq untouched");
+assert_eq(StateVariableFilter_ic2eq(pbf), pe_ic2, "an empty buffer leaves ic2eq untouched");
+# A one-element buffer advances the state by exactly one sample.
+var pone = vec_new();
+vec_push(pone, F64_HALF);
+filter_svf_process_buffer_lowpass(pbf, pone);
+var pone_want = filter_svf_process_sample_lowpass(pbr, F64_HALF);
+assert_eq(vec_get(pone, 0), pone_want, "a one-element buffer advances by exactly one sample");
+
 var rc = assert_summary();
 syscall(60, rc);

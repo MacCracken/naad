@@ -206,5 +206,194 @@ while (dci < 2) {
     dci = dci + 1;
 }
 
+
+# ================================================================
+# ---- 2.2.1 accessor/coverage gap: additive_partial_new,
+# ---- additive_fundamental, additive_set_fundamental,
+# ---- additive_next_sample, additive_is_active.
+# ================================================================
+
+var C0_25    = 0x3fd0000000000000;   # 0.25
+var C0_75    = 0x3fe8000000000000;   # 0.75
+var C1E_12   = 0x3d719799812dea11;   # 1e-12
+var CNEG1    = 0xbff0000000000000;   # -1.0
+var C5512_5  = 0x40b5888000000000;   # 5512.5
+var C1_2071  = 0x3ff3504f333f9de6;   # 1.2071067811865475 = sin(45deg) + 0.5
+var C0_2071  = 0x3fca827999fcef34;   # 0.20710678118654757 = sin(135deg) - 0.5
+
+# ================================================================
+test_group("additive_partial_new round-trips its three fields");
+var pn = additive_partial_new(C0_75, C0_5, C0_25);
+assert_eq(Partial_frequency_ratio(pn), C0_75, "frequency_ratio stored exactly");
+assert_eq(Partial_amplitude(pn), C0_5, "amplitude stored exactly");
+assert_eq(Partial_phase(pn), C0_25, "phase stored exactly");
+assert_neq(Partial_frequency_ratio(pn), Partial_amplitude(pn), "ratio and amplitude are distinct slots");
+assert_neq(Partial_amplitude(pn), Partial_phase(pn), "amplitude and phase are distinct slots");
+# additive_new builds the harmonic series through this constructor: partial k
+# is (ratio k+1, 1/(k+1), phase 0) -- rust-old/src/synth/additive.rs new().
+var pn_s = additive_new(f64_from(A440), 4, f64_from(SR));
+var pn_p = AdditiveSynth_partials(pn_s);
+assert_eq(Partial_frequency_ratio(vec_get(pn_p, 0)), F64_ONE, "harmonic 1 ratio = 1.0");
+assert_eq(Partial_amplitude(vec_get(pn_p, 0)), F64_ONE, "harmonic 1 amplitude = 1.0");
+assert_eq(Partial_frequency_ratio(vec_get(pn_p, 3)), f64_from(4), "harmonic 4 ratio = 4.0");
+assert_eq(Partial_amplitude(vec_get(pn_p, 3)), f64_div(F64_ONE, f64_from(4)), "harmonic 4 amplitude = 1/4");
+assert_eq(Partial_phase(vec_get(pn_p, 2)), 0, "constructor leaves the phase offset at 0");
+
+# ================================================================
+test_group("additive_fundamental reports the constructor value");
+var fu = additive_new(f64_from(A440), 8, f64_from(SR));
+assert_eq(additive_fundamental(fu), f64_from(A440), "fresh synth reports 440 Hz");
+assert_eq(additive_fundamental(fu), AdditiveSynth_fundamental(fu), "getter matches the field");
+var fu2 = additive_new(f64_from(1000), 4, f64_from(8000));
+assert_eq(additive_fundamental(fu2), f64_from(1000), "a second synth reports its own 1000 Hz");
+assert_neq(additive_fundamental(fu), additive_fundamental(fu2), "the getter is per-instance, not a constant");
+
+# ================================================================
+# additive_set_fundamental -- assigns, validates, and re-runs the Nyquist
+# zeroing (rust-old/src/synth/additive.rs set_fundamental).
+# ================================================================
+test_group("additive_set_fundamental round-trip");
+assert_eq(additive_set_fundamental(fu, f64_from(880)), NAAD_ERR_NONE, "set_fundamental 880 ok");
+assert_eq(additive_fundamental(fu), f64_from(880), "fundamental round-trips to 880 Hz");
+assert_eq(additive_set_fundamental(fu, C5512_5), NAAD_ERR_NONE, "set_fundamental 5512.5 ok");
+assert_eq(additive_fundamental(fu), C5512_5, "a non-integral fundamental round-trips exactly");
+
+test_group("additive_set_fundamental rejects invalid frequencies");
+var sfd = additive_new(f64_from(A440), 8, f64_from(SR));
+assert_eq(additive_set_fundamental(sfd, 0), NAAD_ERR_INVALID_FREQUENCY, "zero rejected");
+assert_eq(additive_fundamental(sfd), f64_from(A440), "fundamental unchanged after a zero");
+assert_eq(additive_set_fundamental(sfd, CNEG1), NAAD_ERR_INVALID_FREQUENCY, "negative rejected");
+assert_eq(additive_fundamental(sfd), f64_from(A440), "fundamental unchanged after a negative");
+assert_eq(additive_set_fundamental(sfd, NAAD_POS_INF), NAAD_ERR_INVALID_FREQUENCY, "+inf rejected");
+assert_eq(additive_fundamental(sfd), f64_from(A440), "fundamental unchanged after +inf");
+# Above Nyquist is NOT rejected -- set_fundamental only guards <= 0 / non-finite
+# and silences the offending partials instead (oracle parity).
+assert_eq(additive_set_fundamental(sfd, f64_from(30000)), NAAD_ERR_NONE, "above-Nyquist fundamental is accepted");
+assert_eq(additive_fundamental(sfd), f64_from(30000), "...and assigned");
+assert_eq(additive_is_active(sfd), 0, "...but every partial is silenced");
+
+test_group("additive_set_fundamental re-applies the Nyquist floor");
+# 16 partials at 44100 Hz -> Nyquist 22050. Raising the fundamental to
+# 2000 Hz zeroes ratios >= 11.025, i.e. partials 12..16 (indices 11..15);
+# partials 1..11 keep their 1/n amplitude untouched.
+var nq = additive_new(f64_from(A440), 16, f64_from(SR));
+var nq_p = AdditiveSynth_partials(nq);
+assert_eq(additive_set_fundamental(nq, f64_from(2000)), NAAD_ERR_NONE, "raise the fundamental to 2000 Hz");
+var nq_want = vec_new();
+var nqi = 0;
+while (nqi < 16) { vec_push(nq_want, f64_div(F64_ONE, f64_from(nqi + 1))); nqi = nqi + 1; }
+var nq_keep_ok = 1;
+var nq_zero_ok = 1;
+nqi = 0;
+while (nqi < 16) {
+    var nq_amp = Partial_amplitude(vec_get(nq_p, nqi));
+    if (nqi < 11) {
+        if (nq_amp != vec_get(nq_want, nqi)) { nq_keep_ok = 0; }
+    } else {
+        if (nq_amp != 0) { nq_zero_ok = 0; }
+    }
+    nqi = nqi + 1;
+}
+assert(nq_keep_ok, "partials below Nyquist keep their exact 1/n amplitude");
+assert(nq_zero_ok, "partials 12-16 (>= 22050 Hz at 2000 Hz fundamental) are zeroed");
+assert_eq(Partial_amplitude(vec_get(nq_p, 10)), f64_div(F64_ONE, f64_from(11)), "partial 11 at 22000 Hz survives");
+assert_eq(Partial_amplitude(vec_get(nq_p, 11)), 0, "partial 12 at 24000 Hz is silenced");
+# Lowering the fundamental again does NOT resurrect the zeroed partials --
+# set_fundamental only ever zeroes (rust-old parity).
+assert_eq(additive_set_fundamental(nq, f64_from(A440)), NAAD_ERR_NONE, "drop back to 440 Hz");
+assert_eq(Partial_amplitude(vec_get(nq_p, 11)), 0, "the zeroing is one-way: partial 12 stays silent");
+
+# ================================================================
+test_group("additive_is_active");
+var ia = additive_new(f64_from(A440), 4, f64_from(SR));
+assert_eq(additive_is_active(ia), 1, "a fresh harmonic bank is active");
+additive_set_partial(ia, 0, F64_ONE, 0);
+assert_eq(additive_is_active(ia), 1, "still active while partials 2-4 sound");
+additive_set_partial(ia, 1, F64_TWO, 0);
+additive_set_partial(ia, 2, f64_from(3), 0);
+assert_eq(additive_is_active(ia), 1, "still active on the last partial alone");
+additive_set_partial(ia, 3, f64_from(4), 0);
+assert_eq(additive_is_active(ia), 0, "silent once every amplitude is 0");
+# Re-arming one partial flips it back.
+additive_set_partial(ia, 2, f64_from(3), C0_75);
+assert_eq(additive_is_active(ia), 1, "re-arming one partial reactivates the bank");
+assert_eq(Partial_amplitude(vec_get(AdditiveSynth_partials(ia), 2)), C0_75, "the re-armed amplitude is the one supplied");
+# A bank whose whole harmonic series sits above Nyquist is born silent:
+# 5000 Hz fundamental at 8000 Hz (Nyquist 4000) zeroes every partial.
+var ia_hi = additive_new(f64_from(5000), 4, f64_from(8000));
+assert_eq(additive_is_active(ia_hi), 0, "a wholly above-Nyquist bank is inactive at construction");
+var ia_lo = additive_new(f64_from(1000), 8, f64_from(8000));
+assert_eq(additive_is_active(ia_lo), 1, "a partly audible bank is active");
+
+# ================================================================
+# additive_next_sample -- sin(phase * TAU) * amplitude summed over the
+# partials, with the phase advanced by freq/sample_rate and wrapped by
+# `new_phase - new_phase.floor()` (rust-old/src/synth/additive.rs).
+#
+# 11025 Hz at 44100 Hz gives a phase increment of exactly 0.25, so the
+# single-partial output walks 0, +1, 0, -1 and the phase wraps to exactly 0.
+# ================================================================
+test_group("additive_next_sample: exact quarter-turn sine walk");
+var ns = additive_new(f64_from(11025), 1, f64_from(SR));
+assert_eq(Partial_amplitude(vec_get(AdditiveSynth_partials(ns), 0)), F64_ONE, "the single partial is at unit amplitude");
+var ns0 = additive_next_sample(ns);
+var ns1 = additive_next_sample(ns);
+var ns2 = additive_next_sample(ns);
+var ns3 = additive_next_sample(ns);
+assert_eq(ns0, 0, "sample 0 (phase 0) is exactly 0.0");
+assert(f64_lt(f64_abs(f64_sub(ns1, F64_ONE)), C1E_12), "sample 1 (phase 0.25) is +1.0");
+assert(f64_lt(f64_abs(ns2), C1E_12), "sample 2 (phase 0.5) is 0.0");
+assert(f64_lt(f64_abs(f64_sub(ns3, CNEG1)), C1E_12), "sample 3 (phase 0.75) is -1.0");
+assert_eq(vec_get(AdditiveSynth_phases(ns), 0), 0, "phase wraps to exactly 0.0 after four quarter turns");
+var ns4 = additive_next_sample(ns);
+assert_eq(ns4, 0, "sample 4 repeats the cycle from exactly 0.0");
+# Amplitude scales the sine linearly.
+var na = additive_new(f64_from(11025), 1, f64_from(SR));
+additive_set_partial(na, 0, F64_ONE, C0_25);
+var na0 = additive_next_sample(na);
+var na1 = additive_next_sample(na);
+assert_eq(na0, 0, "scaled sample 0 is exactly 0.0");
+assert(f64_lt(f64_abs(f64_sub(na1, C0_25)), C1E_12), "amplitude 0.25 scales the peak to 0.25");
+assert(f64_gt(f64_abs(f64_sub(na1, ns1)), C0_5), "the scaled peak is clearly not the unit peak");
+
+test_group("additive_next_sample sums the partials");
+# 5512.5 Hz at 44100 Hz: partial 1 steps 0.125 turn/sample at amplitude 1.0,
+# partial 2 steps 0.25 turn/sample at amplitude 0.5 (11025 Hz < Nyquist).
+var su = additive_new(C5512_5, 2, f64_from(SR));
+var su_p = AdditiveSynth_partials(su);
+assert_eq(Partial_amplitude(vec_get(su_p, 0)), F64_ONE, "partial 1 amplitude 1.0");
+assert_eq(Partial_amplitude(vec_get(su_p, 1)), C0_5, "partial 2 amplitude 0.5");
+var su0 = additive_next_sample(su);
+var su1 = additive_next_sample(su);
+var su2 = additive_next_sample(su);
+var su3 = additive_next_sample(su);
+var su4 = additive_next_sample(su);
+assert_eq(su0, 0, "n=0: sin(0) + 0.5*sin(0) = 0");
+assert(f64_lt(f64_abs(f64_sub(su1, C1_2071)), C1E_12), "n=1: sin(45deg) + 0.5*sin(90deg) = 1.2071067811865475");
+assert(f64_lt(f64_abs(f64_sub(su2, F64_ONE)), C1E_12), "n=2: sin(90deg) + 0.5*sin(180deg) = 1.0");
+assert(f64_lt(f64_abs(f64_sub(su3, C0_2071)), C1E_12), "n=3: sin(135deg) + 0.5*sin(270deg) = 0.20710678118654757");
+assert(f64_lt(f64_abs(su4), C1E_12), "n=4: sin(180deg) + 0.5*sin(360deg) = 0");
+
+test_group("additive_next_sample skips silent partials without advancing them");
+var sk = additive_new(f64_from(A440), 2, f64_from(SR));
+additive_set_partial(sk, 1, F64_TWO, 0);
+var sk_ph = AdditiveSynth_phases(sk);
+var ski = 0;
+while (ski < 10) { var sk_s = additive_next_sample(sk); ski = ski + 1; }
+assert_neq(vec_get(sk_ph, 0), 0, "the sounding partial advanced its phase");
+assert_eq(vec_get(sk_ph, 1), 0, "the silenced partial's phase stayed at exactly 0");
+# ...and with every partial silent the output is exactly 0.0, not merely small.
+var sq = additive_new(f64_from(A440), 3, f64_from(SR));
+additive_set_partial(sq, 0, F64_ONE, 0);
+additive_set_partial(sq, 1, F64_TWO, 0);
+additive_set_partial(sq, 2, f64_from(3), 0);
+var sq_all_zero = 1;
+ski = 0;
+while (ski < 64) {
+    if (additive_next_sample(sq) != 0) { sq_all_zero = 0; }
+    ski = ski + 1;
+}
+assert(sq_all_zero, "a fully silenced bank emits exactly +0.0");
+
 var rc = assert_summary();
 syscall(60, rc);

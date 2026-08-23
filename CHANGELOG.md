@@ -5,6 +5,121 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] - Accessor coverage: from 182 untested public functions to zero
+
+The roadmap's largest remaining gate, closed. **Every one of naad's 440 public
+functions is now referenced by a test** — the count was 182 untested when this
+release started. Suite: **579 → 2340 assertions** across 40 suites.
+
+No source behaviour changed. The only `src/` edit is a comment (see Documented
+below). This is a test-only release.
+
+### Why this mattered
+
+The untested set was not random. Five of the eight functions that had to be
+documented in 2.1.3 were in it — the same corners were missing both docs and
+tests — and the 2.1.3 sweep found 16 defects in code the 505-assertion parity
+suite passed clean. Ported suites inherit the oracle's *positive* cases, and
+Rust's types made most negative cases unwritable, so whole families (all four FM
+algorithms, every `*_process_buffer`, the four voice-steal modes, the ADSR state
+machine) had zero assertions behind them.
+
+⚠ **A vacuous test is worse than no test**, because it makes the gap invisible.
+This repo has shipped one: an RT60 assertion compared through `f64_to`, which
+truncates, so it held for every value in (−1.0, 1.0) and asserted nothing for
+three releases. Guarding against a repeat was the design constraint for this
+whole pass, not an afterthought.
+
+### How the coverage was made falsifiable
+
+- **Expectations are derived from the oracle, not observed from naad.** The
+  xorshift32 streams, compressor knee gains, allpass/comb impulse responses,
+  ADSR stage arithmetic and Audio-EQ-Cookbook endpoint gains were each
+  re-derived independently from `rust-old/` and matched before being written
+  down. Values transcribed from what naad happened to print would have frozen
+  any existing bug in as "correct" — the worst possible outcome for a coverage
+  pass.
+- **Fixtures are chosen to make values exact.** 11025 Hz at 44.1 kHz gives a
+  phase step of exactly 0.25; 10 Hz sample rates give 10-sample envelope stages;
+  dyadic feedback coefficients and 4-sample tables keep every intermediate
+  representable. That is what lets **1434** of the new assertions be raw-bit
+  `assert_eq` rather than tolerance checks.
+- **Buffer forms are diffed against per-sample forms** bit-for-bit, with
+  sentinel fills proving the buffer was written and canary vecs proving it was
+  not overrun — never "the call returned 0".
+- **~40 assertions exist solely to prove another assertion is not `0 == 0`**
+  ("reference produced real signal", "the compared output is not all zeros").
+- **Setter round-trips use non-default values** and are each followed by a
+  behavioural consequence — the coefficient the process path actually uses, not
+  just the field read back.
+- **State machines assert transitions**, with exact stage lengths
+  (442 / 4411 / 13231 calls for 0.01 s / 0.1 s / 0.3 s at 44.1 kHz), which is
+  what proves exactly one envelope pump per sample.
+
+### Audited
+
+An independent pass swept every added assertion for the known failure modes.
+Results: **0** comparisons through `f64_to`; **0** tautologies; **0**
+buffer-by-return-code assertions; all **155** newly declared IEEE-754 hex
+constants decoded and checked against their decimal comments (155/155 correct);
+tightest-to-loosest tolerances 1e-15 → 1e-4 with three deliberate 0.01 ordering
+checks and none wide enough to admit a plausible wrong value.
+
+**One genuine vacuity found and fixed**: a flag-accumulator loop in
+`tests/acoustics_analysis.tcyr` compared field-by-field inside
+`while (i < vec_len(goonj_result))` and would have held vacuously had goonj
+returned an empty vec — the preceding length-equality assertion does not prevent
+`0 == 0`. Now guarded by `assert_gt(vec_len(...), 0, ...)`. The other five
+non-literal-bound loops were checked and are already guarded.
+
+**One `naad_is_finite`-only assertion retained** (binaural with an emptied IR),
+where "does not emit NaN" genuinely is the contract.
+
+### Documented — a divergence found by writing the tests
+
+- **`granular_rem_euclid` returns `+0.0` where Rust returns `−0.0`** for a
+  negative exact multiple. Rust computes `r = a % b`, which is `−0.0` for
+  `−3 % 3`, and `−0.0 < 0.0` is false so it returns `−0.0` unchanged; the
+  trunc-and-correct form produces `+0.0`. **Inert and deliberately not
+  corrected**: the result feeds `f64_floor` then `f64_to` (both zeros convert to
+  0) and a `frac = pos − floor(pos)` that is `+0.0` either way. Now a recorded,
+  tested contract instead of an accident. The only `src/` change in this release.
+
+Three further findings are the standing **f32 → f64 port convention**
+(`docs/development/port-audit.md`) rather than new divergences, but are worth
+stating since the new tests pin f64 values: the noise generators' normalisation
+runs in f64 where Rust used f32 (raw u32 draws are identical; the ~1e-7
+difference compounds through pink's accumulator and brown's integrator); the
+Moog ladder keeps full f64 RK4 state where Rust narrowed through f32 every
+sample, so trajectories diverge at high resonance; and `f64_pow` has no exact
+integral-exponent path, so `2^(n/12)` lands at 55.000000000000014 rather than
+55. Nobody should read the new bit patterns as oracle-derived where f32 was
+involved.
+
+### Also recorded
+
+Two **port-only contracts** are now frozen in the suite, correctly labelled and
+with no oracle counterpart because the Rust enums are exhaustive:
+`filter_biquad_with_gain` rejecting `filter_type > NAAD_FILTER_PEAK`, and
+`osc_stateless_waveform_sample` returning `0.0` for out-of-range waveform ids.
+
+`fm_engine_set_algorithm` validates nothing — any unknown integer silently means
+CUSTOM routing rather than an error, a failure mode Rust's exhaustive `match`
+did not have. Deliberately **not** asserted, because pinning it would bless
+behaviour that may deserve an `NAAD_ERR_INVALID_PARAMETER` instead. Flagged for
+a later decision.
+
+### Known — still open
+
+- **12 internal helpers** (`_`-prefixed) remain unreferenced by tests. They are
+  exercised through their public callers; testing them directly would pin
+  implementation detail rather than contract.
+- **Consumer-green (dhvani / svara)**, which still needs the coordinated refresh
+  of the five vendored `lib/naad.cyr` copies that 2.1.3 and 2.2.0 require.
+- **Retiring `rust-old/`** stays gated on consumer-green.
+- The **ganita** `mat_least_squares` defect is now filed upstream with a verified
+  SIGSEGV repro. naad is not exposed to it after 2.2.0.
+
 ## [2.2.0] - The namespace wave, and parity restored on `fit_polynomial`
 
 The deferred minor-release work from 2.1.3: everything that was real but not

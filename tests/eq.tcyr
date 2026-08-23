@@ -9,7 +9,8 @@ include "src/eq.cyr"
 
 alloc_init();
 
-var C0_5 = 0x3FE0000000000000;   # 0.5
+var C0_5  = 0x3FE0000000000000;   # 0.5
+var C0_25 = 0x3FD0000000000000;   # 0.25
 
 var SR = 44100;
 
@@ -47,6 +48,244 @@ test_group("deesser");
 var de = eq_deesser_new(f64_from(6000), f64_neg(f64_from(20)), f64_from(SR));
 var out4 = eq_deesser_process_sample(de, C0_5);
 assert(naad_is_finite(out4), "deesser process_sample finite");
+
+# ================================================================
+# 2.2.1 coverage: eq_band_mut, eq_reset, and the three buffer forms.
+# The buffer tests drive two identically constructed EQs -- one through
+# the buffer form, one sample by sample -- and compare raw f64 bit
+# patterns, so a buffer form that skipped a slot, double-processed one,
+# or left the buffer untouched cannot pass.
+# ================================================================
+
+test_group("eq_band_mut");
+var bm = eq_parametric_new(f64_from(SR));
+# Ports band_mut() = self.bands.get_mut(index): None -> the 0 null sentinel.
+assert_eq(eq_band_mut(bm, 0), 0, "band_mut on an empty eq -> null");
+var bm_e0 = eq_add_band(bm, NAAD_FILTER_PEAK, f64_from(1000), F64_ONE, f64_from(6));
+assert_eq(bm_e0, NAAD_ERR_NONE, "add_band(peak 1 kHz, +6 dB) ok");
+var bm_e1 = eq_add_band(bm, NAAD_FILTER_LOWSHELF, f64_from(200), F64_ONE, f64_neg(f64_from(3)));
+assert_eq(bm_e1, NAAD_ERR_NONE, "add_band(lowshelf 200 Hz, -3 dB) ok");
+assert_eq(eq_num_bands(bm), 2, "two bands present");
+# Out-of-range indices on both sides return the null sentinel, not a band.
+assert_eq(eq_band_mut(bm, -1), 0, "negative index -> null");
+assert_eq(eq_band_mut(bm, 2), 0, "index == num_bands -> null");
+assert_eq(eq_band_mut(bm, 99), 0, "index past the end -> null");
+var bm_b0 = eq_band_mut(bm, 0);
+var bm_b1 = eq_band_mut(bm, 1);
+assert(bm_b0 != 0, "band 0 is non-null");
+assert(bm_b1 != 0, "band 1 is non-null");
+assert(bm_b0 != bm_b1, "distinct indices return distinct bands");
+assert_eq(eq_band_mut(bm, 0), bm_b0, "band_mut is stable across calls");
+# The band handed back is the one add_band built, in insertion order.
+assert_eq(EqBand_enabled(bm_b0), 1, "a new band is enabled");
+assert_eq(BiquadFilter_frequency(EqBand_filter(bm_b0)), f64_from(1000), "band 0 frequency == 1000.0");
+assert_eq(BiquadFilter_gain_db(EqBand_filter(bm_b0)), f64_from(6), "band 0 gain_db == 6.0");
+assert_eq(BiquadFilter_filter_type(EqBand_filter(bm_b0)), NAAD_FILTER_PEAK, "band 0 type == PEAK");
+assert_eq(BiquadFilter_frequency(EqBand_filter(bm_b1)), f64_from(200), "band 1 frequency == 200.0");
+assert_eq(BiquadFilter_gain_db(EqBand_filter(bm_b1)), f64_neg(f64_from(3)), "band 1 gain_db == -3.0");
+assert_eq(BiquadFilter_filter_type(EqBand_filter(bm_b1)), NAAD_FILTER_LOWSHELF, "band 1 type == LOWSHELF");
+# band_mut returns a live handle: bypassing through it changes what the EQ
+# does. With both bands disabled the EQ is a bit-exact passthrough.
+var bm_on = eq_process_sample(bm, C0_5);
+eq_reset(bm);
+EqBand_set_enabled(bm_b0, 0);
+EqBand_set_enabled(bm_b1, 0);
+var bm_off = eq_process_sample(bm, C0_5);
+assert_eq(bm_off, C0_5, "both bands bypassed -> exact passthrough");
+assert(bm_on != bm_off, "band_mut handle is live (bypass changed the output)");
+assert_eq(eq_num_bands(bm), 2, "bypassing does not remove bands");
+# Re-enabling through the same handle restores the filtered path.
+eq_reset(bm);
+EqBand_set_enabled(bm_b0, 1);
+EqBand_set_enabled(bm_b1, 1);
+var bm_back = eq_process_sample(bm, C0_5);
+assert_eq(bm_back, bm_on, "re-enabling through band_mut restores the exact output");
+# Retuning through the handle is what GraphicEq::set_band_gain relies on.
+var bm_sp = filter_biquad_set_params(EqBand_filter(bm_b0), f64_from(2000), F64_TWO, f64_from(9));
+assert_eq(bm_sp, NAAD_ERR_NONE, "set_params through the band_mut handle ok");
+assert_eq(BiquadFilter_frequency(EqBand_filter(eq_band_mut(bm, 0))), f64_from(2000), "retune is visible through a fresh band_mut");
+
+# ================================================================
+test_group("eq_reset clears band state");
+var rq = eq_parametric_new(f64_from(SR));
+var rq_e = eq_add_band(rq, NAAD_FILTER_PEAK, f64_from(1000), F64_ONE, f64_from(6));
+assert_eq(rq_e, NAAD_ERR_NONE, "reset fixture add_band ok");
+var rq_filter = EqBand_filter(eq_band_mut(rq, 0));
+assert_eq(BiquadFilter_z1(rq_filter), 0, "fresh band state z1 == 0.0");
+assert_eq(BiquadFilter_z2(rq_filter), 0, "fresh band state z2 == 0.0");
+# The very first sample out of a virgin EQ is the reference value.
+var rq_first = eq_process_sample(rq, C0_5);
+assert(BiquadFilter_z1(rq_filter) != 0, "processing leaves non-zero z1");
+var rq_j = 0;
+while (rq_j < 64) {
+    var rq_d = eq_process_sample(rq, C0_5);
+    rq_j = rq_j + 1;
+}
+assert(BiquadFilter_z1(rq_filter) != 0, "state still non-zero just before reset");
+assert(BiquadFilter_z2(rq_filter) != 0, "z2 also non-zero just before reset");
+var rq_b0 = BiquadFilter_b0(rq_filter);
+var rq_a1 = BiquadFilter_a1(rq_filter);
+assert_eq(eq_reset(rq), 0, "eq_reset returns 0");
+assert_eq(BiquadFilter_z1(rq_filter), 0, "reset zeroes z1");
+assert_eq(BiquadFilter_z2(rq_filter), 0, "reset zeroes z2");
+# Reset clears state only -- coefficients, bands and enable flags survive.
+assert_eq(BiquadFilter_b0(rq_filter), rq_b0, "reset preserves coefficient b0");
+assert_eq(BiquadFilter_a1(rq_filter), rq_a1, "reset preserves coefficient a1");
+assert_eq(eq_num_bands(rq), 1, "reset preserves the band list");
+assert_eq(EqBand_enabled(eq_band_mut(rq, 0)), 1, "reset preserves the enabled flag");
+# ...so the EQ is behaviourally identical to a virgin one again.
+var rq_after = eq_process_sample(rq, C0_5);
+assert_eq(rq_after, rq_first, "after reset the first sample matches a virgin EQ");
+# reset on an EQ with no bands is a no-op, not a walk off the end.
+var rq_empty = eq_parametric_new(f64_from(SR));
+assert_eq(eq_reset(rq_empty), 0, "reset with zero bands returns 0");
+
+# ================================================================
+test_group("eq_process_buffer matches process_sample");
+var pb_a = eq_parametric_new(f64_from(SR));
+var pb_b = eq_parametric_new(f64_from(SR));
+var pb_ea = eq_add_band(pb_a, NAAD_FILTER_PEAK, f64_from(1000), F64_ONE, f64_from(6));
+var pb_eb = eq_add_band(pb_b, NAAD_FILTER_PEAK, f64_from(1000), F64_ONE, f64_from(6));
+assert_eq(pb_ea, NAAD_ERR_NONE, "buffer fixture A band ok");
+assert_eq(pb_eb, NAAD_ERR_NONE, "buffer fixture B band ok");
+var pb_ea2 = eq_add_band(pb_a, NAAD_FILTER_HIGHPASS, f64_from(120), F64_ONE, 0);
+var pb_eb2 = eq_add_band(pb_b, NAAD_FILTER_HIGHPASS, f64_from(120), F64_ONE, 0);
+assert_eq(pb_ea2, NAAD_ERR_NONE, "buffer fixture A highpass ok");
+assert_eq(pb_eb2, NAAD_ERR_NONE, "buffer fixture B highpass ok");
+var pb_buf = vec_new();
+var pb_src = vec_new();
+var pb_k = 0;
+while (pb_k < 64) {
+    var pb_s = f64_mul(f64_from((pb_k % 7) - 3), C0_25);   # -0.75 .. +0.75
+    vec_push(pb_buf, pb_s);
+    vec_push(pb_src, pb_s);
+    pb_k = pb_k + 1;
+}
+var pb_guard = vec_new();
+vec_push(pb_guard, C0_5);
+assert_eq(eq_process_buffer(pb_a, pb_buf), 0, "eq_process_buffer returns 0");
+assert_eq(vec_len(pb_buf), 64, "eq_process_buffer preserves the buffer length");
+var pb_mismatch = 0;
+var pb_changed = 0;
+pb_k = 0;
+while (pb_k < 64) {
+    var pb_want = eq_process_sample(pb_b, vec_get(pb_src, pb_k));
+    if (vec_get(pb_buf, pb_k) != pb_want) { pb_mismatch = pb_mismatch + 1; }
+    if (vec_get(pb_buf, pb_k) != vec_get(pb_src, pb_k)) { pb_changed = pb_changed + 1; }
+    pb_k = pb_k + 1;
+}
+assert_eq(pb_mismatch, 0, "every buffered sample equals the per-sample result");
+assert(pb_changed > 32, "eq_process_buffer actually rewrote the buffer");
+assert_eq(vec_get(pb_guard, 0), C0_5, "neighbouring allocation not corrupted");
+assert_eq(vec_len(pb_guard), 1, "neighbouring allocation length intact");
+# Zero-length and single-sample buffers.
+var pb_empty = vec_new();
+assert_eq(eq_process_buffer(pb_a, pb_empty), 0, "empty buffer returns 0");
+assert_eq(vec_len(pb_empty), 0, "empty buffer stays empty");
+var pb_one_a = eq_parametric_new(f64_from(SR));
+var pb_one_b = eq_parametric_new(f64_from(SR));
+var pb_one_ea = eq_add_band(pb_one_a, NAAD_FILTER_PEAK, f64_from(1000), F64_ONE, f64_from(6));
+var pb_one_eb = eq_add_band(pb_one_b, NAAD_FILTER_PEAK, f64_from(1000), F64_ONE, f64_from(6));
+assert_eq(pb_one_ea, NAAD_ERR_NONE, "1-sample fixture A ok");
+assert_eq(pb_one_eb, NAAD_ERR_NONE, "1-sample fixture B ok");
+var pb_one = vec_new();
+vec_push(pb_one, C0_5);
+assert_eq(eq_process_buffer(pb_one_a, pb_one), 0, "1-sample buffer returns 0");
+var pb_one_want = eq_process_sample(pb_one_b, C0_5);
+assert_eq(vec_get(pb_one, 0), pb_one_want, "1-sample buffer matches process_sample");
+# A band-less EQ copies the buffer through untouched, bit for bit.
+var pb_thru = eq_parametric_new(f64_from(SR));
+var pb_tbuf = vec_new();
+vec_push(pb_tbuf, C0_5);
+vec_push(pb_tbuf, f64_neg(C0_25));
+assert_eq(eq_process_buffer(pb_thru, pb_tbuf), 0, "band-less process_buffer returns 0");
+assert_eq(vec_get(pb_tbuf, 0), C0_5, "band-less buffer slot 0 unchanged");
+assert_eq(vec_get(pb_tbuf, 1), f64_neg(C0_25), "band-less buffer slot 1 unchanged");
+
+# ================================================================
+test_group("eq_graphic_process_buffer matches process_sample");
+var gb_a = eq_graphic_new(f64_from(SR));
+var gb_b = eq_graphic_new(f64_from(SR));
+assert(naad_is_err(gb_a) == 0, "graphic buffer fixture A built");
+assert(naad_is_err(gb_b) == 0, "graphic buffer fixture B built");
+# Give both the same non-flat curve so the buffer form has real work to do.
+assert_eq(eq_graphic_set_band_gain(gb_a, 4, f64_from(6)), NAAD_ERR_NONE, "fixture A band 4 +6 dB");
+assert_eq(eq_graphic_set_band_gain(gb_b, 4, f64_from(6)), NAAD_ERR_NONE, "fixture B band 4 +6 dB");
+assert_eq(eq_graphic_set_band_gain(gb_a, 8, f64_neg(f64_from(9))), NAAD_ERR_NONE, "fixture A band 8 -9 dB");
+assert_eq(eq_graphic_set_band_gain(gb_b, 8, f64_neg(f64_from(9))), NAAD_ERR_NONE, "fixture B band 8 -9 dB");
+var gb_buf = vec_new();
+var gb_src = vec_new();
+var gb_k = 0;
+while (gb_k < 48) {
+    var gb_s = f64_mul(f64_from((gb_k % 5) - 2), C0_25);   # -0.5 .. +0.5
+    vec_push(gb_buf, gb_s);
+    vec_push(gb_src, gb_s);
+    gb_k = gb_k + 1;
+}
+assert_eq(eq_graphic_process_buffer(gb_a, gb_buf), 0, "graphic process_buffer returns 0");
+assert_eq(vec_len(gb_buf), 48, "graphic process_buffer preserves length");
+var gb_mismatch = 0;
+var gb_changed = 0;
+gb_k = 0;
+while (gb_k < 48) {
+    var gb_want = eq_graphic_process_sample(gb_b, vec_get(gb_src, gb_k));
+    if (vec_get(gb_buf, gb_k) != gb_want) { gb_mismatch = gb_mismatch + 1; }
+    if (vec_get(gb_buf, gb_k) != vec_get(gb_src, gb_k)) { gb_changed = gb_changed + 1; }
+    gb_k = gb_k + 1;
+}
+assert_eq(gb_mismatch, 0, "every graphic sample equals the per-sample result");
+assert(gb_changed > 24, "graphic process_buffer actually rewrote the buffer");
+var gb_empty = vec_new();
+assert_eq(eq_graphic_process_buffer(gb_a, gb_empty), 0, "graphic empty buffer returns 0");
+
+# ================================================================
+test_group("eq_deesser_process_buffer matches process_sample");
+var db_a = eq_deesser_new(f64_from(6000), f64_neg(f64_from(20)), f64_from(SR));
+var db_b = eq_deesser_new(f64_from(6000), f64_neg(f64_from(20)), f64_from(SR));
+assert(naad_is_err(db_a) == 0, "deesser buffer fixture A built");
+assert(naad_is_err(db_b) == 0, "deesser buffer fixture B built");
+assert_eq(DeEsser_envelope(db_a), 0, "fresh de-esser envelope == 0.0");
+assert_eq(DeEsser_threshold_db(db_a), f64_neg(f64_from(20)), "fresh de-esser threshold_db == -20.0");
+assert_eq(DeEsser_max_reduction_db(db_a), f64_neg(f64_from(12)), "fresh de-esser max_reduction_db == -12.0");
+var db_buf = vec_new();
+var db_src = vec_new();
+var db_k = 0;
+while (db_k < 128) {
+    # A 6 kHz sine at 0.5 -- straight through the sidechain bandpass, so the
+    # envelope crosses -20 dB and the reduction branch is actually taken.
+    var db_ph = f64_div(f64_mul(f64_mul(F64_TAU, f64_from(6000)), f64_from(db_k)), f64_from(SR));
+    var db_s = f64_mul(C0_5, f64_sin(db_ph));
+    vec_push(db_buf, db_s);
+    vec_push(db_src, db_s);
+    db_k = db_k + 1;
+}
+assert_eq(eq_deesser_process_buffer(db_a, db_buf), 0, "deesser process_buffer returns 0");
+assert_eq(vec_len(db_buf), 128, "deesser process_buffer preserves length");
+var db_mismatch = 0;
+var db_reduced = 0;
+var db_overcut = 0;
+db_k = 0;
+while (db_k < 128) {
+    var db_want = eq_deesser_process_sample(db_b, vec_get(db_src, db_k));
+    if (vec_get(db_buf, db_k) != db_want) { db_mismatch = db_mismatch + 1; }
+    var db_out_abs = f64_abs(vec_get(db_buf, db_k));
+    var db_in_abs = f64_abs(vec_get(db_src, db_k));
+    if (f64_lt(db_out_abs, db_in_abs) == 1) { db_reduced = db_reduced + 1; }
+    # Never cut by more than max_reduction_db: -12 dB is a factor of
+    # 0.2511886, and 0.25 is a safe lower bound that still catches any
+    # real over-cut without depending on the last bit of f64_pow.
+    if (f64_lt(db_out_abs, f64_mul(db_in_abs, C0_25)) == 1) { db_overcut = db_overcut + 1; }
+    db_k = db_k + 1;
+}
+assert_eq(db_mismatch, 0, "every de-essed sample equals the per-sample result");
+assert(db_reduced > 32, "deesser process_buffer actually attenuated the buffer");
+assert_eq(db_overcut, 0, "no sample cut past max_reduction_db");
+# The buffer run advanced the shared envelope state (it is not a pure map),
+# and both drivers left the follower in bit-identical states.
+assert(f64_gt(DeEsser_envelope(db_a), 0), "buffer run advanced the envelope follower");
+assert_eq(DeEsser_envelope(db_a), DeEsser_envelope(db_b), "buffer and per-sample envelopes agree exactly");
+var db_empty = vec_new();
+assert_eq(eq_deesser_process_buffer(db_a, db_empty), 0, "deesser empty buffer returns 0");
 
 var rc = assert_summary();
 syscall(60, rc);

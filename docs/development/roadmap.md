@@ -57,19 +57,22 @@ committed to — nothing here is speculative, and no milestone is invented.
 - [x] **Retire ADR-0001** — shipped in 2.2.0. `fit_polynomial` ports hisab
       1.4.0's thin QR in-tree; no square Q is formed, the cap is gone, and large
       inputs succeed as they do in Rust. Superseded by ADR-0002.
-- [ ] **File the ganita bug upstream.** `ganita_mat_least_squares` still forms an
-      `m × m` Q and still has no failure return. naad is no longer exposed to it
-      after 2.2.0, but the defect is real and the next consumer will hit it.
+- [x] **File the ganita bug upstream** — filed 2026-08-23 in the **ganita** repo
+      (`docs/development/issues/2026-08-23-least-squares-unchecked-q-alloc.md`,
+      with a verified SIGSEGV repro alongside it). `ganita_mat_least_squares`
+      forms an `m × m` Q it does not need and never checks its own `mat_new`, so
+      1.1.4's CWE-190 guard turned an oversized design into a null write. naad
+      stopped being exposed at 2.2.0; the report stands on its own merits.
+      Awaiting an upstream fix — re-check before any future ganita re-pin.
 
-- [ ] **Accessor test coverage.** 108 public fns have no caller outside their own
-      definition — entire families (`unison_*`, `subosc_*`, `wavetable_osc_*`,
-      `wavetable_morph_*`, `physical_*`, `modulation_lfo_*`, `hardsync_*`,
-      `subtractive_*`, every `*_process_buffer`) have zero assertions behind
-      them. This is the largest remaining gap in the project and it is a
-      coverage problem, not a code problem: five of the eight fns documented in
-      2.1.3 were in that set, so the same corners were missing both docs and
-      tests. `cyrius coverage` reports file-level reference coverage, which does
-      not see it.
+- [x] **Accessor test coverage** — shipped in 2.2.1. 182 untested public
+      functions to **zero**; all 440 are now referenced by a test, suite 579 →
+      2340 assertions. Expectations were re-derived from `rust-old/` rather than
+      transcribed from naad's output (transcribing would freeze an existing bug
+      in as correct), and an independent audit swept every added assertion for
+      vacuity: 0 `f64_to` comparisons, 0 tautologies, 155/155 float constants
+      verified, one genuine vacuity found and fixed. 12 `_`-prefixed internal
+      helpers remain unreferenced by design.
 
 ### Downstream
 
