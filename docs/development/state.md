@@ -8,6 +8,18 @@
 `VERSION` at the repo root is the source of truth for the current number. The
 entries below are the release record.
 
+**2.2.2** — `naad_convolution_process_block` now STREAMS. It wrote only the first
+`block_len` samples of the convolution and discarded the rest -- the IR still
+ringing -- truncating the reverb tail at every block boundary. The oracle does
+the same (`.take(block_len)`, no tail state), so this was an inherited upstream
+defect rather than a port defect; fixing it is a deliberate divergence, recorded
+in [ADR 0003](../adr/0003-convolution-block-path-streams.md). Overlap-SAVE was
+chosen over overlap-add because it needs no new state: the history it wants is
+the previous `ir_len - 1` inputs, which is exactly the `input_buffer` ring
+`process_sample` already maintains. So there are no new public symbols, no struct
+change, no extra allocation, `fft_len` is unchanged, and the two entry points now
+share one history and may be interleaved. Suite: **40 suites / 2355 assertions**.
+
 **2.2.1** — accessor coverage: 182 untested public functions to **zero**.
 
 The roadmap's largest remaining gate. Every one of naad's **440** public

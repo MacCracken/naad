@@ -327,5 +327,116 @@ while (pm_i < 8) {
 }
 assert_eq(pe_ok, 1, "empty IR -> direct fallback passes the block through");
 
+# ================================================================
+# STREAMING CONTINUITY. The suite already had process_block_direct_matches_fft_path,
+# but it runs ONE block on a fresh object -- and one block is exactly the case
+# where the old truncating implementation was correct, because there is no
+# earlier tail to carry. The defect only becomes observable from the SECOND
+# block. Every assertion here therefore spans at least two calls.
+# ================================================================
+test_group("process_block is continuous across block boundaries");
+
+# 4-tap all-ones IR, one impulse, fully wet: the correct answer is 1,1,1,1.
+# Before the overlap-save fix the block path returned 1,1,0,0 -- the ring was
+# truncated at the boundary.
+var tl_s = naad_convolution_from_ir(vec4(F64_ONE, F64_ONE, F64_ONE, F64_ONE), F64_ONE);
+var tl_s0 = naad_convolution_process_sample(tl_s, F64_ONE);
+var tl_s1 = naad_convolution_process_sample(tl_s, 0);
+var tl_s2 = naad_convolution_process_sample(tl_s, 0);
+var tl_s3 = naad_convolution_process_sample(tl_s, 0);
+assert(approx(tl_s0, F64_ONE, CV_1E_9), "reference sample path y[0] == 1");
+assert(approx(tl_s1, F64_ONE, CV_1E_9), "reference sample path y[1] == 1");
+assert(approx(tl_s2, F64_ONE, CV_1E_9), "reference sample path y[2] == 1");
+assert(approx(tl_s3, F64_ONE, CV_1E_9), "reference sample path y[3] == 1");
+
+var tl_b = naad_convolution_from_ir(vec4(F64_ONE, F64_ONE, F64_ONE, F64_ONE), F64_ONE);
+var tl_in1 = vec_new(); vec_push(tl_in1, F64_ONE); vec_push(tl_in1, 0);
+var tl_o1 = vec_new(); vec_push(tl_o1, CV_SENTINEL); vec_push(tl_o1, CV_SENTINEL);
+naad_convolution_process_block(tl_b, tl_in1, tl_o1);
+var tl_in2 = vec_new(); vec_push(tl_in2, 0); vec_push(tl_in2, 0);
+var tl_o2 = vec_new(); vec_push(tl_o2, CV_SENTINEL); vec_push(tl_o2, CV_SENTINEL);
+naad_convolution_process_block(tl_b, tl_in2, tl_o2);
+assert(approx(vec_get(tl_o1, 0), F64_ONE, CV_1E_9), "block path y[0] == 1");
+assert(approx(vec_get(tl_o1, 1), F64_ONE, CV_1E_9), "block path y[1] == 1");
+assert(approx(vec_get(tl_o2, 0), F64_ONE, CV_1E_9), "block path y[2] == 1 -- tail carried across the boundary");
+assert(approx(vec_get(tl_o2, 1), F64_ONE, CV_1E_9), "block path y[3] == 1 -- tail carried across the boundary");
+
+# The general property, over a longer signal and an asymmetric IR: chunked
+# process_block must agree with the per-sample path sample for sample.
+var tl_ir_a = vec4(F64_ONE, F64_HALF, CV_NEG_HALF, CV_0_25);
+var tl_ir_b2 = vec4(F64_ONE, F64_HALF, CV_NEG_HALF, CV_0_25);
+var tl_ref = naad_convolution_from_ir(tl_ir_a, F64_ONE);
+var tl_chunk = naad_convolution_from_ir(tl_ir_b2, F64_ONE);
+var tl_sig = vec_new();
+var tl_k = 0;
+while (tl_k < 24) {
+    var tl_v = 0;
+    if (tl_k == 0) { tl_v = F64_ONE; }
+    if (tl_k == 3) { tl_v = CV_0_25; }
+    if (tl_k == 7) { tl_v = CV_NEG_HALF; }
+    if (tl_k == 11) { tl_v = F64_TWO; }
+    if (tl_k == 18) { tl_v = F64_ONE; }
+    vec_push(tl_sig, tl_v);
+    tl_k = tl_k + 1;
+}
+# reference: one sample at a time
+var tl_expect = vec_new();
+tl_k = 0;
+while (tl_k < 24) {
+    vec_push(tl_expect, naad_convolution_process_sample(tl_ref, vec_get(tl_sig, tl_k)));
+    tl_k = tl_k + 1;
+}
+# subject: six blocks of four
+var tl_got = vec_new();
+tl_k = 0;
+while (tl_k < 24) { vec_push(tl_got, CV_SENTINEL); tl_k = tl_k + 1; }
+var tl_off = 0;
+while (tl_off < 24) {
+    var tl_cin = vec_new();
+    var tl_cout = vec_new();
+    var tl_c = 0;
+    while (tl_c < 4) {
+        vec_push(tl_cin, vec_get(tl_sig, tl_off + tl_c));
+        vec_push(tl_cout, CV_SENTINEL);
+        tl_c = tl_c + 1;
+    }
+    naad_convolution_process_block(tl_chunk, tl_cin, tl_cout);
+    tl_c = 0;
+    while (tl_c < 4) { vec_set(tl_got, tl_off + tl_c, vec_get(tl_cout, tl_c)); tl_c = tl_c + 1; }
+    tl_off = tl_off + 4;
+}
+var tl_agree = 1;
+var tl_written = 1;
+var tl_energy = 0;
+tl_k = 0;
+while (tl_k < 24) {
+    if (approx(vec_get(tl_got, tl_k), vec_get(tl_expect, tl_k), CV_1E_9) == 0) { tl_agree = 0; }
+    if (vec_get(tl_got, tl_k) == CV_SENTINEL) { tl_written = 0; }
+    tl_energy = f64_add(tl_energy, f64_abs(vec_get(tl_expect, tl_k)));
+    tl_k = tl_k + 1;
+}
+assert_eq(tl_written, 1, "chunked run wrote every output slot");
+assert(f64_gt(tl_energy, F64_ONE), "the reference signal is non-trivial (not a vacuous compare)");
+assert_eq(tl_agree, 1, "6 blocks of 4 == 24 single samples, sample for sample");
+
+# Interleaving the two entry points is now coherent: they share one history ring.
+var tl_mix1 = naad_convolution_from_ir(vec4(F64_ONE, F64_HALF, CV_NEG_HALF, CV_0_25), F64_ONE);
+var tl_mix2 = naad_convolution_from_ir(vec4(F64_ONE, F64_HALF, CV_NEG_HALF, CV_0_25), F64_ONE);
+# path 1: two samples, then a block of two
+var tl_m1a = naad_convolution_process_sample(tl_mix1, F64_ONE);
+var tl_m1b = naad_convolution_process_sample(tl_mix1, CV_0_25);
+var tl_mi = vec_new(); vec_push(tl_mi, CV_NEG_HALF); vec_push(tl_mi, F64_TWO);
+var tl_mo = vec_new(); vec_push(tl_mo, CV_SENTINEL); vec_push(tl_mo, CV_SENTINEL);
+naad_convolution_process_block(tl_mix1, tl_mi, tl_mo);
+# path 2: the same four samples, one at a time
+var tl_m2a = naad_convolution_process_sample(tl_mix2, F64_ONE);
+var tl_m2b = naad_convolution_process_sample(tl_mix2, CV_0_25);
+var tl_m2c = naad_convolution_process_sample(tl_mix2, CV_NEG_HALF);
+var tl_m2d = naad_convolution_process_sample(tl_mix2, F64_TWO);
+assert(approx(tl_m1a, tl_m2a, CV_1E_9), "interleaved: sample 0 agrees");
+assert(approx(tl_m1b, tl_m2b, CV_1E_9), "interleaved: sample 1 agrees");
+assert(approx(vec_get(tl_mo, 0), tl_m2c, CV_1E_9), "interleaved: block sample 2 agrees with the sample path");
+assert(approx(vec_get(tl_mo, 1), tl_m2d, CV_1E_9), "interleaved: block sample 3 agrees with the sample path");
+
 var rc = assert_summary();
 syscall(60, rc);

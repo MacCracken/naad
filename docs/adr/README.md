@@ -23,3 +23,4 @@ Decisions about naad — what we chose, the context, and the consequences we acc
 |---|---|---|
 | [0001](0001-fit-polynomial-sample-cap.md) | `fit_polynomial` caps its sample count, diverging from the oracle | Superseded by 0002 |
 | [0002](0002-port-thin-qr-in-tree.md) | Port hisab's thin QR into `fit_polynomial` rather than call ganita | Accepted |
+| [0003](0003-convolution-block-path-streams.md) | Convolution's block path streams instead of truncating | Accepted |

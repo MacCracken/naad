@@ -5,6 +5,68 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.2] - Convolution's block path actually streams
+
+`naad_convolution_process_block` computed the right answer and then threw half of
+it away. It wrote the first `block_len` samples of the convolution and discarded
+the rest — which is the impulse response still ringing — with nothing carrying it
+into the next call. **Every block boundary truncated the reverb tail**: a
+discontinuity at the block rate, 86 Hz for 512-sample blocks.
+
+A 4-tap all-ones IR with one impulse, fully wet:
+
+| | y[0] | y[1] | y[2] | y[3] |
+|---|---|---|---|---|
+| `process_sample` | 1 | 1 | 1 | 1 |
+| `process_block` **before** | 1 | 1−1ULP | **0** | **0** |
+| `process_block` **after** | 1 | 1 | 1 | 1 |
+
+The oracle does the same thing (`rust-old/src/acoustics/convolution.rs`,
+`.take(block_len)`, no tail state), so this was an **inherited upstream defect,
+not a port defect** — the port passed its parity bar. Fixing it is a deliberate
+divergence, recorded in
+[ADR 0003](docs/adr/0003-convolution-block-path-streams.md).
+
+### Fixed — streaming, via overlap-save
+
+Overlap-**save** rather than the more familiar overlap-add, because it needs **no
+new state**: the history it requires is the previous `ir_len - 1` *inputs*, which
+is exactly what the `input_buffer` ring already holds for `process_sample`. So:
+
+- **no new public symbols, no struct change, no extra allocation** —
+  `tests/allocbudget.tcyr` passes unchanged
+- **`fft_len` is unchanged**, so scratch sizing and the transform cost are untouched
+- and the block path now advances the same ring, so `process_block` and
+  `process_sample` **share one history and may be interleaved on one object** —
+  previously they kept independent state, and nothing said so
+
+### Fixed — the FFT path consumed more than it emitted
+
+It sized itself on the *input* length while writing `min(len(input),
+len(output))` samples, so a short output buffer silently consumed history it
+never emitted. It now consumes exactly what it emits, matching
+`naad_convolution_process_block_direct`.
+
+### Tests
+
+`tests/acoustics_convolution.tcyr`: 81 assertions, up from 68.
+
+The existing `process_block_direct_matches_fft_path` could never have caught this
+— it runs **one block of 8 on a fresh object**, and one block is precisely the
+case where the truncating implementation is correct, because there is no earlier
+tail to carry. The defect is only observable from the second block, so **every
+assertion in the new group spans at least two calls**: the impulse case above,
+6 blocks of 4 against 24 single samples sample-for-sample (with a guard that the
+reference signal is not near-silent, so it cannot pass vacuously), and an
+interleaving check. Verified against the pre-fix code: 5 of the new assertions
+fail on it.
+
+### Consumer impact
+
+**None today.** ghurni, the only in-tree consumer that evaluated this API, calls
+no convolution symbol — it models resonant bodies with biquads. Consumers who had
+unknowingly tuned around the truncation will now hear the full tail.
+
 ## [2.2.1] - Accessor coverage: from 182 untested public functions to zero
 
 The roadmap's largest remaining gate, closed. **Every one of naad's 440 public
