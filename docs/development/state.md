@@ -265,12 +265,76 @@ consumed.
 ## Source
 
 - Rust reference: 13,465 lines across 41 modules at `rust-old/` (frozen).
+  ⚠ **The oracle is not bug-free — see "Known defects in `rust-old/`" below.**
+  Read it as *what Rust did*, which is the parity bar, not as *what is correct*.
 - Cyrius port: `src/main.cyr` (smoke) + per-module `src/*.cyr` (library,
   validated via `tests/*.tcyr`, not included by the smoke binary — same layout
   hisab/goonj use). Subdir modules (`synth/`, `oscillator/`, `acoustics/`) are
   flattened into `src/` with descriptive names.
 - `[lib].modules` lists 39 entries against 40 files in `src/` — `src/main.cyr`
   is the smoke binary and is deliberately outside the bundle.
+
+## Known defects in `rust-old/` — READ BEFORE RETIRING THE ORACLE
+
+The parity bar is "matches what Rust did" (CLAUDE.md), and that is *not* the same
+as "is correct". Where the two part company it is recorded here, so the eventual
+port review that deletes `rust-old/` does not delete the evidence with it.
+
+**When the folder is retired, this section must be carried into the retirement
+record** — the same way ghurni handled it in
+`docs/development/rust-old-retirement.md` when it dropped its own oracle in
+2.0.4. A frozen oracle is recoverable from git; a *reason* is not, unless it was
+written down.
+
+### 1. `ConvolutionReverb::process_block` truncates the reverb tail
+
+`rust-old/src/acoustics/convolution.rs` — **still live in the Rust source.**
+
+```rust
+for (i, o) in output.iter_mut().enumerate().take(block_len) {
+    let wet = self.scratch_product[i].re as f32;
+    *o = input[i] * dry + wet * self.mix;
+}
+```
+
+The FFT route computes the full linear convolution, length
+`ir_len + block_len - 1`, then `.take(block_len)` writes only the head and drops
+the rest — which is the impulse response still ringing. There is no tail field on
+the struct and nothing carries it forward, so **every block boundary truncates
+the tail**: a discontinuity at the block rate, 86 Hz for 512-sample blocks. A
+convolution reverb that restarts each block is not a convolution reverb.
+
+Second, related: the FFT route never touches `position` / `input_buffer`, the
+ring `process_sample` maintains, so the two entry points keep independent history
+and cannot be interleaved on one object. Nothing in the Rust documents that.
+
+Measured, 4-tap all-ones IR with one impulse then zeros, fully wet:
+
+| | y[0] | y[1] | y[2] | y[3] |
+|---|---|---|---|---|
+| `process_sample` | 1 | 1 | 1 | 1 |
+| `process_block` | 1 | 1−1ULP | **0** | **0** |
+
+**The Cyrius port diverged and fixed it in 2.2.2** ([ADR
+0003](../adr/0003-convolution-block-path-streams.md)), using overlap-save — which
+needs no new state, because the history it wants is the previous `ir_len - 1`
+inputs and that is exactly what the `input_buffer` ring already holds. So the two
+sources now differ **on purpose** at this function.
+
+Consequences for the port review:
+
+- Do **not** "restore parity" here. `src/acoustics_convolution.cyr` is
+  deliberately ahead of the oracle; the parity bar for this one function is
+  ADR 0003 and the `process_block is continuous across block boundaries` group in
+  `tests/acoustics_convolution.tcyr`, not `rust-old/`.
+- The Rust bug is **unfixed upstream**. If that crate is ever revived or
+  published, it carries the defect and should take this fix.
+- Note *why* naad's own suite missed it for so long, because the shape recurs:
+  `process_block_direct_matches_fft_path` compared the two paths and passed, but
+  it runs **one block on a fresh object** — and one block is precisely the case
+  where the truncating version is correct, since there is no earlier tail to
+  carry. Any equivalence test between a streaming and a non-streaming path must
+  span at least two calls.
 
 ## Port progress
 
@@ -377,6 +441,13 @@ class (`scripts/symbol-collision-check.sh`, in CI, `fn`/`var`/`const`/`struct`
 scoped — verified to fail when the 2.1.2 collision is reintroduced).
 
 **Carried forward:**
+
+- **Retiring `rust-old/`** — when the port review wraps and the folder is
+  removed, carry "Known defects in `rust-old/`" (above) into the retirement
+  record first. There is one entry today: `ConvolutionReverb::process_block`
+  truncates the reverb tail and the Cyrius port deliberately diverges from it
+  (ADR 0003). Deleting the oracle without that note would leave a divergence in
+  the tree with its justification only in git history.
 
 - ~~CI has no fmt / lint / deny / fuzz step~~ — **closed in 2.2.0.** CI now runs
   the changelog gate, `cyrius deps`, `cyrius build`, the symbol-collision and
