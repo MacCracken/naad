@@ -9,6 +9,75 @@
 > milestones that delivered it are preserved in [Shipped](#shipped) at the
 > bottom; this file now leads with the gates that are actually still open.
 
+## 🔴 P0 — move the DSP core to f32
+
+**Filed 2026-08-31 by prani**, which measured its consequence. **naad is the
+bottom of this stack, so nothing above it can move until naad does.**
+
+### The measurement
+
+prani's roadmap 2.0.7 ran its Cyrius port and its frozen Rust oracle on one host,
+same species, same durations, same 44100 Hz. The oracle is prani 1.1.0 on
+**svara 1.0.0 / naad 1.0.0 in f32**; the port is prani 2.0.6 on **svara 3.5.4 /
+naad 2.2.2 in f64**:
+
+| | Rust (f32) | Cyrius (f64) | |
+|---|---:|---:|---:|
+| `wolf_howl_1s` | 1.39 ms | 21.9 ms | **15.8× slower** |
+| median, 13 synthesis benchmarks | | | **15.7× slower** |
+| range | | | 9.9× – 17.4× |
+| realtime, wolf howl | **719×** | **45.6×** | |
+
+The band is *tight* — every vocal apparatus, every duration, 9.9×–17.4×. A
+uniform ratio across unrelated code paths is the signature of something
+systemic in the substrate, not a slow algorithm somewhere.
+
+### Why this lands on naad
+
+naad is the biquad/filter/noise layer everything else calls per sample. Its
+surface is f64 on both sides, so **svara cannot convert without naad, and prani
+cannot convert without svara.** Converting only the layers above naad means
+widening at every per-sample call — strictly more work than doing nothing.
+
+### The constraint that used to justify f64 is gone
+
+The ports were written when Cyrius had no f32 math. **ganita 1.1.4 ships a
+23-function f32 scalar tier** — `sin cos exp ln sqrt pow atan2 hypot cbrt floor
+ceil trunc round abs neg min max clamp lerp sign log2 exp2` — and it is already
+vendored in these projects' `lib/`. Check what naad actually calls against that
+list before assuming a gap; prani calls **nothing** outside it.
+
+Note `f32_add`/`f32_mul` are **not** callable functions — f32 arithmetic
+dispatches through the operators on an `F32_TYID`-typed binding.
+
+### Three reasons, and be honest about which is which
+
+1. **SIMD width — the strongest.** cycc has `f32v8`: **eight lanes against
+   `f64v4`'s four**. A vectorised f32 filter bank has twice the lanes.
+2. **Half the memory traffic** per sample buffer, on a bump allocator that never
+   frees.
+3. **Parity.** Every consumer's Rust oracle is f32. Every tolerance loosened in
+   a port's test suite exists because of this widening; f32 makes them bit-exact.
+
+⚠ **f32 is not proven to be the cause of the 15.7×.** Three things differ in
+that comparison and only one is float width — the other two are three major
+versions of the DSP stack and LLVM `--release` against cycc. **The honest prior
+is that codegen dominates and float width is second.** Do not open this expecting
+a 15× win. Measure a single hot filter path in f32 before converting the module.
+
+### Suggested first step
+
+Convert **one** hot per-sample path — `filter_biquad_process_sample` is the
+obvious candidate — behind whatever the smallest honest experiment is, and
+publish the delta. If f32 buys less than ~20% there, say so loudly and this P0
+gets downgraded rather than propagated up the stack. **A measured "no" is a good
+outcome and closes the question for svara and prani too.**
+
+**Blocked on**: nothing. naad is the bottom.
+**Blocks**: svara's f32 conversion, and prani 2.1.0 Lane A.
+
+---
+
 ## Open gates
 
 Not yet scheduled against a version. These are the follow-ups the project has
@@ -73,6 +142,59 @@ committed to — nothing here is speculative, and no milestone is invented.
       vacuity: 0 `f64_to` comparisons, 0 tautologies, 155/155 float constants
       verified, one genuine vacuity found and fixed. 12 `_`-prefixed internal
       helpers remain unreferenced by design.
+
+### Allocation-free hot paths
+
+- [ ] **An allocation-free four-output SVF core.** **Filed 2026-08-31 by nidhi**,
+      which measured it.
+
+      `filter_svf_process_sample` (`src/filter.cyr:386`) ends with
+      `alloc(sizeof(SvfOutput))` — **32 bytes per call**, measured over 44,100
+      calls (1,411,200 B). `filter_svf_process_sample_lowpass` (`:420`) measures
+      **0**. So the escape hatch exists for low-pass and only for low-pass;
+      high-pass, band-pass and notch have none.
+
+      For a sampler that is not a throughput cost, it is unbounded growth:
+      `lib/alloc.cyr`'s free is a no-op, so a voice filtering at 44.1 kHz never
+      gives the memory back. nidhi at 64 voices x 2 channels reaches
+      **180.6 MB/s** (64 x 2 x 44100 x 32 = 180,633,600). It removed every other
+      per-sample allocation from its render path in 2.0.2 and asserts a
+      zero-byte delta across a rendered block; this is the one source left that
+      is not on its side of the line.
+
+      Measured end to end on identical 8-voice 512-frame block renders differing
+      only in filter type: **1.528 ms** low-pass vs **1.819 ms** high-pass, a
+      **19 %** penalty.
+
+      **Requested shape** — `_filter_svf_compute_into(self, input, out4)`,
+      writing low/high/band/notch into caller-owned scratch, so a voice can hoist
+      one slot for its lifetime. naad already uses this pattern in at least six
+      places: `reverb_process_core`, `panning_pan_mono_into` — whose header
+      explicitly names `reverb_process_core` as the split being followed —
+      `naad_ambisonics_encode_sample_into`, `naad_binaural_process_sample_into`,
+      `_bspline_eval_1d_into`, `_naad_fdn_hadamard8_into`. The request is to
+      complete a pattern, not introduce one.
+
+      **Two workarounds exist and neither is a fork**, so this is not blocking
+      nidhi — it is asking naad to make the obvious route the fast one:
+      (a) route those modes through `filter_biquad_process_sample` (`:2673` in
+      the 2.2.2 bundle), which is allocation-free and covers HIGHPASS/BANDPASS/
+      NOTCH, at the cost of a different topology and therefore an ADR;
+      (b) call `_filter_svf_compute_lowpass` and recover the other three outputs
+      from `k` and the pre/post `ic1eq` via the derive accessors — bit-identical,
+      but it depends on naad's integrator update staying as it is.
+
+      **Acceptance:** numerics bit-identical to the current
+      `filter_svf_process_sample` fields. nidhi verifies render output
+      byte-for-byte against a 24,576-sample differential, so any drift surfaces
+      immediately.
+
+      *Withdrawn from this filing:* nidhi also reported that `Adsr` and `Lfo`
+      could not be re-armed and asked for setters. **That was wrong.** Both
+      structs are `#derive(accessors)`, so every parameter is already settable,
+      and `modulation_lfo_set_frequency` already exists as a validating setter.
+      nidhi took per-note allocation from 264 B to **0** against naad 2.2.2 with
+      no upstream change. No action needed here.
 
 ### Downstream
 
