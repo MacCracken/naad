@@ -226,7 +226,6 @@ var zc_unity = granular_test_zc(buf_unity, 8192);
 var zc_up = granular_test_zc(buf_up, 8192);
 assert(zc_up >= zc_unity * 3 / 2, "pitch_shift=2 must raise zero-crossing count meaningfully");
 
-
 # ================================================================
 # 2.2.1 accessor/coverage pass. Exact values throughout: every expected
 # number below is exactly representable in f64, so the comparisons are raw
@@ -340,7 +339,8 @@ while (gt_f < GRAIN_MAX_GRAINS) {
 }
 assert_eq(granular_test_count_active(gt_pool), GRAIN_MAX_GRAINS, "64 spawns fill every slot");
 granular_spawn_grain(gt_s);
-assert_eq(granular_test_count_active(gt_pool), GRAIN_MAX_GRAINS, "the 65th spawn is dropped, not written past the pool");
+assert_eq(granular_test_count_active(gt_pool), GRAIN_MAX_GRAINS,
+  "the 65th spawn is dropped, not written past the pool");
 assert_eq(vec_len(gt_pool), GRAIN_MAX_GRAINS, "the pool did not grow");
 
 # ================================================================
@@ -387,7 +387,8 @@ granular_spawn_grain(gt_b);
 assert_eq(granular_is_active(gt_b), 1, "source + live grain -> active");
 granular_set_source(gt_b, vec_new());
 assert_eq(granular_is_active(gt_b), 0, "clearing the source reports inactive even with a live grain");
-assert_eq(Grain_active(vec_get(GranularEngine_grains(gt_b), 0)), 1, "...although the grain itself is still flagged active");
+assert_eq(Grain_active(vec_get(GranularEngine_grains(gt_b), 0)), 1,
+  "...although the grain itself is still flagged active");
 
 var rc = assert_summary();
 syscall(60, rc);

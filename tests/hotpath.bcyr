@@ -14,6 +14,7 @@ include "src/osc_unison.cyr"
 include "src/osc_sub.cyr"
 include "src/osc_sync.cyr"
 
+# bench — helper used by hotpath.bcyr.
 fn bench(name, fp, n) {
     var b = bench_new(name);
     bench_run(b, fp, n);
@@ -28,22 +29,27 @@ var _env = 0;
 var _noise = 0;
 var _half = 0;
 
+# b osc next sample — helper used by hotpath.bcyr.
 fn b_osc_next_sample() {
     return osc_next_sample(_osc);
 }
 
+# b svf lowpass — helper used by hotpath.bcyr.
 fn b_svf_lowpass() {
     return filter_svf_process_sample_lowpass(_svf, _half);
 }
 
+# b env next value — helper used by hotpath.bcyr.
 fn b_env_next_value() {
     return envelope_adsr_next_value(_env);
 }
 
+# b noise pink — helper used by hotpath.bcyr.
 fn b_noise_pink() {
     return noise_next_sample(_noise);
 }
 
+# Bench entry point — runs every benchmark in this file.
 fn main() {
     alloc_init();
     _half = F64_HALF;

@@ -68,7 +68,6 @@ while (vi < vec_len(vowels)) {
 }
 assert(all_valid, "all vowel formants have positive freq/bw/amp");
 
-
 # ================================================================
 # ---- 2.2.1 accessor/coverage gap: formant_band_new, formant_q,
 # ---- formant_lerp, formant_synth_{apply_params,set_vowel,
@@ -141,7 +140,8 @@ assert_eq(formant_synth_current_vowel(cs_o), VOWEL_O, "fresh synth reports VOWEL
 # Constructor also seeds filters from that vowel: /u/ F1 = 300 Hz, Q = 300/70.
 var cs_u_f = FormantSynth_filters(cs_u);
 assert_eq(BiquadFilter_frequency(vec_get(cs_u_f, 0)), f64_from(300), "U F1 filter at 300 Hz");
-assert_eq(BiquadFilter_q(vec_get(cs_u_f, 0)), f64_div(f64_from(300), f64_from(70)), "U F1 Q = 300/70 (raw ratio per Rust new())");
+assert_eq(BiquadFilter_q(vec_get(cs_u_f, 0)), f64_div(f64_from(300), f64_from(70)),
+  "U F1 Q = 300/70 (raw ratio per Rust new())");
 assert_eq(vec_get(FormantSynth_amplitudes(cs_u), 1), FORMANT_C0_35, "U F2 amplitude = 0.35");
 
 # ================================================================
@@ -213,7 +213,8 @@ vec_push(apb_params, formant_band_new(f64_from(30000), f64_from(100), F64_ONE));
 vec_push(apb_params, formant_band_new(f64_from(1000), f64_from(100), C0_25));
 vec_push(apb_params, formant_band_new(f64_from(1500), f64_from(100), C0_25));
 assert_eq(formant_synth_apply_params(apb, apb_params), NAAD_ERR_INVALID_FREQUENCY, "above-Nyquist band rejected");
-assert_eq(BiquadFilter_frequency(vec_get(FormantSynth_filters(apb), 0)), f64_from(730), "rejected band left the filter untouched");
+assert_eq(BiquadFilter_frequency(vec_get(FormantSynth_filters(apb), 0)), f64_from(730),
+  "rejected band left the filter untouched");
 
 # ================================================================
 # formant_synth_process_buffer -- must transform the buffer in place and

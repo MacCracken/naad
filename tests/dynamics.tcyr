@@ -215,13 +215,16 @@ assert_eq(dynamics_compressor_compute_gain_db_hard(ch, f64_neg(f64_from(30))), 0
 # The branch is `input_db <= threshold_db`, so the threshold itself is unreduced.
 assert_eq(dynamics_compressor_compute_gain_db_hard(ch, f64_neg(f64_from(20))), 0, "at threshold -> 0 dB reduction");
 # Above: (t + (in - t)/r) - in = (-20 + 12/4) + 8 = -9.0 exactly.
-assert_eq(dynamics_compressor_compute_gain_db_hard(ch, f64_neg(f64_from(8))), f64_neg(f64_from(9)), "-8 dB in, 4:1 over -20 -> -9 dB");
+assert_eq(dynamics_compressor_compute_gain_db_hard(ch, f64_neg(f64_from(8))), f64_neg(f64_from(9)),
+  "-8 dB in, 4:1 over -20 -> -9 dB");
 # 0 dBFS: (-20 + 20/4) - 0 = -15.0 exactly.
 assert_eq(dynamics_compressor_compute_gain_db_hard(ch, 0), f64_neg(f64_from(15)), "0 dB in, 4:1 over -20 -> -15 dB");
 # One dB over threshold: (-20 + 1/4) + 19 = -0.75 exactly.
-assert_eq(dynamics_compressor_compute_gain_db_hard(ch, f64_neg(f64_from(19))), f64_neg(C0_75), "1 dB over threshold -> -0.75 dB");
+assert_eq(dynamics_compressor_compute_gain_db_hard(ch, f64_neg(f64_from(19))), f64_neg(C0_75),
+  "1 dB over threshold -> -0.75 dB");
 # While knee == 0 the dispatch entry must be the hard path, value for value.
-assert_eq(dynamics_compressor_compute_gain_db(ch, f64_neg(f64_from(8))), f64_neg(f64_from(9)), "compute_gain_db dispatches to the hard path");
+assert_eq(dynamics_compressor_compute_gain_db(ch, f64_neg(f64_from(8))), f64_neg(f64_from(9)),
+  "compute_gain_db dispatches to the hard path");
 
 # ================================================================
 test_group("compressor soft-knee gain exact");
@@ -230,25 +233,34 @@ Compressor_set_knee_db(cs, C6_0);          # 6 dB knee -> window [-23, -17]
 # Inside the window: (1/r - 1) * x^2 / (2k) with x = in - t + k/2.
 # At the threshold, x = 3 -> -0.75 * 9 / 12 = -0.5625 exactly, while the hard
 # path applies nothing there: the knee starts reducing BEFORE the threshold.
-assert_eq(dynamics_compressor_compute_gain_db_soft(cs, f64_neg(f64_from(20))), f64_neg(C0_5625), "at threshold, 6 dB knee -> -0.5625 dB");
-assert_eq(dynamics_compressor_compute_gain_db_hard(cs, f64_neg(f64_from(20))), 0, "hard path applies nothing at the threshold");
+assert_eq(dynamics_compressor_compute_gain_db_soft(cs, f64_neg(f64_from(20))), f64_neg(C0_5625),
+  "at threshold, 6 dB knee -> -0.5625 dB");
+assert_eq(dynamics_compressor_compute_gain_db_hard(cs, f64_neg(f64_from(20))), 0,
+  "hard path applies nothing at the threshold");
 # Below threshold but inside the knee: x = 1 -> -0.75 / 12 = -0.0625 exactly.
-assert_eq(dynamics_compressor_compute_gain_db_soft(cs, f64_neg(f64_from(22))), f64_neg(C0_0625), "-22 dB inside knee -> -0.0625 dB");
+assert_eq(dynamics_compressor_compute_gain_db_soft(cs, f64_neg(f64_from(22))), f64_neg(C0_0625),
+  "-22 dB inside knee -> -0.0625 dB");
 # Lower knee edge: |in - t| == k/2 is NOT > k/2, so the quadratic still runs
 # with x = 0. -0.75 * 0.0 * 0.0 / 12 is NEGATIVE zero, exactly as in Rust.
-assert_eq(dynamics_compressor_compute_gain_db_soft(cs, f64_neg(f64_from(23))), NEG_ZERO, "lower knee edge -> -0.0 dB (signed zero)");
+assert_eq(dynamics_compressor_compute_gain_db_soft(cs, f64_neg(f64_from(23))), NEG_ZERO,
+  "lower knee edge -> -0.0 dB (signed zero)");
 # Upper knee edge: x = 6 -> -0.75 * 36 / 12 = -2.25 exactly. The pre-existing
 # "gentle" test only bounded this into (-3, 0); this pins the value.
-assert_eq(dynamics_compressor_compute_gain_db_soft(cs, f64_neg(f64_from(17))), f64_neg(C2_25), "upper knee edge -> -2.25 dB");
+assert_eq(dynamics_compressor_compute_gain_db_soft(cs, f64_neg(f64_from(17))), f64_neg(C2_25),
+  "upper knee edge -> -2.25 dB");
 # The knee is continuous: at the upper edge the quadratic and the hard-knee
 # line agree bit for bit.
-assert_eq(dynamics_compressor_compute_gain_db_soft(cs, f64_neg(f64_from(17))), dynamics_compressor_compute_gain_db_hard(cs, f64_neg(f64_from(17))), "knee is continuous at the upper edge");
+assert_eq(dynamics_compressor_compute_gain_db_soft(cs, f64_neg(f64_from(17))),
+  dynamics_compressor_compute_gain_db_hard(cs, f64_neg(f64_from(17))),
+  "knee is continuous at the upper edge");
 # Outside the window, above -> hard math: (-20 + 4/4) + 16 = -3.0 exactly.
-assert_eq(dynamics_compressor_compute_gain_db_soft(cs, f64_neg(f64_from(16))), f64_neg(f64_from(3)), "above the knee -> hard math, -3 dB");
+assert_eq(dynamics_compressor_compute_gain_db_soft(cs, f64_neg(f64_from(16))), f64_neg(f64_from(3)),
+  "above the knee -> hard math, -3 dB");
 # Outside the window, below -> the literal 0.0 return (positive zero).
 assert_eq(dynamics_compressor_compute_gain_db_soft(cs, f64_neg(f64_from(24))), 0, "below the knee window -> 0 dB");
 # knee > 0 makes the dispatch entry select the soft path.
-assert_eq(dynamics_compressor_compute_gain_db(cs, f64_neg(f64_from(20))), f64_neg(C0_5625), "compute_gain_db dispatches to the soft path");
+assert_eq(dynamics_compressor_compute_gain_db(cs, f64_neg(f64_from(20))), f64_neg(C0_5625),
+  "compute_gain_db dispatches to the soft path");
 
 # ================================================================
 test_group("compressor ratio round-trip");
@@ -267,7 +279,8 @@ assert_eq(dynamics_compressor_ratio(cq_low), F64_ONE, "new(ratio = 0.5) clamps t
 # The setter really drives the gain formula: 2:1 at -10 dB over -20 dB is
 # (-20 + 10/2) + 10 = -5.0 exactly.
 dynamics_compressor_set_ratio(cq, F64_TWO);
-assert_eq(dynamics_compressor_compute_gain_db_hard(cq, f64_neg(f64_from(10))), f64_neg(f64_from(5)), "set_ratio(2.0) drives the gain formula");
+assert_eq(dynamics_compressor_compute_gain_db_hard(cq, f64_neg(f64_from(10))), f64_neg(f64_from(5)),
+  "set_ratio(2.0) drives the gain formula");
 # 1:1 collapses the formula to zero reduction at any level.
 dynamics_compressor_set_ratio(cq, F64_ONE);
 assert_eq(dynamics_compressor_compute_gain_db_hard(cq, 0), 0, "ratio 1:1 -> 0 dB reduction at 0 dBFS");
@@ -290,8 +303,10 @@ assert_eq(dynamics_limiter_release(lacc), C0_01, "set_ceiling_db leaves release 
 # ...and the new ceiling drives the gain math. At ratio f32::MAX the residual
 # (in - t)/r is ~1e-38, which vanishes in the -6.0 addition, so -3 dB in is
 # pinned back to the ceiling by exactly -3 dB.
-assert_eq(dynamics_compressor_compute_gain_db_hard(lcomp, f64_neg(f64_from(3))), f64_neg(f64_from(3)), "-3 dB over a -6 dB ceiling -> -3 dB reduction");
-assert_eq(dynamics_compressor_compute_gain_db_hard(lcomp, f64_neg(f64_from(9))), 0, "below the ceiling -> no reduction");
+assert_eq(dynamics_compressor_compute_gain_db_hard(lcomp, f64_neg(f64_from(3))), f64_neg(f64_from(3)),
+  "-3 dB over a -6 dB ceiling -> -3 dB reduction");
+assert_eq(dynamics_compressor_compute_gain_db_hard(lcomp, f64_neg(f64_from(9))), 0,
+  "below the ceiling -> no reduction");
 
 # ================================================================
 test_group("compressor process_buffer matches process_sample");

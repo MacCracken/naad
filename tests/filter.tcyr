@@ -161,10 +161,14 @@ assert(f64_gt(f64_sub(pkg_max, pk0_max), F64_TWO), "the boost lifts fc output we
 
 # ================================================================
 test_group("with_gain rejects bad parameters");
-assert(naad_is_err(filter_biquad_with_gain(NAAD_FILTER_PEAK, 0, f64_from(FREQ_1K), C0_707, C12_DB)), "with_gain zero sample rate err");
-assert(naad_is_err(filter_biquad_with_gain(NAAD_FILTER_PEAK, f64_from(SR), 0, C0_707, C12_DB)), "with_gain zero frequency err");
-assert(naad_is_err(filter_biquad_with_gain(NAAD_FILTER_PEAK, f64_from(SR), f64_from(FREQ_1K), 0, C12_DB)), "with_gain zero q err");
-assert(naad_is_err(filter_biquad_with_gain(NAAD_FILTER_PEAK, f64_from(SR), f64_from(30000), C0_707, C12_DB)), "with_gain above nyquist err");
+assert(naad_is_err(filter_biquad_with_gain(NAAD_FILTER_PEAK, 0, f64_from(FREQ_1K), C0_707, C12_DB)),
+  "with_gain zero sample rate err");
+assert(naad_is_err(filter_biquad_with_gain(NAAD_FILTER_PEAK, f64_from(SR), 0, C0_707, C12_DB)),
+  "with_gain zero frequency err");
+assert(naad_is_err(filter_biquad_with_gain(NAAD_FILTER_PEAK, f64_from(SR), f64_from(FREQ_1K), 0, C12_DB)),
+  "with_gain zero q err");
+assert(naad_is_err(filter_biquad_with_gain(NAAD_FILTER_PEAK, f64_from(SR), f64_from(30000), C0_707, C12_DB)),
+  "with_gain above nyquist err");
 # Port-specific hardening (src/filter.cyr:73): the oracle matched an 8-variant
 # enum, so an out-of-range type is unrepresentable there but reachable here.
 var bad_hi = filter_biquad_with_gain(NAAD_FILTER_PEAK + 1, f64_from(SR), f64_from(FREQ_1K), C0_707, C12_DB);

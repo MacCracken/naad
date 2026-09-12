@@ -66,7 +66,8 @@ assert_eq(hard_limit(C0_5, F64_ONE), C0_5, "hard_limit(0.5,1)=0.5");
 assert(f64_lt(f64_abs(f64_sub(soft_clip_tanh(f64_from(10), F64_ONE), F64_ONE)), C0_01), "soft_clip tanh(10)~1");
 assert(f64_lt(f64_abs(f64_sub(naad_lerp(0, F64_ONE, C0_5), C0_5)), NAAD_EPSILON), "lerp midpoint");
 # hermite on straight line 0,1,2,3 at t=0.5 -> 1.5
-assert(f64_lt(f64_abs(f64_sub(hermite_interpolate(0, F64_ONE, F64_TWO, f64_from(3), C0_5), DSP_C1_5)), C0_01), "hermite linear -> 1.5");
+assert(f64_lt(f64_abs(f64_sub(hermite_interpolate(0, F64_ONE, F64_TWO, f64_from(3), C0_5), DSP_C1_5)), C0_01),
+  "hermite linear -> 1.5");
 assert(f64_lt(f64_abs(f64_sub(naad_crossfade_equal_power(F64_ONE, 0, 0), F64_ONE)), C0_01), "crossfade dry");
 assert(f64_lt(f64_abs(f64_sub(naad_crossfade_equal_power(0, F64_ONE, F64_ONE), F64_ONE)), C0_01), "crossfade wet");
 

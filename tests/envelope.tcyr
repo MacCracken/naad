@@ -474,7 +474,8 @@ var q5 = envelope_multistage_next_value(ms2);
 assert_eq(q5, C0_75, "segment 1 is linear 1.0 -> 0.5: the midpoint is exactly 0.75");
 k2 = 0;
 while (k2 < 3) { drop = envelope_multistage_next_value(ms2); k2 = k2 + 1; }
-assert_eq(MultiStageEnvelope_current_segment(ms2), 1, "segment 1 is still the current segment one sample short of its end");
+assert_eq(MultiStageEnvelope_current_segment(ms2), 1,
+  "segment 1 is still the current segment one sample short of its end");
 var qend = envelope_multistage_next_value(ms2);
 assert_eq(qend, C0_5, "segment 1 snaps exactly onto its target 0.5");
 assert_eq(MultiStageEnvelope_current_segment(ms2), 2, "both segments are consumed");

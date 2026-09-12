@@ -291,7 +291,6 @@ while (mpi < 64) {
 }
 assert(mp_ok, "moog state recovers after an over-range sample (no persistent NaN)");
 
-
 # ================================================================
 # 2.2.1 accessor/coverage pass. Everything below asserts an EXACT value
 # (raw f64 bit patterns via assert_eq -- never f64_to, which truncates) or
@@ -324,9 +323,11 @@ assert_eq(KarplusStrong_delay_samples(pks_f), f64_div(srf, f64_from(220)),
 # A rejected update must leave BOTH the frequency and the delay length alone.
 assert_eq(physical_ks_set_frequency(pks_f, f64_from(30000)), NAAD_ERR_INVALID_FREQUENCY, "above-Nyquist rejected");
 assert_eq(physical_ks_set_frequency(pks_f, 0), NAAD_ERR_INVALID_FREQUENCY, "zero frequency rejected");
-assert_eq(physical_ks_set_frequency(pks_f, f64_neg(f64_from(100))), NAAD_ERR_INVALID_FREQUENCY, "negative frequency rejected");
+assert_eq(physical_ks_set_frequency(pks_f, f64_neg(f64_from(100))), NAAD_ERR_INVALID_FREQUENCY,
+  "negative frequency rejected");
 assert_eq(physical_ks_frequency(pks_f), f64_from(220), "frequency unchanged after a rejected set");
-assert_eq(KarplusStrong_delay_samples(pks_f), f64_div(srf, f64_from(220)), "delay_samples unchanged after a rejected set");
+assert_eq(KarplusStrong_delay_samples(pks_f), f64_div(srf, f64_from(220)),
+  "delay_samples unchanged after a rejected set");
 
 # ================================================================
 test_group("ks set_frequency actually retunes the string");
@@ -436,7 +437,8 @@ assert_eq(physical_moog_cutoff_hz(pmg_c), f64_from(1000), "fresh moog reports it
 assert_eq(physical_moog_set_cutoff(pmg_c, f64_from(2500)), NAAD_ERR_NONE, "set_cutoff(2500) returns NAAD_ERR_NONE");
 assert_eq(physical_moog_cutoff_hz(pmg_c), f64_from(2500), "cutoff round-trips through set_cutoff");
 assert_eq(physical_moog_set_cutoff(pmg_c, f64_neg(F64_ONE)), NAAD_ERR_INVALID_FREQUENCY, "negative cutoff rejected");
-assert_eq(physical_moog_set_cutoff(pmg_c, f64_from(50000)), NAAD_ERR_INVALID_FREQUENCY, "above-Nyquist cutoff rejected");
+assert_eq(physical_moog_set_cutoff(pmg_c, f64_from(50000)), NAAD_ERR_INVALID_FREQUENCY,
+  "above-Nyquist cutoff rejected");
 assert_eq(physical_moog_cutoff_hz(pmg_c), f64_from(2500), "cutoff unchanged after a rejected set");
 # ...and the new cutoff must change the SOUND, not just the field: a 4 kHz
 # tone is buried by a 300 Hz 4-pole and passes freely at 8 kHz.

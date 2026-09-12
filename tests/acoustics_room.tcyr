@@ -23,6 +23,7 @@ fn make_config(length, material) {
       material, source, listener, 48000);
 }
 
+# Test: config.
 fn test_config() { return make_config(f64_from(8), "concrete"); }
 
 alloc_init();

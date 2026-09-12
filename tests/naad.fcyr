@@ -72,6 +72,7 @@ fn fz_int(i) {
     return 127;
 }
 
+# fz check — helper used by naad.fcyr.
 fn fz_check(cond, what) {
     fz_checks = fz_checks + 1;
     if (cond == 0) {
@@ -90,6 +91,7 @@ fn fz_ctor(p, what) {
     return 0;
 }
 
+# Fuzz entry point — drives the harness below.
 fn main(): i64 {
     alloc_init();
 

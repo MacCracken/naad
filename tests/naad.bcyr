@@ -10,8 +10,10 @@
 # on, and it moves between reboots on a single machine. Read it at runtime
 # with bench_clock_overhead_ns(); see the lib/bench.cyr header.
 
+# Benchmark: noop.
 fn bench_noop(): i64 { return 0; }
 
+# Bench entry point — runs every benchmark in this file.
 fn main(): i64 {
     alloc_init();
     var b = bench_new("noop");

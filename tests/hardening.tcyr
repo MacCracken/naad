@@ -128,7 +128,8 @@ var a7i = 0;
 while (a7i < 12) { vec_push(a7r, H_ONE); a7i = a7i + 1; }
 assert_eq(naad_is_err(tuning_table_custom("twelve", a7r, f64_from(440))), 0, "control: 12 ratios accepted");
 vec_push(a7r, H_ONE);
-assert_eq(naad_is_err(tuning_table_custom("thirteen", a7r, f64_from(440))), 1, "13 ratios rejected (!= 12, not just non-empty)");
+assert_eq(naad_is_err(tuning_table_custom("thirteen", a7r, f64_from(440))), 1,
+  "13 ratios rejected (!= 12, not just non-empty)");
 
 # ================================================================
 # A8 -- the f64_to truncation cluster. Rust's `as usize` SATURATES; f64_to
@@ -163,7 +164,8 @@ vec_push(a8t4, wavetable_from_harmonics(3, a8amps, 100));
 vec_push(a8t4, wavetable_from_harmonics(4, a8amps, 100));
 var a8m4 = wavetable_morph_new(a8t4, f64_from(440), f64_from(44100));
 wavetable_morph_set_morph(a8m4, SPEC_NAN);
-assert_eq(naad_is_finite(wavetable_morph_next_sample_smooth(a8m4)), 0, "NaN morph (B-spline path) -> NaN, not an abort");
+assert_eq(naad_is_finite(wavetable_morph_next_sample_smooth(a8m4)), 0,
+  "NaN morph (B-spline path) -> NaN, not an abort");
 
 test_group("A8: granular read index saturates");
 var a8src = vec_new();
@@ -268,7 +270,6 @@ while (a5i < 64) {
 assert_eq(vec_len(fit_polynomial(a5sx, a5sy, 2)), 3, "control: small inputs still fit");
 assert_eq(vec_len(fit_polynomial(a5sx, a5sy, 0 - 1)), 0, "control: negative degree still rejected");
 assert_eq(vec_len(fit_polynomial(a5sx, a5sy, 64)), 0, "control: fewer samples than coefficients still rejected");
-
 
 var rc = assert_summary();
 syscall(60, rc);

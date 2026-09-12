@@ -86,7 +86,6 @@ while (i < 512) {
 }
 assert(any3, "two-oscillator voice produces output");
 
-
 # ================================================================
 # ---- 2.2.1 accessor/coverage gap: subtractive_{amp_env,amp_env_mut,
 # ---- filter_env_mut,clear_osc2,set_cutoff,set_frequency,
@@ -233,7 +232,8 @@ assert_eq(filter_svf_q(SubtractiveSynth_filter(sc_lo)), SUB_C0_1, "floored Q sur
 # Rejected cutoff: the oracle assigns base_cutoff BEFORE the fallible
 # set_params, so base_cutoff moves even when the filter refuses.
 assert_eq(subtractive_set_cutoff(sc, f64_from(30000)), NAAD_ERR_INVALID_FREQUENCY, "above-Nyquist cutoff rejected");
-assert_eq(SubtractiveSynth_base_cutoff(sc), f64_from(30000), "base_cutoff still assigned on the error path (oracle parity)");
+assert_eq(SubtractiveSynth_base_cutoff(sc), f64_from(30000),
+  "base_cutoff still assigned on the error path (oracle parity)");
 assert_eq(filter_svf_frequency(SubtractiveSynth_filter(sc)), f64_from(1500), "the SVF kept its last valid cutoff");
 
 # ================================================================
@@ -270,7 +270,8 @@ var fdp = subtractive_new(WAVEFORM_SAW, f64_from(440), f64_from(2000), C0_707, f
 subtractive_note_on(fdp);
 i = 0;
 while (i < 200) { var fdp_s = subtractive_next_sample(fdp); i = i + 1; }
-assert(f64_gt(filter_svf_frequency(SubtractiveSynth_filter(fdp)), f64_from(2000)), "depth +2 raises the cutoff above base");
+assert(f64_gt(filter_svf_frequency(SubtractiveSynth_filter(fdp)), f64_from(2000)),
+  "depth +2 raises the cutoff above base");
 assert(f64_le(filter_svf_frequency(SubtractiveSynth_filter(fdp)), f64_from(8000)), "depth +2 cannot exceed base * 2^2");
 # depth -2 -> the same envelope pulls the cutoff below base.
 var fdm = subtractive_new(WAVEFORM_SAW, f64_from(440), f64_from(2000), C0_707, f64_from(44100));
@@ -278,8 +279,10 @@ subtractive_set_filter_env_depth(fdm, f64_neg(F64_TWO));
 subtractive_note_on(fdm);
 i = 0;
 while (i < 200) { var fdm_s = subtractive_next_sample(fdm); i = i + 1; }
-assert(f64_lt(filter_svf_frequency(SubtractiveSynth_filter(fdm)), f64_from(2000)), "depth -2 drops the cutoff below base");
-assert(f64_ge(filter_svf_frequency(SubtractiveSynth_filter(fdm)), f64_from(500)), "depth -2 cannot fall below base / 2^2");
+assert(f64_lt(filter_svf_frequency(SubtractiveSynth_filter(fdm)), f64_from(2000)),
+  "depth -2 drops the cutoff below base");
+assert(f64_ge(filter_svf_frequency(SubtractiveSynth_filter(fdm)), f64_from(500)),
+  "depth -2 cannot fall below base / 2^2");
 
 var rc = assert_summary();
 syscall(60, rc);

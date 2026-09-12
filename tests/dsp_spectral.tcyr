@@ -369,13 +369,15 @@ while (psb_i < 16) {
     vec_push(psb, 0);
     psb_i = psb_i + 1;
 }
-assert(f64_lt(detect_pitch_autocorr(psb, f64_from(44100), f64_from(30), f64_from(2000)), 0), "16-sample buffer -> None (-1)");
+assert(f64_lt(detect_pitch_autocorr(psb, f64_from(44100), f64_from(30), f64_from(2000)), 0),
+  "16-sample buffer -> None (-1)");
 
 # ================================================================
 test_group("detect_pitch invalid range -> None");
 var pir_buf = synth_sine(f64_from(440), f64_from(44100), 1024);
 assert(f64_lt(detect_pitch_autocorr(pir_buf, f64_from(44100), f64_from(2000), f64_from(30)), 0), "min > max -> None");
-assert(f64_lt(detect_pitch_autocorr(pir_buf, f64_neg(F64_ONE), f64_from(30), f64_from(2000)), 0), "negative sample rate -> None");
+assert(f64_lt(detect_pitch_autocorr(pir_buf, f64_neg(F64_ONE), f64_from(30), f64_from(2000)), 0),
+  "negative sample rate -> None");
 
 # ================================================================
 # Regression: audit fixes (empty-input OOB guard + singular polyfit).

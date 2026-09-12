@@ -209,7 +209,6 @@ while (hd < 200) {
 }
 assert(drum_hihat_is_active(hat) == 0, "hihat should decay to silence");
 
-
 # ================================================================
 # 2.2.1 accessor/coverage pass -- the per-sample entry points. The three
 # fill_buffer groups above already cover "produces output and decays"; these

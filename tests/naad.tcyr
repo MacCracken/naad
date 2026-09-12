@@ -1,6 +1,7 @@
 # naad test suite
 # Stdlib auto-included via cyrius.cyml
 
+# Test entry point — runs this file's suite and returns the assert summary.
 fn main() {
     alloc_init();
     test_group("smoke");

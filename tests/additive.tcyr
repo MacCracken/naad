@@ -206,7 +206,6 @@ while (dci < 2) {
     dci = dci + 1;
 }
 
-
 # ================================================================
 # ---- 2.2.1 accessor/coverage gap: additive_partial_new,
 # ---- additive_fundamental, additive_set_fundamental,
@@ -317,7 +316,8 @@ assert_eq(additive_is_active(ia), 0, "silent once every amplitude is 0");
 # Re-arming one partial flips it back.
 additive_set_partial(ia, 2, f64_from(3), C0_75);
 assert_eq(additive_is_active(ia), 1, "re-arming one partial reactivates the bank");
-assert_eq(Partial_amplitude(vec_get(AdditiveSynth_partials(ia), 2)), C0_75, "the re-armed amplitude is the one supplied");
+assert_eq(Partial_amplitude(vec_get(AdditiveSynth_partials(ia), 2)), C0_75,
+  "the re-armed amplitude is the one supplied");
 # A bank whose whole harmonic series sits above Nyquist is born silent:
 # 5000 Hz fundamental at 8000 Hz (Nyquist 4000) zeroes every partial.
 var ia_hi = additive_new(f64_from(5000), 4, f64_from(8000));
@@ -335,7 +335,8 @@ assert_eq(additive_is_active(ia_lo), 1, "a partly audible bank is active");
 # ================================================================
 test_group("additive_next_sample: exact quarter-turn sine walk");
 var ns = additive_new(f64_from(11025), 1, f64_from(SR));
-assert_eq(Partial_amplitude(vec_get(AdditiveSynth_partials(ns), 0)), F64_ONE, "the single partial is at unit amplitude");
+assert_eq(Partial_amplitude(vec_get(AdditiveSynth_partials(ns), 0)), F64_ONE,
+  "the single partial is at unit amplitude");
 var ns0 = additive_next_sample(ns);
 var ns1 = additive_next_sample(ns);
 var ns2 = additive_next_sample(ns);

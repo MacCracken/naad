@@ -158,7 +158,8 @@ assert(f64_lt(f64_abs(f64_sub(out, C0_7)), C1E_5), "mix=0 passes input through")
 test_group("negative sample rate is rejected");
 assert_eq(naad_is_err(naad_fdn_matrix_new(F64_ONE, 0 - 48000, F64_ONE)), 1, "fdn matrix rejects a negative rate");
 assert_eq(naad_is_err(naad_fdn_matrix_new(F64_ONE, 0, F64_ONE)), 1, "fdn matrix still rejects a zero rate");
-assert_eq(naad_is_err(naad_fdn_reverb_new(f64_from(10), f64_from(8), f64_from(3), F64_ONE, 0 - 48000, F64_ONE)), 1, "fdn reverb rejects a negative rate");
+assert_eq(naad_is_err(naad_fdn_reverb_new(f64_from(10), f64_from(8), f64_from(3), F64_ONE, 0 - 48000, F64_ONE)), 1,
+  "fdn reverb rejects a negative rate");
 
 # ================================================================
 # naad_fdn_matrix_process_buffer -- in-place map of process_sample over a vec.

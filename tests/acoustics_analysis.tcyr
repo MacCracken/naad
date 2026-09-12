@@ -37,6 +37,7 @@ fn make_room(length, material) {
       material, src, lis, 48000);
 }
 
+# live room — helper used by acoustics_analysis.tcyr.
 fn live_room() { return make_room(f64_from(8), "concrete"); }
 
 # --- distinct field values for the struct-literal round-trips (IEEE-754) ---
@@ -129,7 +130,8 @@ vec_push(tn_ir, F64_HALF);
 assert_eq(naad_is_err(naad_analysis_analyze_impulse_response(tn_ir, 0 - 48000)), 1, "negative sample rate -> error");
 # Raw f64 bits, not f64_to: +0.0 is the bit pattern 0. Comparing through
 # f64_to would truncate and hold for the whole open interval (-1.0, 1.0).
-assert_eq(naad_analysis_estimate_rt60(synthetic_ir(48000, F64_TWO, f64_from(3)), 0 - 48000), 0, "negative rate RT60 = +0.0");
+assert_eq(naad_analysis_estimate_rt60(synthetic_ir(48000, F64_TWO, f64_from(3)), 0 - 48000), 0,
+  "negative rate RT60 = +0.0");
 
 # ================================================================
 # naad_analysis_room_metrics_new is the RoomMetrics struct literal. The only

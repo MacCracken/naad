@@ -209,8 +209,10 @@ var rb_buf_zero = 1;
 var rb_i = 0;
 var rb_n = vec_len(BinauralProcessor_left_ir(rb_fresh));
 while (rb_i < rb_n) {
-    if (vec_get(BinauralProcessor_left_ir(rb), rb_i) != vec_get(BinauralProcessor_left_ir(rb_fresh), rb_i)) { rb_ir_same = 0; }
-    if (vec_get(BinauralProcessor_right_ir(rb), rb_i) != vec_get(BinauralProcessor_right_ir(rb_fresh), rb_i)) { rb_ir_same = 0; }
+    if (vec_get(BinauralProcessor_left_ir(rb), rb_i) != vec_get(BinauralProcessor_left_ir(rb_fresh),
+        rb_i)) { rb_ir_same = 0; }
+    if (vec_get(BinauralProcessor_right_ir(rb), rb_i) != vec_get(BinauralProcessor_right_ir(rb_fresh),
+        rb_i)) { rb_ir_same = 0; }
     rb_i = rb_i + 1;
 }
 assert_eq(rb_ir_same, 1, "rebuilt IRs are bit-identical to a fresh processor's");

@@ -385,7 +385,8 @@ while (cv_j < 8) {
     cv_j = cv_j + 1;
 }
 assert_eq(osc_phase(hardsync_slave(cv_nosync)), F64_HALF, "no master wrap -> slave free-runs to 0.5");
-assert_eq(osc_phase(hardsync_master(cv_nosync)), f64_mul(f64_from(8), f64_div(F64_ONE, f64_from(1024))), "slow master at 8*dt, never wrapped");
+assert_eq(osc_phase(hardsync_master(cv_nosync)), f64_mul(f64_from(8), f64_div(F64_ONE, f64_from(1024))),
+  "slow master at 8*dt, never wrapped");
 
 # ================================================================
 # ================  osc_core accessors + osc_unison  =============
@@ -541,7 +542,8 @@ assert(f64_lt(f64_abs(uc_apv), UC_TOL), "advance_phase_sine at phase 0.5 = sin(p
 assert_eq(osc_phase(uc_ap), UC_0_25, "advance_phase_sine wraps 1.25 -> exactly 0.25");
 osc_set_phase(uc_ap, UC_0_75);
 uc_apv = osc_advance_phase_sine(uc_ap, 0);
-assert(f64_lt(f64_abs(f64_sub(uc_apv, f64_neg(F64_ONE))), UC_TOL), "advance_phase_sine at phase 0.75 = sin(3pi/2) = -1");
+assert(f64_lt(f64_abs(f64_sub(uc_apv, f64_neg(F64_ONE))), UC_TOL),
+  "advance_phase_sine at phase 0.75 = sin(3pi/2) = -1");
 assert_eq(osc_phase(uc_ap), UC_0_75, "advance_phase_sine with dt = 0 leaves the phase alone");
 
 # ================================================================
@@ -551,28 +553,40 @@ assert_eq(osc_phase(uc_ap), UC_0_75, "advance_phase_sine with dt = 0 leaves the 
 # ================================================================
 test_group("core: stateless waveform sample");
 # Sine.
-assert(f64_lt(f64_abs(f64_sub(osc_stateless_waveform_sample(WAVEFORM_SINE, UC_0_25, C0_01), F64_ONE)), UC_TOL), "stateless sine(0.25) = 1");
+assert(f64_lt(f64_abs(f64_sub(osc_stateless_waveform_sample(WAVEFORM_SINE, UC_0_25, C0_01), F64_ONE)), UC_TOL),
+  "stateless sine(0.25) = 1");
 assert(f64_lt(f64_abs(osc_stateless_waveform_sample(WAVEFORM_SINE, 0, C0_01)), UC_TOL), "stateless sine(0) = 0");
-assert(f64_lt(f64_abs(f64_sub(osc_stateless_waveform_sample(WAVEFORM_SINE, UC_0_75, C0_01), f64_neg(F64_ONE))), UC_TOL), "stateless sine(0.75) = -1");
+assert(f64_lt(f64_abs(f64_sub(osc_stateless_waveform_sample(WAVEFORM_SINE, UC_0_75, C0_01), f64_neg(F64_ONE))), UC_TOL),
+  "stateless sine(0.75) = -1");
 # Saw: naive 2t-1 in the PolyBLEP-free interior.
 assert_eq(osc_stateless_waveform_sample(WAVEFORM_SAW, F64_HALF, C0_01), 0, "stateless saw(0.5) = exactly 0");
-assert_eq(osc_stateless_waveform_sample(WAVEFORM_SAW, UC_0_25, C0_01), UC_NEG_0_5, "stateless saw(0.25) = exactly -0.5");
+assert_eq(osc_stateless_waveform_sample(WAVEFORM_SAW, UC_0_25, C0_01), UC_NEG_0_5,
+  "stateless saw(0.25) = exactly -0.5");
 assert_eq(osc_stateless_waveform_sample(WAVEFORM_SAW, UC_0_75, C0_01), F64_HALF, "stateless saw(0.75) = exactly 0.5");
 # ... and the correction IS applied inside the window: t=0.005, dt=0.01 gives
 # n=0.5, blep2=-0.25, cubic=-0.0625, so saw = -0.99 - (-0.3125) = -0.6775.
-assert(f64_lt(f64_abs(f64_sub(osc_stateless_waveform_sample(WAVEFORM_SAW, UC_0_005, C0_01), UC_SAW_BLEP)), UC_TOL_T), "stateless saw(0.005, 0.01) = -0.6775 (polyblep subtracted)");
+assert(f64_lt(f64_abs(f64_sub(osc_stateless_waveform_sample(WAVEFORM_SAW, UC_0_005, C0_01), UC_SAW_BLEP)), UC_TOL_T),
+  "stateless saw(0.005, 0.01) = -0.6775 (polyblep subtracted)");
 # Square, and Pulse -- which is a fixed 50% duty in the stateless path
 # ("Default 50% duty cycle for unison", oracle core.rs:322).
-assert_eq(osc_stateless_waveform_sample(WAVEFORM_SQUARE, UC_0_25, C0_01), F64_ONE, "stateless square(0.25) = exactly 1");
-assert_eq(osc_stateless_waveform_sample(WAVEFORM_SQUARE, UC_0_75, C0_01), f64_neg(F64_ONE), "stateless square(0.75) = exactly -1");
-assert_eq(osc_stateless_waveform_sample(WAVEFORM_PULSE, UC_0_25, C0_01), F64_ONE, "stateless pulse(0.25) = exactly 1 (50% duty)");
-assert_eq(osc_stateless_waveform_sample(WAVEFORM_PULSE, UC_0_75, C0_01), f64_neg(F64_ONE), "stateless pulse(0.75) = exactly -1 (50% duty)");
+assert_eq(osc_stateless_waveform_sample(WAVEFORM_SQUARE, UC_0_25, C0_01), F64_ONE,
+  "stateless square(0.25) = exactly 1");
+assert_eq(osc_stateless_waveform_sample(WAVEFORM_SQUARE, UC_0_75, C0_01), f64_neg(F64_ONE),
+  "stateless square(0.75) = exactly -1");
+assert_eq(osc_stateless_waveform_sample(WAVEFORM_PULSE, UC_0_25, C0_01), F64_ONE,
+  "stateless pulse(0.25) = exactly 1 (50% duty)");
+assert_eq(osc_stateless_waveform_sample(WAVEFORM_PULSE, UC_0_75, C0_01), f64_neg(F64_ONE),
+  "stateless pulse(0.75) = exactly -1 (50% duty)");
 # Triangle: naive piecewise ramp (no integrator here), all three branches.
 assert_eq(osc_stateless_waveform_sample(WAVEFORM_TRIANGLE, 0, C0_01), 0, "stateless triangle(0) = 0 (rising branch)");
-assert_eq(osc_stateless_waveform_sample(WAVEFORM_TRIANGLE, UC_0_125, C0_01), F64_HALF, "stateless triangle(0.125) = 0.5 (rising branch)");
-assert_eq(osc_stateless_waveform_sample(WAVEFORM_TRIANGLE, UC_0_25, C0_01), F64_ONE, "stateless triangle(0.25) = 1 (falling branch)");
-assert_eq(osc_stateless_waveform_sample(WAVEFORM_TRIANGLE, F64_HALF, C0_01), 0, "stateless triangle(0.5) = 0 (falling branch)");
-assert_eq(osc_stateless_waveform_sample(WAVEFORM_TRIANGLE, UC_0_875, C0_01), UC_NEG_0_5, "stateless triangle(0.875) = -0.5 (final branch)");
+assert_eq(osc_stateless_waveform_sample(WAVEFORM_TRIANGLE, UC_0_125, C0_01), F64_HALF,
+  "stateless triangle(0.125) = 0.5 (rising branch)");
+assert_eq(osc_stateless_waveform_sample(WAVEFORM_TRIANGLE, UC_0_25, C0_01), F64_ONE,
+  "stateless triangle(0.25) = 1 (falling branch)");
+assert_eq(osc_stateless_waveform_sample(WAVEFORM_TRIANGLE, F64_HALF, C0_01), 0,
+  "stateless triangle(0.5) = 0 (falling branch)");
+assert_eq(osc_stateless_waveform_sample(WAVEFORM_TRIANGLE, UC_0_875, C0_01), UC_NEG_0_5,
+  "stateless triangle(0.875) = -0.5 (final branch)");
 # Noise ids produce silence -- detuned noise voices make no sense.
 assert_eq(osc_stateless_waveform_sample(WAVEFORM_WHITE_NOISE, UC_0_25, C0_01), 0, "stateless white noise -> 0");
 assert_eq(osc_stateless_waveform_sample(WAVEFORM_PINK_NOISE, UC_0_25, C0_01), 0, "stateless pink noise -> 0");
@@ -598,7 +612,8 @@ assert_eq(osc_next_sample(uc_x), uc_exp1, "saw at phase 0.3 matches the stateles
 assert(f64_gt(f64_abs(uc_exp1), NAAD_EPSILON), "saw(0.3) is nonzero (the match above is not 0 == 0)");
 var uc_y = osc_new(WAVEFORM_SQUARE, f64_from(440), f64_from(44100));
 osc_set_phase(uc_y, UC_0_3);
-assert_eq(osc_next_sample(uc_y), osc_stateless_waveform_sample(WAVEFORM_SQUARE, UC_0_3, uc_dt), "square at phase 0.3 matches the stateless form");
+assert_eq(osc_next_sample(uc_y), osc_stateless_waveform_sample(WAVEFORM_SQUARE, UC_0_3, uc_dt),
+  "square at phase 0.3 matches the stateless form");
 
 # ================================================================
 # unison: accessors and setters -- constructor value, then a round-trip with a
@@ -658,7 +673,8 @@ unison_set_detune_cents(un_r, f64_from(1200));
 assert_eq(UnisonOscillator_ratios_dirty(un_r), 1, "set_detune_cents marks the ratios dirty");
 unison_recompute_ratios(un_r);
 assert_eq(UnisonOscillator_ratios_dirty(un_r), 0, "recompute_ratios clears the dirty flag");
-assert(f64_lt(f64_abs(f64_sub(vec_get(un_ratios, 0), UC_2_M_HALF)), UC_TOL), "voice 0 ratio = 2^-0.5 after the 1200-cent respread");
+assert(f64_lt(f64_abs(f64_sub(vec_get(un_ratios, 0), UC_2_M_HALF)), UC_TOL),
+  "voice 0 ratio = 2^-0.5 after the 1200-cent respread");
 assert(f64_lt(f64_abs(f64_sub(vec_get(un_ratios, 1), F64_ONE)), UC_TOL), "voice 1 ratio stays 1.0 after the respread");
 assert(f64_lt(f64_abs(f64_sub(vec_get(un_ratios, 2), UC_SQRT2)), UC_TOL), "voice 2 ratio = 2^0.5 after the respread");
 unison_set_num_voices(un_r, 1);
@@ -667,7 +683,8 @@ assert_eq(vec_get(un_ratios, 0), F64_ONE, "single voice: ratio 0 reset to exactl
 # Parity: the nv <= 1 branch writes ONLY slot 0, so the tail keeps stale values
 # (oracle unison.rs:97 `self.detune_ratios[0] = 1.0;`). Slots beyond
 # num_voices are never read, so this is harmless -- but it is the behaviour.
-assert(f64_lt(f64_abs(f64_sub(vec_get(un_ratios, 2), UC_SQRT2)), UC_TOL), "slots above num_voices keep stale ratios (oracle parity)");
+assert(f64_lt(f64_abs(f64_sub(vec_get(un_ratios, 2), UC_SQRT2)), UC_TOL),
+  "slots above num_voices keep stale ratios (oracle parity)");
 # Zero detune -> every active voice sits at ratio 1.0.
 var un_z = unison_new(WAVEFORM_SAW, f64_from(440), 4, 0, f64_from(44100));
 var un_zr = UnisonOscillator_detune_ratios(un_z);
@@ -690,7 +707,8 @@ var un_m = unison_new(WAVEFORM_SAW, f64_from(11025), 1, 0, f64_from(44100));
 var un_m_ph0 = vec_get(UnisonOscillator_phases(un_m), 0);
 var un_m_raw = osc_stateless_waveform_sample(WAVEFORM_SAW, un_m_ph0, UC_0_25);
 var un_m_exp = f64_mul(un_m_raw, F64_FRAC_1_SQRT2);
-assert(f64_gt(f64_abs(un_m_exp), NAAD_EPSILON), "single-voice expectation is nonzero (comparisons below are not 0 == 0)");
+assert(f64_gt(f64_abs(un_m_exp), NAAD_EPSILON),
+  "single-voice expectation is nonzero (comparisons below are not 0 == 0)");
 var un_l = vec_new();
 var un_r2 = vec_new();
 un_i = 0;
@@ -706,7 +724,8 @@ assert_eq(vec_get(un_r2, 3), UC_SENTINEL, "advance_stereo(idx=2) right slot 3 un
 # The voice phase advanced by exactly dt, with the same >= 1 wrap.
 var un_m_exp_ph = f64_add(un_m_ph0, UC_0_25);
 if (f64_ge(un_m_exp_ph, F64_ONE) == 1) { un_m_exp_ph = f64_sub(un_m_exp_ph, F64_ONE); }
-assert_eq(vec_get(UnisonOscillator_phases(un_m), 0), un_m_exp_ph, "advance_stereo advanced the voice phase by exactly dt");
+assert_eq(vec_get(UnisonOscillator_phases(un_m), 0), un_m_exp_ph,
+  "advance_stereo advanced the voice phase by exactly dt");
 # The mono path is the same generator: an identically-constructed unison
 # (deterministic phase seed) returns the un-panned sample.
 var un_mm = unison_new(WAVEFORM_SAW, f64_from(11025), 1, 0, f64_from(44100));
@@ -724,7 +743,8 @@ unison_advance_stereo(un_s0, un_sl, un_sr, 0);
 assert(vec_get(un_sl, 0) != UC_SENTINEL, "advance_stereo actually wrote the left slot");
 assert(vec_get(un_sr, 0) != UC_SENTINEL, "advance_stereo actually wrote the right slot");
 assert(f64_gt(f64_abs(vec_get(un_sl, 0)), NAAD_EPSILON), "spread = 0 output is nonzero");
-assert(f64_lt(f64_abs(f64_sub(vec_get(un_sl, 0), vec_get(un_sr, 0))), UC_TOL), "spread = 0 -> left == right (all voices centred)");
+assert(f64_lt(f64_abs(f64_sub(vec_get(un_sl, 0), vec_get(un_sr, 0))), UC_TOL),
+  "spread = 0 -> left == right (all voices centred)");
 
 # advance_stereo is the shared core of next_sample_stereo: two identically
 # constructed oscillators must produce bit-identical pairs through both APIs.
@@ -740,7 +760,8 @@ unison_advance_stereo(un_a, un_al, un_ar, 0);
 var un_pair = unison_next_sample_stereo(un_b);
 assert_eq(vec_get(un_al, 0), UnisonStereo_left(un_pair), "advance_stereo left == next_sample_stereo left");
 assert_eq(vec_get(un_ar, 0), UnisonStereo_right(un_pair), "advance_stereo right == next_sample_stereo right");
-assert(f64_gt(f64_abs(f64_sub(vec_get(un_al, 0), vec_get(un_ar, 0))), NAAD_EPSILON), "spread = 1 -> the two channels differ within a single sample");
+assert(f64_gt(f64_abs(f64_sub(vec_get(un_al, 0), vec_get(un_ar, 0))), NAAD_EPSILON),
+  "spread = 1 -> the two channels differ within a single sample");
 
 var rc = assert_summary();
 syscall(60, rc);

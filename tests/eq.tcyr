@@ -103,7 +103,8 @@ assert_eq(bm_back, bm_on, "re-enabling through band_mut restores the exact outpu
 # Retuning through the handle is what GraphicEq::set_band_gain relies on.
 var bm_sp = filter_biquad_set_params(EqBand_filter(bm_b0), f64_from(2000), F64_TWO, f64_from(9));
 assert_eq(bm_sp, NAAD_ERR_NONE, "set_params through the band_mut handle ok");
-assert_eq(BiquadFilter_frequency(EqBand_filter(eq_band_mut(bm, 0))), f64_from(2000), "retune is visible through a fresh band_mut");
+assert_eq(BiquadFilter_frequency(EqBand_filter(eq_band_mut(bm, 0))), f64_from(2000),
+  "retune is visible through a fresh band_mut");
 
 # ================================================================
 test_group("eq_reset clears band state");
