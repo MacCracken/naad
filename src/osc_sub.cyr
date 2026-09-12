@@ -103,7 +103,6 @@ fn subosc_base_frequency(self) {
 # ================================================================
 # subosc_fill_buffer -- fill a vec buffer in place.
 # ================================================================
-#inline
 fn subosc_fill_buffer(self, buffer) {
     var n = vec_len(buffer);
     var i = 0;

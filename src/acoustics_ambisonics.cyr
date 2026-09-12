@@ -64,7 +64,6 @@ fn naad_ambisonics_set_position(enc, azimuth, elevation) {
 #   X = input * cos(az) * cos(el)
 #   Y = input * sin(az) * cos(el)
 #   Z = input * sin(el)
-#inline
 #must_use
 fn naad_ambisonics_encode_sample(enc, input) {
     var s = alloc(sizeof(BFormatSample));
@@ -78,7 +77,6 @@ fn naad_ambisonics_encode_sample(enc, input) {
 # permanently-resident bytes per call under the bump allocator; a per-sample
 # caller should hoist one BFormatSample and use this.
 # ================================================================
-#inline
 fn naad_ambisonics_encode_sample_into(enc, input, s) {
     var cos_el = AmbisonicsEncoder_cos_el(enc);
     var sin_el = AmbisonicsEncoder_sin_el(enc);

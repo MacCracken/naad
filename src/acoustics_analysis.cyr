@@ -74,7 +74,6 @@ fn naad_analysis_room_metrics_new(c50, c80, d50, sti, rt60) {
 # 0.0; near-silent IR (< f32::EPSILON total energy) -> 0.0. `ir` is a vec of
 # f64 samples, `sample_rate` an integer in Hz. Ports estimate_rt60.
 # ================================================================
-#inline
 #must_use
 fn naad_analysis_estimate_rt60(ir, sample_rate) {
     var n = vec_len(ir);

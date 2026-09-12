@@ -132,7 +132,6 @@ fn naad_convolution_from_room(config) {
 # dry input and wet convolved output. An empty IR passes the input through
 # unchanged. Ports ConvolutionReverb::process_sample.
 # ================================================================
-#inline
 #must_use
 fn naad_convolution_process_sample(self, input) {
     var ir = ConvolutionReverb_ir(self);

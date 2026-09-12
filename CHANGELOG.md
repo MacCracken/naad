@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.4] - 117 `#inline` markers that did nothing are gone
+
+No behaviour change. `#inline` became a real directive at cyrius v6.5.63 and gained a
+diagnostic for the cases it cannot honour; 6.6.3 is the first release where naad compiles
+with it. The compiler then reported **117 of naad's 167 `#inline` markers as ignored**:
+
+| reason | count |
+|---|---|
+| body exceeds 32 tokens | 95 |
+| fn takes more than 2 parameters | 15 |
+| body has control flow or a var declaration | 7 |
+
+Those markers were decoration — they had never inlined anything. Removed across 34 files;
+the **50 that the compiler does honour are untouched**. `dist/naad.cyr` regenerated, so
+consumers no longer inherit 464 warning lines from the bundle. Tests unchanged (40 pass).
+
+⭐ This is the same trap v6.5.63 recorded against svara: a directive that silently does
+nothing, plus a source comment claiming a measurement for an optimisation that was not
+there. A marker the compiler refuses is not a hint, it is a lie about the code.
+
 ## [2.2.3] - Unblocked by cyrius 6.6.3
 
 Toolchain-pin release. `cyrius` 6.6.2 -> **6.6.3**; no source change.

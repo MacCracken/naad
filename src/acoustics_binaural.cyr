@@ -148,7 +148,6 @@ fn naad_binaural_new(azimuth, elevation, sample_rate) {
 # right) as a BinauralStereo. Time-domain convolution against each ear IR via
 # the ring buffers. Ports BinauralProcessor::process_sample.
 # ================================================================
-#inline
 #must_use
 fn naad_binaural_process_sample(self, input) {
     var res = alloc(sizeof(BinauralStereo));
@@ -163,7 +162,6 @@ fn naad_binaural_process_sample(self, input) {
 # individual free), so a per-sample caller should hoist one BinauralStereo and
 # use this. Same split as reverb_process_core / reverb_process_sample.
 # ================================================================
-#inline
 fn naad_binaural_process_sample_into(self, input, res) {
     var left_ir = BinauralProcessor_left_ir(self);
     var right_ir = BinauralProcessor_right_ir(self);

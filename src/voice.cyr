@@ -270,7 +270,6 @@ fn voice_manager_voices(vm) {
 }
 
 # Mutable reference to a voice by index, or 0 (null) if out of bounds.
-#inline
 fn voice_manager_voice_mut(vm, index) {
     var voices = VoiceManager_voices(vm);
     if (index < 0 || index >= vec_len(voices)) { return 0; }

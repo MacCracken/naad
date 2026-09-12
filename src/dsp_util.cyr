@@ -35,7 +35,6 @@ var DSP_C1_5 = 0x3FF8000000000000;   # 1.5   (hermite coefficient)
 # ================================================================
 
 # 20 * log10(amplitude); -inf for amplitude <= 0. log10(x) = ln(x)/ln(10).
-#inline
 #must_use
 fn naad_amplitude_to_db(amplitude) {
     if (f64_le(amplitude, 0) == 1) { return NAAD_NEG_INF; }
@@ -44,7 +43,6 @@ fn naad_amplitude_to_db(amplitude) {
 }
 
 # 10^(db/20); 0.0 for db == -inf.
-#inline
 #must_use
 fn naad_db_to_amplitude(db) {
     if (db == NAAD_NEG_INF) { return 0; }
@@ -77,7 +75,6 @@ fn naad_normalize(buffer) {
 }
 
 # Root mean square of a buffer (0.0 if empty).
-#inline
 #must_use
 fn naad_rms(buffer) {
     var n = vec_len(buffer);
@@ -93,7 +90,6 @@ fn naad_rms(buffer) {
 }
 
 # Peak absolute value of a buffer.
-#inline
 #must_use
 fn naad_peak(buffer) {
     var n = vec_len(buffer);
@@ -126,7 +122,6 @@ fn soft_clip_tanh(sample, drive) {
 }
 
 # Linear interpolation: a + (b - a) * t.
-#inline
 #must_use
 fn naad_lerp(a, b, t) {
     return f64_add(a, f64_mul(f64_sub(b, a), t));
@@ -134,7 +129,6 @@ fn naad_lerp(a, b, t) {
 
 # Cubic Hermite interpolation through y0..y3 at fractional t in [0,1]
 # between y1 and y2.
-#inline
 #must_use
 fn hermite_interpolate(y0, y1, y2, y3, t) {
     var c0 = y1;
@@ -151,7 +145,6 @@ fn hermite_interpolate(y0, y1, y2, y3, t) {
 }
 
 # Equal-power crossfade: mix 0.0 = full dry, 1.0 = full wet.
-#inline
 #must_use
 fn naad_crossfade_equal_power(dry, wet, mix) {
     var angle = f64_mul(mix, F64_PI_2);
@@ -201,7 +194,6 @@ fn apply_blackman_window(buffer) {
 # f64) at x. Empty coeffs -> 0.0. Pure f64 (no hisab), so ported here; its
 # companion fit_polynomial (hisab least-squares) is in the pending block.
 # ================================================================
-#inline
 #must_use
 fn eval_polynomial(coeffs, x) {
     var n = vec_len(coeffs);
@@ -241,7 +233,6 @@ fn _db_lut() {
     return t;
 }
 
-#inline
 #must_use
 fn db_to_amplitude_lut(db) {
     var table = _db_lut();

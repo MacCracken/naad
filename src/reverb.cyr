@@ -59,7 +59,6 @@ fn reverb_damped_comb_new(delay_samples, feedback, damping) {
 }
 
 # Process one sample: read delayed, lowpass-damp the feedback, write back.
-#inline
 #must_use
 fn reverb_damped_comb_process(self, input) {
     var dl = DampedComb_delay(self);
@@ -92,7 +91,6 @@ fn reverb_allpass_new(delay_samples, feedback) {
 }
 
 # Process one sample through the allpass.
-#inline
 #must_use
 fn reverb_allpass_process(self, input) {
     var dl = ReverbAllpass_delay(self);
@@ -208,7 +206,6 @@ fn reverb_new(decay, damping, pre_delay_ms, mix, sample_rate) {
 # sample. All comb/allpass/predelay/stereo-width/wet-dry math and every delay-
 # line state update are identical to the struct-returning wrapper below.
 # ================================================================
-#inline
 fn reverb_process_core(self, input, res) {
     # Pre-delay.
     var pre = Reverb_pre_delay(self);
@@ -266,7 +263,6 @@ fn reverb_process_core(self, input, res) {
 # reverb_process_sample -- process a mono input, returning stereo (left,
 # right) as a ReverbStereo. Ports Reverb::process_sample.
 # ================================================================
-#inline
 #must_use
 fn reverb_process_sample(self, input) {
     var res = alloc(sizeof(ReverbStereo));

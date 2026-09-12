@@ -149,7 +149,6 @@ fn additive_fundamental(self) {
 # ================================================================
 # additive_next_sample -- generate the next output sample.
 # ================================================================
-#inline
 #must_use
 fn additive_next_sample(self) {
     var partials = AdditiveSynth_partials(self);
@@ -179,7 +178,6 @@ fn additive_next_sample(self) {
 # ================================================================
 # additive_fill_buffer -- fill `buffer` (a vec) with samples. Returns NAAD_ERR_NONE.
 # ================================================================
-#inline
 fn additive_fill_buffer(self, buffer) {
     var n = vec_len(buffer);
     var i = 0;

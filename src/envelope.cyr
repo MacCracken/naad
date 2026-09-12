@@ -112,7 +112,6 @@ fn envelope_adsr_gate_off(self) {
 }
 
 # Generate the next envelope value (0.0..1.0).
-#inline
 #must_use
 fn envelope_adsr_next_value(self) {
     var sr = Adsr_sample_rate(self);
@@ -255,7 +254,6 @@ fn envelope_multistage_trigger(self) {
 }
 
 # Generate the next envelope value.
-#inline
 #must_use
 fn envelope_multistage_next_value(self) {
     if (MultiStageEnvelope_active(self) == 0) { return 0; }
@@ -384,7 +382,6 @@ fn envelope_catmull_rom_release(self) {
 }
 
 # Generate the next envelope sample (spline value at the current elapsed time).
-#inline
 #must_use
 fn envelope_catmull_rom_next_value(self) {
     if (CatmullRomEnvelope_active(self) == 0) { return 0; }

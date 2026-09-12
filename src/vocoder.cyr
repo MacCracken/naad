@@ -56,7 +56,6 @@ struct Vocoder {
 # carrier bandpassed and amplitude-modulated by the modulator's envelope.
 # Ports VocoderBand::process.
 # ================================================================
-#inline
 #must_use
 fn vocoder_band_process(self, modulator, carrier) {
     # Bandpass the modulator and extract its envelope.
@@ -141,7 +140,6 @@ fn vocoder_new(num_bands, low_freq, high_freq, sample_rate) {
 # vocoder_process_sample -- process one (modulator, carrier) pair through
 # all bands. Returns the sum of all band outputs. Ports Vocoder::process_sample.
 # ================================================================
-#inline
 #must_use
 fn vocoder_process_sample(self, modulator, carrier) {
     var bands = Vocoder_bands(self);

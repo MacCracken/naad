@@ -121,7 +121,6 @@ fn fm_operator_gate_off(self) {
 
 # Generate the next sample with external phase modulation input.
 # `phase_mod` is added to the operator's phase before computing sine.
-#inline
 #must_use
 fn fm_operator_next_sample(self, phase_mod) {
     var fb = f64_mul(FmOperator_feedback(self), FmOperator_feedback_state(self));
@@ -260,7 +259,6 @@ fn fm_engine_operator(self, index) {
 }
 
 # Serial2: op[0] -> op[1] -> out (uses first 2 operators).
-#inline
 fn fm_engine_process_serial2(self, n) {
     var operators = FmSynthEngine_operators(self);
     if (n < 2) {
@@ -271,7 +269,6 @@ fn fm_engine_process_serial2(self, n) {
 }
 
 # Parallel2: (op[0] + op[1]) / 2 -> out.
-#inline
 fn fm_engine_process_parallel2(self, n) {
     var operators = FmSynthEngine_operators(self);
     if (n < 2) {
@@ -283,7 +280,6 @@ fn fm_engine_process_parallel2(self, n) {
 }
 
 # Serial4: op[0] -> op[1] -> op[2] -> op[3] -> out.
-#inline
 fn fm_engine_process_serial4(self, n) {
     var operators = FmSynthEngine_operators(self);
     var mod_signal = 0;
@@ -298,7 +294,6 @@ fn fm_engine_process_serial4(self, n) {
 }
 
 # Stack4: (op[0]+op[1]) modulates (op[2]+op[3]).
-#inline
 fn fm_engine_process_stack4(self, n) {
     if (n < 4) {
         return fm_engine_process_serial4(self, n);
@@ -314,7 +309,6 @@ fn fm_engine_process_stack4(self, n) {
 
 # Generate the next output sample by routing operators through the current
 # algorithm.
-#inline
 #must_use
 fn fm_engine_next_sample(self) {
     var operators = FmSynthEngine_operators(self);
@@ -342,7 +336,6 @@ fn fm_engine_next_sample(self) {
 }
 
 # Fill a buffer (vec of f64 slots) with samples.
-#inline
 fn fm_engine_fill_buffer(self, buffer) {
     var n = vec_len(buffer);
     var i = 0;

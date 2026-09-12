@@ -57,7 +57,6 @@ fn smoothing_set_target(self, target) {
 }
 
 # Advance one sample and return the new smoothed value.
-#inline
 #must_use
 fn smoothing_next_value(self) {
     var cur = ParamSmoother_current(self);
@@ -69,7 +68,6 @@ fn smoothing_next_value(self) {
 }
 
 # 1 if the smoother has reached its target (within 1e-6), else 0.
-#inline
 #must_use
 fn smoothing_is_settled(self) {
     var d = f64_abs(f64_sub(ParamSmoother_current(self), ParamSmoother_target(self)));

@@ -138,7 +138,6 @@ fn formant_filter_new(formants, sample_rate) {
 }
 
 # Process one input sample through all parallel formant bands.
-#inline
 #must_use
 fn formant_filter_process_sample(self, input) {
     var filters = FormantFilter_filters(self);
@@ -244,7 +243,6 @@ fn formant_synth_morph(self, vowel_a, vowel_b, t) {
 }
 
 # Process one input sample through the parallel formant bank.
-#inline
 #must_use
 fn formant_synth_process_sample(self, input) {
     var filters = FormantSynth_filters(self);
@@ -260,7 +258,6 @@ fn formant_synth_process_sample(self, input) {
 }
 
 # Fill a buffer by processing each input sample in place. Ports process_buffer().
-#inline
 fn formant_synth_process_buffer(self, buffer) {
     var n = vec_len(buffer);
     var i = 0;

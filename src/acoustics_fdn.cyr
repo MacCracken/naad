@@ -95,7 +95,6 @@ fn naad_fdn_reverb_new(room_length, room_width, room_height, target_rt60, sample
 # naad_fdn_reverb_process_sample -- process one sample, applying the wet/dry
 # mix to the goonj FDN output. Ports FdnReverb::process_sample.
 # ================================================================
-#inline
 #must_use
 fn naad_fdn_reverb_process_sample(self, input) {
     var wet = fdn_process_sample(FdnReverb_fdn(self), input);
@@ -129,7 +128,6 @@ fn naad_fdn_reverb_reset(self) {
 # public one-shot wrapper below allocates a fresh vec once and delegates here.
 # Numerics are bit-identical to the original (same op order, vec_set only
 # replaces vec_push).
-#inline
 fn _naad_fdn_hadamard8_into(x, out) {
     var x0 = vec_get(x, 0);
     var x1 = vec_get(x, 1);
@@ -162,7 +160,6 @@ fn _naad_fdn_hadamard8_into(x, out) {
     return 0;
 }
 
-#inline
 #must_use
 fn naad_fdn_hadamard8(x) {
     var out = vec_new();
@@ -302,7 +299,6 @@ fn naad_fdn_matrix_new(target_rt60, sample_rate, mix) {
 # Output is the dry/wet mix of the input and the sum of damped outputs. Ports
 # MatrixFdn::process_sample.
 # ================================================================
-#inline
 #must_use
 fn naad_fdn_matrix_process_sample(self, input) {
     var buffers = MatrixFdn_buffers(self);

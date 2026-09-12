@@ -114,7 +114,6 @@ fn modulation_lfo_from_waveform(waveform, frequency, sample_rate) {
 # ================================================================
 # modulation_lfo_raw_sample -- raw bipolar sample for the current phase.
 # ================================================================
-#inline
 #must_use
 fn modulation_lfo_raw_sample(self) {
     var t = Lfo_phase(self);
@@ -145,7 +144,6 @@ fn modulation_lfo_raw_sample(self) {
 # Advances phase, re-rolls the S&H value on a cycle wrap, then applies the
 # bipolar/unipolar mode and the depth scaling.
 # ================================================================
-#inline
 #must_use
 fn modulation_lfo_next_value(self) {
     var raw = modulation_lfo_raw_sample(self);
@@ -281,7 +279,6 @@ fn modulation_fm_modulator(self) {
 # clamped to [0.1, nyquist-1], and the carrier is phase-modulated directly as
 # a sine regardless of its waveform setting.
 # ================================================================
-#inline
 #must_use
 fn modulation_fm_next_sample(self) {
     var modulator = FmModulator_modulator(self);
@@ -305,7 +302,6 @@ fn modulation_fm_next_sample(self) {
 # ================================================================
 # modulation_fm_fill_buffer -- fill a vec buffer in place with FM samples.
 # ================================================================
-#inline
 fn modulation_fm_fill_buffer(self, buffer) {
     var n = vec_len(buffer);
     var i = 0;
@@ -358,7 +354,6 @@ fn modulation_ring_process_sample(self, input) {
 # ================================================================
 # modulation_ring_process_buffer -- process a vec buffer in place.
 # ================================================================
-#inline
 fn modulation_ring_process_buffer(self, buffer) {
     var n = vec_len(buffer);
     var i = 0;

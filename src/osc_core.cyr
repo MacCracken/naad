@@ -44,7 +44,6 @@ var OSC_NOISE_SEED = 42;
 # `t` is the phase (0..1), `dt` the phase increment per sample. Branch-local
 # `var`s are uniquely named (Cyrius shares one scope across elif bodies).
 # ================================================================
-#inline
 #must_use
 fn osc_polyblep(t, dt) {
     if (f64_le(dt, 0) == 1) { return 0; }
@@ -148,7 +147,6 @@ fn osc_phase_increment(self) {
 # ================================================================
 # osc_next_sample -- generate the next sample and advance phase.
 # ================================================================
-#inline
 #must_use
 fn osc_next_sample(self) {
     var dt = osc_phase_increment(self);
@@ -202,7 +200,6 @@ fn osc_next_sample(self) {
 # ================================================================
 # osc_fill_buffer -- fill a vec buffer in place.
 # ================================================================
-#inline
 fn osc_fill_buffer(self, buffer) {
     var n = vec_len(buffer);
     var i = 0;
@@ -284,7 +281,6 @@ fn osc_reset_phase(self) {
 # ================================================================
 # osc_advance_phase_sine -- FM helper: return sin(phase) then advance by dt.
 # ================================================================
-#inline
 fn osc_advance_phase_sine(self, dt) {
     var sample = f64_sin(f64_mul(Oscillator_phase(self), F64_TAU));
     var ph = f64_add(Oscillator_phase(self), dt);
@@ -298,7 +294,6 @@ fn osc_advance_phase_sine(self, dt) {
 # Ports core::stateless_waveform_sample (used by UnisonOscillator). No noise,
 # no triangle integration: triangle is the naive piecewise ramp; noise -> 0.
 # ================================================================
-#inline
 #must_use
 fn osc_stateless_waveform_sample(waveform, t, dt) {
     if (waveform == WAVEFORM_SINE) {

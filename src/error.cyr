@@ -88,7 +88,6 @@ fn validate_sample_rate(sample_rate) {
 # feedback paths call this when signals decay to near-zero. Returns +0.0
 # if |x| < f32::MIN_POSITIVE, else x unchanged.
 # ================================================================
-#inline
 #must_use
 fn flush_denormal(x) {
     if (f64_lt(f64_abs(x), NAAD_F32_MIN_POS) == 1) { return 0; }

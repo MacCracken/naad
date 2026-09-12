@@ -132,7 +132,6 @@ fn naad_room_reverb_new(config) {
 # direct convolution with the stored impulse response. An empty IR passes
 # the input through unchanged. Ports RoomReverb::process_sample.
 # ================================================================
-#inline
 #must_use
 fn naad_room_reverb_process_sample(self, input) {
     var ir = RoomReverb_impulse_response(self);

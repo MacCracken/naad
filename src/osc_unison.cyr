@@ -126,7 +126,6 @@ fn unison_recompute_ratios(self) {
 # ================================================================
 # unison_next_sample -- next mono sample (all voices averaged).
 # ================================================================
-#inline
 #must_use
 fn unison_next_sample(self) {
     if (UnisonOscillator_ratios_dirty(self) == 1) {
@@ -160,7 +159,6 @@ fn unison_next_sample(self) {
 # nothing, so the buffer loop can call it per sample without leaking. Voices are
 # equal-power panned across the field per stereo_spread.
 # ================================================================
-#inline
 fn unison_advance_stereo(self, out_left, out_right, idx) {
     if (UnisonOscillator_ratios_dirty(self) == 1) {
         unison_recompute_ratios(self);
@@ -222,7 +220,6 @@ fn unison_next_sample_stereo(self) {
 # ================================================================
 # unison_fill_buffer -- fill a mono vec buffer in place.
 # ================================================================
-#inline
 fn unison_fill_buffer(self, buffer) {
     var n = vec_len(buffer);
     var i = 0;
@@ -236,7 +233,6 @@ fn unison_fill_buffer(self, buffer) {
 # ================================================================
 # unison_fill_buffer_stereo -- fill left/right vecs (over the shorter length).
 # ================================================================
-#inline
 fn unison_fill_buffer_stereo(self, left, right) {
     var n = vec_len(left);
     var nr = vec_len(right);

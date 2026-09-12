@@ -101,7 +101,6 @@ fn eq_band_mut(self, index) {
 
 # Process a single sample through all enabled bands in series.
 # Ports process_sample().
-#inline
 #must_use
 fn eq_process_sample(self, input) {
     var bands = ParametricEq_bands(self);
@@ -119,7 +118,6 @@ fn eq_process_sample(self, input) {
 }
 
 # Process a buffer (vec of f64) in place. Ports process_buffer().
-#inline
 fn eq_process_buffer(self, buffer) {
     var n = vec_len(buffer);
     var i = 0;
@@ -242,7 +240,6 @@ fn eq_deesser_new(center_freq, threshold_db, sample_rate) {
 }
 
 # Process a single sample. Ports process_sample().
-#inline
 #must_use
 fn eq_deesser_process_sample(self, input) {
     # Sidechain: bandpass the input to detect sibilance.
@@ -266,7 +263,6 @@ fn eq_deesser_process_sample(self, input) {
 }
 
 # Process a buffer (vec of f64) in place. Ports process_buffer().
-#inline
 fn eq_deesser_process_buffer(self, buffer) {
     var n = vec_len(buffer);
     var i = 0;

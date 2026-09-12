@@ -44,7 +44,6 @@ fn delay_line_new(max_delay_samples) {
 }
 
 # Write a sample into the delay line, advancing (and wrapping) the cursor.
-#inline
 fn delay_line_write(dl, sample) {
     var buffer = DelayLine_buffer(dl);
     var wp = DelayLine_write_pos(dl);
@@ -58,7 +57,6 @@ fn delay_line_write(dl, sample) {
 
 # Read from the delay line with fractional delay (linear interpolation).
 # `delay` is in samples (may be fractional); clamped to the valid range.
-#inline
 #must_use
 fn delay_line_read(dl, delay) {
     var buffer = DelayLine_buffer(dl);
@@ -113,7 +111,6 @@ fn comb_filter_new(delay_samples, feedback) {
 }
 
 # Process a single sample through the comb filter.
-#inline
 #must_use
 fn comb_filter_process_sample(cf, input) {
     var dl = CombFilter_delay_line(cf);
@@ -159,7 +156,6 @@ fn allpass_delay_delay_samples(ap) {
 }
 
 # Process a single sample through the Schroeder allpass.
-#inline
 #must_use
 fn allpass_delay_process_sample(ap, input) {
     var dl = AllpassDelay_delay_line(ap);

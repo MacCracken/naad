@@ -62,7 +62,6 @@ fn dynamics_level_detector_new(attack, release, sample_rate) {
 }
 
 # Process a sample and return the envelope level. Non-finite input -> level 0.
-#inline
 #must_use
 fn dynamics_level_detector_process(self, input) {
     var level = 0;
@@ -118,7 +117,6 @@ fn dynamics_compressor_set_ratio(self, ratio) {
 }
 
 # Hard-knee gain reduction (dB) -- `knee_db == 0.0` fast path.
-#inline
 fn dynamics_compressor_compute_gain_db_hard(self, input_db) {
     var t = Compressor_threshold_db(self);
     if (f64_le(input_db, t) == 1) { return 0; }
@@ -128,7 +126,6 @@ fn dynamics_compressor_compute_gain_db_hard(self, input_db) {
 }
 
 # Soft-knee gain reduction (dB) -- `knee_db > 0.0`.
-#inline
 fn dynamics_compressor_compute_gain_db_soft(self, input_db) {
     var t = Compressor_threshold_db(self);
     var r = Compressor_ratio(self);
@@ -148,7 +145,6 @@ fn dynamics_compressor_compute_gain_db_soft(self, input_db) {
 }
 
 # Compute gain reduction (dB) for an input level in dB -- dispatch entry.
-#inline
 #must_use
 fn dynamics_compressor_compute_gain_db(self, input_db) {
     if (f64_le(Compressor_knee_db(self), 0) == 1) {
@@ -158,7 +154,6 @@ fn dynamics_compressor_compute_gain_db(self, input_db) {
 }
 
 # Process a single sample. dB->linear via db_to_amplitude_lut (no powf).
-#inline
 #must_use
 fn dynamics_compressor_process_sample(self, input) {
     var env = dynamics_level_detector_process(Compressor_detector(self), input);
@@ -174,7 +169,6 @@ fn dynamics_compressor_process_sample(self, input) {
 }
 
 # Process a buffer (vec of f64) in place.
-#inline
 fn dynamics_compressor_process_buffer(self, buffer) {
     var n = vec_len(buffer);
     var i = 0;
@@ -237,7 +231,6 @@ fn dynamics_limiter_process_sample(self, input) {
 }
 
 # Process a buffer (vec of f64) in place.
-#inline
 fn dynamics_limiter_process_buffer(self, buffer) {
     var n = vec_len(buffer);
     var i = 0;
@@ -291,7 +284,6 @@ fn dynamics_noise_gate_new(threshold_db, attack, hold, release, sample_rate) {
 }
 
 # Process a single sample.
-#inline
 #must_use
 fn dynamics_noise_gate_process_sample(self, input) {
     var env = dynamics_level_detector_process(NoiseGate_detector(self), input);
@@ -319,7 +311,6 @@ fn dynamics_noise_gate_process_sample(self, input) {
 }
 
 # Process a buffer (vec of f64) in place.
-#inline
 fn dynamics_noise_gate_process_buffer(self, buffer) {
     var n = vec_len(buffer);
     var i = 0;

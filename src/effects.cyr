@@ -77,7 +77,6 @@ fn effects_chorus_new(num_voices, base_delay_ms, depth_ms, rate, mix, sample_rat
 }
 
 # Process a single sample through the chorus.
-#inline
 #must_use
 fn effects_chorus_process_sample(self, input) {
     var wet = 0;
@@ -144,7 +143,6 @@ fn effects_flanger_new(base_delay_ms, depth_ms, rate, feedback, mix, sample_rate
 }
 
 # Process a single sample through the flanger.
-#inline
 #must_use
 fn effects_flanger_process_sample(self, input) {
     var lfo_val = osc_next_sample(Flanger_lfo(self));
@@ -227,7 +225,6 @@ fn effects_phaser_new(num_stages, rate, min_freq, max_freq, feedback, mix, sampl
 }
 
 # Process a single sample through the phaser.
-#inline
 #must_use
 fn effects_phaser_process_sample(self, input) {
     var lfo_val = osc_next_sample(Phaser_lfo(self));
@@ -281,7 +278,6 @@ fn effects_distortion_new(distortion_type, drive, mix) {
 }
 
 # Process a single sample through the distortion.
-#inline
 #must_use
 fn effects_distortion_process_sample(self, input) {
     var driven = f64_mul(input, Distortion_drive(self));

@@ -33,7 +33,6 @@ struct PanPair { left; right; }
 # panning_pan_gains -- stereo gains for a pan position. `pan` ranges from
 # -1.0 (full left) to +1.0 (full right), 0.0 = center. Ports pan_gains.
 # ================================================================
-#inline
 #must_use
 fn panning_pan_gains(pan, law) {
     var p = f64_clamp(pan, f64_neg(F64_ONE), F64_ONE);
@@ -55,7 +54,6 @@ fn panning_pan_gains(pan, law) {
 # panning_pan_mono -- apply panning to a mono sample, returning (left,
 # right) as a PanPair. Ports pan_mono.
 # ================================================================
-#inline
 #must_use
 fn panning_pan_mono(sample, pan, law) {
     var out = alloc(sizeof(PanPair));
@@ -70,7 +68,6 @@ fn panning_pan_mono(sample, pan, law) {
 # a caller in a per-sample loop should hoist one PanPair and use this. Same
 # split as reverb_process_core / reverb_process_sample.
 # ================================================================
-#inline
 fn panning_pan_mono_into(sample, pan, law, out) {
     # Gains computed into locals (no intermediate PanGains alloc — this is a
     # per-sample path and Cyrius has no free). Numerically identical to
@@ -117,7 +114,6 @@ fn panning_pan_buffer(input, pan, law, left, right) {
 # `balance` ranges from -1.0 (left only) to +1.0 (right only). Returns the
 # adjusted (left, right) as a PanPair. Ports stereo_balance.
 # ================================================================
-#inline
 #must_use
 fn panning_stereo_balance(left, right, balance) {
     var b = f64_clamp(balance, f64_neg(F64_ONE), F64_ONE);

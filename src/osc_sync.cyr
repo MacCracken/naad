@@ -36,7 +36,6 @@ fn hardsync_new(master_freq, slave_freq, slave_waveform, sample_rate) {
 # hardsync_next_sample -- advance master; reset slave when master wraps
 # (phase decreased past 1.0); return the slave's sample.
 # ================================================================
-#inline
 #must_use
 fn hardsync_next_sample(self) {
     var master = HardSync_master(self);
@@ -58,7 +57,6 @@ fn hardsync_next_sample(self) {
 # ================================================================
 # hardsync_fill_buffer -- fill a vec buffer in place.
 # ================================================================
-#inline
 fn hardsync_fill_buffer(self, buffer) {
     var n = vec_len(buffer);
     var i = 0;

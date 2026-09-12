@@ -129,7 +129,6 @@ fn drum_kick_trigger(self) {
 # ================================================================
 # drum_kick_next_sample -- one sample of body + click, advancing all state.
 # ================================================================
-#inline
 #must_use
 fn drum_kick_next_sample(self) {
     if (KickDrum_active(self) == 0) { return 0; }
@@ -170,7 +169,6 @@ fn drum_kick_next_sample(self) {
 }
 
 # Fill a vec buffer in place with successive kick samples.
-#inline
 fn drum_kick_fill_buffer(self, buffer) {
     var n = vec_len(buffer);
     var i = 0;
@@ -260,7 +258,6 @@ fn drum_snare_trigger(self) {
 # ================================================================
 # drum_snare_next_sample -- one sample of tone + bandpassed noise.
 # ================================================================
-#inline
 #must_use
 fn drum_snare_next_sample(self) {
     if (SnareDrum_active(self) == 0) { return 0; }
@@ -291,7 +288,6 @@ fn drum_snare_next_sample(self) {
 }
 
 # Fill a vec buffer in place with successive snare samples.
-#inline
 fn drum_snare_fill_buffer(self, buffer) {
     var n = vec_len(buffer);
     var i = 0;
@@ -397,7 +393,6 @@ fn drum_hihat_trigger(self) {
 # ================================================================
 # drum_hihat_next_sample -- summed detuned squares through highpass -> bandpass.
 # ================================================================
-#inline
 #must_use
 fn drum_hihat_next_sample(self) {
     if (HiHat_active(self) == 0) { return 0; }
@@ -438,7 +433,6 @@ fn drum_hihat_next_sample(self) {
 }
 
 # Fill a vec buffer in place with successive hi-hat samples.
-#inline
 fn drum_hihat_fill_buffer(self, buffer) {
     var n = vec_len(buffer);
     var i = 0;

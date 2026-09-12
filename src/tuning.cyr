@@ -35,7 +35,6 @@ struct TuningTable { name; ratios; a4_hz; }
 # equal_temperament_freq -- frequency of a note in 12-TET.
 # Formula: a4_hz * 2^((note - 69) / 12). Note 69 = A4.
 # ================================================================
-#inline
 #must_use
 fn tuning_equal_temperament_freq(note, a4_hz) {
     var exp = f64_div(f64_sub(f64_from(note), f64_from(69)), f64_from(12));
@@ -55,7 +54,6 @@ fn tuning_midi_to_freq(note) {
 # freq_to_midi -- frequency in Hz to nearest MIDI note (0-127).
 # note = 69 + 12 * log2(freq / 440); rounded and clamped to [0, 127].
 # ================================================================
-#inline
 #must_use
 fn tuning_freq_to_midi(freq) {
     if (f64_le(freq, 0) == 1) { return 0; }
@@ -70,7 +68,6 @@ fn tuning_freq_to_midi(freq) {
 # cents -- interval in cents between two frequencies.
 # cents = 1200 * log2(f2 / f1); 100 cents = 1 semitone in 12-TET.
 # ================================================================
-#inline
 #must_use
 fn tuning_cents(f1, f2) {
     if (f64_le(f1, 0) == 1) { return 0; }

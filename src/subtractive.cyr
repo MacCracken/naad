@@ -167,7 +167,6 @@ fn subtractive_set_cutoff(self, cutoff) {
 # amplitude envelope. Filter coefficients are only recomputed when the
 # modulated cutoff moves more than 0.5 Hz (matching the oracle's guard).
 # ================================================================
-#inline
 #must_use
 fn subtractive_next_sample(self) {
     # Oscillator mix.
@@ -201,7 +200,6 @@ fn subtractive_next_sample(self) {
 # ================================================================
 # subtractive_fill_buffer -- fill a vec buffer in place.
 # ================================================================
-#inline
 fn subtractive_fill_buffer(self, buffer) {
     var n = vec_len(buffer);
     var i = 0;

@@ -137,7 +137,6 @@ fn wavetable_len(self) {
 # wavetable_is_empty -- 1 if the wavetable has no samples, else 0.
 # Ports Wavetable::is_empty.
 # ================================================================
-#inline
 #must_use
 fn wavetable_is_empty(self) {
     if (vec_len(Wavetable_samples(self)) == 0) {
@@ -151,7 +150,6 @@ fn wavetable_is_empty(self) {
 # (0.0..1.0) with linear interpolation and wraparound.
 # Ports Wavetable::read_interpolated.
 # ================================================================
-#inline
 #must_use
 fn wavetable_read_interpolated(self, phase) {
     var samples = Wavetable_samples(self);
@@ -257,7 +255,6 @@ fn wavetable_osc_set_frequency(self, freq) {
 # wavetable_osc_next_sample -- next sample with linear interpolation,
 # advancing the phase accumulator. Ports WavetableOscillator::next_sample.
 # ================================================================
-#inline
 #must_use
 fn wavetable_osc_next_sample(self) {
     var sample = wavetable_read_interpolated(WavetableOscillator_table(self), WavetableOscillator_phase(self));
@@ -275,7 +272,6 @@ fn wavetable_osc_next_sample(self) {
 # wavetable_osc_fill_buffer -- fill a vec<f64> with successive samples.
 # Ports WavetableOscillator::fill_buffer.
 # ================================================================
-#inline
 fn wavetable_osc_fill_buffer(self, buffer) {
     var n = vec_len(buffer);
     var i = 0;
@@ -413,7 +409,6 @@ fn wavetable_morph_set_morph(self, position) {
 # adjacent tables at the current morph position, then advancing the phase.
 # Ports MorphWavetable::next_sample.
 # ================================================================
-#inline
 #must_use
 fn wavetable_morph_next_sample(self) {
     var tables = MorphWavetable_tables(self);

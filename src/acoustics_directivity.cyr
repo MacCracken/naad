@@ -57,7 +57,6 @@ fn naad_directivity_to_goonj(kind) {
 # 1.0 is the on-axis reference. Ports SourceDirectivity::gain, delegating to
 # goonj's directivity_gain.
 # ================================================================
-#inline
 #must_use
 fn naad_directivity_gain(kind, direction, front) {
     return directivity_gain(naad_directivity_to_goonj(kind), direction, front);
@@ -69,7 +68,6 @@ fn naad_directivity_gain(kind, direction, front) {
 # for the 2D case with no full 3D vectors handy. Ports SourceDirectivity::
 # gain_polar's closed forms exactly.
 # ================================================================
-#inline
 #must_use
 fn naad_directivity_gain_polar(kind, theta) {
     var cos_theta = f64_clamp(f64_cos(theta), NAAD_DIR_NEG_ONE, F64_ONE);

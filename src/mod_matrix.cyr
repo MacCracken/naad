@@ -172,7 +172,6 @@ fn mod_matrix_compute(m) {
 # is no error channel. An out-of-range id returns +0.0 -- indistinguishable from
 # "nothing targets it", which is the honest answer for a destination that does
 # not exist. Do not smuggle a negative error code through the f64 return.
-#inline
 #must_use
 fn mod_matrix_get_destination(m, dest) {
     if (dest < 0) { return 0; }

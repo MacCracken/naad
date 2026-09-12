@@ -112,7 +112,6 @@ fn physical_ks_set_frequency(self, frequency) {
 }
 
 # Generate the next sample.
-#inline
 #must_use
 fn physical_ks_next_sample(self) {
     var dl = KarplusStrong_delay_line(self);
@@ -133,7 +132,6 @@ fn physical_ks_next_sample(self) {
 }
 
 # Fill a vec buffer with samples (in place).
-#inline
 fn physical_ks_fill_buffer(self, buffer) {
     var n = vec_len(buffer);
     var i = 0;
@@ -204,7 +202,6 @@ fn physical_wg_excite(self, sample) {
 }
 
 # Generate the next sample (advance both lines with boundary reflection).
-#inline
 #must_use
 fn physical_wg_next_sample(self) {
     var fwd_dl = Waveguide_forward_delay(self);
@@ -228,7 +225,6 @@ fn physical_wg_next_sample(self) {
 }
 
 # Fill a vec buffer with samples (in place).
-#inline
 fn physical_wg_fill_buffer(self, buffer) {
     var n = vec_len(buffer);
     var i = 0;
@@ -399,7 +395,6 @@ fn physical_moog_rk4_step(omega, k, input, state, dt, scratch) {
 # Process a single sample through the Moog ladder (one RK4 step over
 # 1/sample_rate seconds), returning the lowpass-most stage y[3] clamped to
 # [-2, 2] as a divergence guard.
-#inline
 #must_use
 fn physical_moog_process_sample(self, input) {
     var omega = f64_mul(F64_TAU, MoogLadder_cutoff_hz(self));
@@ -419,7 +414,6 @@ fn physical_moog_process_sample(self, input) {
 }
 
 # Process a vec buffer through the Moog ladder in place.
-#inline
 fn physical_moog_process_buffer(self, buffer) {
     var n = vec_len(buffer);
     var i = 0;

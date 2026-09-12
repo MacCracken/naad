@@ -214,7 +214,6 @@ fn filter_biquad_compute_coefficients(self) {
 # ================================================================
 # filter_biquad_process_sample -- Direct Form II Transposed; denormal-flushed.
 # ================================================================
-#inline
 #must_use
 fn filter_biquad_process_sample(self, input) {
     var b0 = BiquadFilter_b0(self);
@@ -252,7 +251,6 @@ fn filter_biquad_set_params(self, frequency, q, gain_db) {
 # ================================================================
 # filter_biquad_process_buffer -- process a vec of samples in place.
 # ================================================================
-#inline
 fn filter_biquad_process_buffer(self, buffer) {
     var n = vec_len(buffer);
     var i = 0;
@@ -358,7 +356,6 @@ fn filter_svf_set_params(self, frequency, q) {
 # bump allocator does not grow per sample. Numerics are bit-identical to
 # filter_svf_process_sample's low_pass field.
 # ================================================================
-#inline
 fn _filter_svf_compute_lowpass(self, input) {
     var a1 = StateVariableFilter_a1(self);
     var a2 = StateVariableFilter_a2(self);
@@ -381,7 +378,6 @@ fn _filter_svf_compute_lowpass(self, input) {
 # pointer). Integrator state is denormal-flushed. This is a one-shot API;
 # the low-pass hot paths use _filter_svf_compute_lowpass to avoid the alloc.
 # ================================================================
-#inline
 #must_use
 fn filter_svf_process_sample(self, input) {
     var a1 = StateVariableFilter_a1(self);
@@ -424,7 +420,6 @@ fn filter_svf_process_sample_lowpass(self, input) {
 # ================================================================
 # filter_svf_process_buffer_lowpass -- write low-pass output in place.
 # ================================================================
-#inline
 fn filter_svf_process_buffer_lowpass(self, buffer) {
     var n = vec_len(buffer);
     var i = 0;
