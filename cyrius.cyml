@@ -5,7 +5,7 @@ description = "naad — audio synthesis primitives (oscillators, filters, envelo
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/naad"
 language = "cyrius"
-cyrius = "6.5.35"
+cyrius = "6.6.3"
 
 [build]
 entry = "src/main.cyr"
@@ -106,7 +106,7 @@ stdlib = [
 #   to hisab; that is where the 2.1.2 null-deref actually originated.
 [deps.hisab]
 git = "https://github.com/MacCracken/hisab.git"
-tag = "2.11.2"
+tag = "2.22.1"
 modules = ["dist/hisab.cyr"]
 
 # goonj — acoustics engine. Consumed by the `acoustics/*` wrapper modules
