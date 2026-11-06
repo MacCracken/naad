@@ -280,3 +280,45 @@ committed to — nothing here is speculative, and no milestone is invented.
 Work-loop releases past the port are recorded in the
 [CHANGELOG](../../CHANGELOG.md) and summarised in [`state.md`](state.md), not
 tracked as milestones here.
+
+## Moving the cyrius pin to 6.6.6
+
+**Current pin: `cyrius = "6.6.3"` (cyrius.cyml:8).** Pure pin bump — naad needs
+no source change. Two or three lines cover it, but the reason the biggest
+6.6.6 item misses naad is worth recording, because it looks like it should hit.
+
+**The struct changes do not reach naad, despite 79 `struct` declarations.**
+6.6.6 makes copying between two different struct types a compile error and
+changes a by-value struct parameter over 8 B from aliasing a pointer to a deep
+copy. naad declares 79 structs (`Oscillator`, `BiquadFilter`, `FdnReverb`, …)
+and uses **every one of them as a heap layout** — `alloc(sizeof(X))` plus the
+generated `X_field` / `X_set_field` accessors. Grepped across `src/`,
+`programs/` and `tests/`: zero `: <StructName>` parameter or variable
+annotations, zero `StructName { … }` initializers, zero struct-to-struct
+assignments. The `: BiquadFilter pointer` / `: DelayLine pointer` occurrences
+(`src/eq.cyr:28`, `src/delay.cyr:96`, `src/reverb.cyr:38`, …) are all **doc
+comments**, not type annotations. So items 3 and 5 of the 6.6.6 list have
+nothing to bite.
+
+**The rest, checked:** no `O_APPEND` / `O_TRUNC` outside vendored `lib/` (so
+the Windows data-corruption fix is a non-event, and naad has no PE target
+anyway); no `async` fns; no `operator` fns; no `ret2`/`rethi` pair returns; no
+SIMD-typed returns; no top-level `{ }` blocks; no duplicate global `var`
+declarations in `src/`; no locally defined `vec_*`, and `[deps] stdlib` already
+names both `assert` and `vec`, so assert.cyr's new transitive
+`include "lib/vec.cyr"` cannot collide. `lib/regression.cyr` is not vendored
+here — the only mention is a comment at `lib/syscalls_linux_common.cyr:208` —
+so the new exec deadline is irrelevant.
+
+**One thing consumers see, not a 6.6.6 change.** `src/` carries 50 `#inline`
+annotations, and a fold of `lib/naad.cyr` emits ~35 `#inline ignored: body
+exceeds 32 tokens` / `fn takes more than 2 parameters` warnings in a consumer's
+build (seen in prani's). That diagnostic is **not new** — verified identical
+from 6.6.2 through 6.6.6 with a probe. Worth a pass sometime to drop the
+`#inline` markers that never qualified, so downstream builds stop carrying the
+noise; it is not a pin blocker.
+
+**Verify after bumping:** re-run `cyrius deps` (6.6.6's `lib/io.cyr` is now
+self-sufficient), then `cyrius build`, `cyrius test`, `cyrius fmt --check`,
+`cyrius fuzz` and `cyrius distlib`. Measured: `cyrius build` under 6.6.3 and
+under 6.6.6 both exit 0 with an identical single diagnostic.
