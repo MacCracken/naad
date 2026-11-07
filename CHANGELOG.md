@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - Onto the cyrius 6.7.x language minor
+
+Toolchain and dependency release. `cyrius` 6.6.20 -> **6.7.9**, `hisab` 3.3.7 ->
+**3.4.0**, `goonj` 2.0.6 -> **2.1.0**, `sakshi` 2.5.7 -> **2.5.8** (transitive), with
+ganita 1.2.15 from the snapshot. hisab 3.4.0 and goonj 2.1.0 pin exactly 6.7.9, and the
+next tag of each needs 6.7.18. **No naad source or test changes, and no computed value
+moves.** It is a minor because the floor for consumers moves.
+
+### Changed
+
+- ⚠ **Consumers now need cyrius 6.7.2 or later.** sakshi 2.5.8 declares its syscall
+  numbers `const`, which arrives at 6.7.2, and goonj pulls sakshi in. Measured with a
+  from-scratch consumer of this bundle: 6.7.2 and 6.7.9 build and run, 6.7.1 and 6.6.20
+  fail at compile time (`expected '=', got identifier '_SK_SYS_WRITE'`). The failure is
+  loud, not silent.
+- **Consumers move hisab and goonj with it.** Pin the tags in `cyrius.cyml`. hisab 3.4.0
+  retires 27 public names; a consumer that calls one itself gets a build error, and
+  hisab's changelog has the replacements. naad calls none of them.
+- `lib/` and `cyrius.lock` are regenerated, and `dist/naad.cyr` differs from 2.2.5 only
+  in its version line.
+
+### Verified
+
+- **Audio output is byte-identical to 2.2.5.** The same 103-stream sweep used for 2.2.5,
+  94,731 values across the oscillators, filters, effects, dynamics, synthesis and
+  acoustics paths, shows no difference. That sweep moved 4,922 values last release, so
+  it can see a change.
+- **hisab's changes do not reach naad's results.** Of everything naad calls, only
+  `hvec3_new` changed, and it now returns 0 on a refused allocation. That only matters
+  once allocation has already failed, and the process faulted there before too. The
+  four calls that return `Result` are the ones 2.2.5 migrated.
+- **The language changes do not reach naad's source.** It has no lone `!` (a no-op until
+  6.7.3, so a real one would have flipped), no `~`, no `impl` or `trait`, no unary `-` on
+  a constant, and no reserved word as a name. 6.7.7's arity check on forward calls finds
+  nothing wrong.
+- **The 2.2.5 guards still hold.** All 15 hazard probes behave the same, and reverting
+  each of the ten guards still fails or hangs `tests/hardening.tcyr`.
+- `lib/`: 33 of 35 files are byte-identical to the 6.7.9 snapshot, the other two are the
+  git+tag bundles, each byte-identical to its tag's `dist/`, and `cyrius deps --locked`
+  confirms `lib/` and the lock are what the tags resolve.
+- The hotpath benchmarks are flat: 1.00 to 1.02 over six interleaved runs on the same
+  machine, with overlapping ranges.
+- Tests: **40 suites / 2399 assertions**, `cyrius audit`, `cyrius fuzz`, `cyrius deny`,
+  `cyrius bench`, `cyrius distlib --check` and the symbol-collision gate all clean.
+
 ## [2.2.5] - cyrius 6.6.20, and the guards a saturating `f64_to` walked past
 
 Toolchain and dependency release. `cyrius` 6.6.3 -> **6.6.20**, `hisab` 2.22.1 ->

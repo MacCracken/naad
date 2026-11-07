@@ -8,6 +8,12 @@
 `VERSION` at the repo root is the source of truth for the current number. The
 entries below are the release record.
 
+**2.3.0** — cyrius 6.6.20 -> **6.7.9**, hisab 3.3.7 -> **3.4.0**, goonj 2.0.6 ->
+**2.1.0**, sakshi 2.5.7 -> **2.5.8** (transitive), ganita 1.2.15. No source or test
+change, and output is byte-identical to 2.2.5 over the 94,731-value sweep. The minor is
+for consumers: **cyrius 6.7.2 is now the floor**, measured, because sakshi 2.5.8's
+`const` syscall numbers need it. Suite: **40 suites / 2399 assertions**.
+
 **2.2.5** — cyrius 6.6.3 -> **6.6.20**, hisab 2.22.1 -> **3.3.7**, goonj 2.0.4 ->
 **2.0.6**, sakshi 2.5.1 -> **2.5.7** (transitive), ganita 1.2.14. hisab 3.3.7 and goonj
 2.0.6 are the last of each on 6.6.x; their next tags need cyrius 6.7.x.
@@ -239,6 +245,11 @@ coeffs) and per-sample heap allocations eliminated on 4 hot buffer paths
 - **Cyrius pin**: `cyrius.cyml [package].cyrius` is the source of truth — read
   it rather than trusting a number copied into prose. (This line previously
   inlined `6.3.18`, which never matched the committed manifest.)
+- **Moving the pin past 6.7.9 means moving hisab and goonj too**: hisab 3.4.1 and
+  goonj 2.1.1 need 6.7.18.
+- **Moving a pin**: read `docs/development/ecosystem-migration.md` at the new cyrius
+  tag, then `rm lib/*.cyr cyrius.lock; cyrius deps; cyrius deps --locked`, then
+  `cyrius distlib`, and diff `lib/` against `~/.cyrius/versions/<pin>/lib`.
 - Build: `cyrius build src/main.cyr build/naad`
 - Test **everything**: bare `cyrius test` auto-discovers and runs every
   `tests/**/*.tcyr` (measured: 40 suites). This is the only test step in
@@ -274,6 +285,9 @@ consumed.
 - **sakshi** — not declared directly. It arrives transitively (goonj's logging
   needs it) and is recorded in `cyrius.lock`. The vendored `lib/sakshi.cyr` is
   byte-identical to the toolchain snapshot's copy.
+- **Consumer floor: cyrius 6.7.2.** sakshi 2.5.8 declares its syscall numbers `const`,
+  and goonj pulls sakshi in. Measured with a from-scratch consumer: 6.7.2 builds and
+  runs, 6.7.1 fails at compile time.
 - stdlib leaves are declared in `[deps].stdlib`. There is no `dist/naad.deps`:
   `cyrius distlib` 6.6.18 and later names only what the fold needs beyond its named
   deps, and hisab's and goonj's own `# Requires` blocks bring every leaf. Measured

@@ -154,7 +154,7 @@ modules = ["dist/naad.cyr"]
 with no `include` lines of its own. It **externalizes** its dependencies — hisab
 and goonj are not inlined — so a consumer must pin both in its own manifest at
 the tags naad pins in [`cyrius.cyml`](cyrius.cyml) (sakshi arrives transitively
-via hisab). The bundle has no sidecar of its own: since `cyrius distlib` 6.6.18 a
+via hisab), on **cyrius 6.7.2 or later**. The bundle has no sidecar of its own: since `cyrius distlib` 6.6.18 a
 sidecar names only what the fold needs beyond its named deps, and for naad that is
 nothing, because hisab's and goonj's own `# Requires` blocks bring every stdlib leaf.
 
