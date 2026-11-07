@@ -25,6 +25,17 @@ var DELAY_STABLE_LO = 0xBFEFF7CED916872B;   # -0.999 (feedback/coeff clamp lo)
 #derive(accessors)
 struct DelayLine { buffer; write_pos; max_delay_samples; }
 
+# 1 if an f64 sample count cannot be a delay-line length: `vec_push` ends the
+# process past VEC_CAP_MAX entries. Test this BEFORE f64_to at every length cast.
+# Since cyrius 6.6.8 f64_to saturates, so +Inf and anything past 2^63 reach the
+# cast as INT64_MAX, and a floor such as `if (n < 1)` no longer catches them.
+# NaN answers 0 on purpose: it casts to 0, floors to 1, and Rust's `as usize`
+# agrees. ADR-0004.
+#must_use
+fn delay_len_overflows(samples) {
+    return f64_ge(samples, f64_from(VEC_CAP_MAX));
+}
+
 # Create a delay line with the given maximum delay in samples (min 1).
 #must_use
 fn delay_line_new(max_delay_samples) {

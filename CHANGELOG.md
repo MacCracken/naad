@@ -5,6 +5,97 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.5] - cyrius 6.6.20, and the guards a saturating `f64_to` walked past
+
+Toolchain and dependency release. `cyrius` 6.6.3 -> **6.6.20**, `hisab` 2.22.1 ->
+**3.3.7**, `goonj` 2.0.4 -> **2.0.6**, `sakshi` 2.5.1 -> **2.5.7** (transitive), with
+ganita 1.2.14 from the snapshot. This is the matched set for 6.6.20: hisab 3.3.7 and
+goonj 2.0.6 pin it exactly, and the next tag of each needs cyrius 6.7.x.
+
+The suite caught one thing, a 1-ulp sine. It did not catch the regression below.
+
+### Fixed
+
+- **Six public entry points died on input they used to survive.** Cyrius 6.6.8 made
+  `f64_to` saturate: +Inf and anything past 2^63 went from `INT64_MIN` to `INT64_MAX`,
+  and `NaN` to 0. Floor-only length guards had been catching the old sentinel by
+  accident, and the new one walks past them. **All 2355 assertions stayed green**; only
+  a probe of the new toolchain found it. Decision and alternatives are in
+  [ADR-0004](docs/adr/0004-bound-delay-lengths-before-the-cast.md).
+
+  | Entry point | Input | 2.2.4 on 6.6.3 | Unguarded on 6.6.20 | 2.2.5 |
+  |---|---|---|---|---|
+  | `reverb_new` | +Inf or f64::MAX pre-delay, f64::MAX sample rate | built a 1-sample line | abort | `NAAD_ERR_BUFFER_OVERFLOW` |
+  | `effects_chorus_new`, `effects_flanger_new` | +Inf delay or depth, f64::MAX sample rate | built a 1-sample line | abort | `NAAD_ERR_BUFFER_OVERFLOW` |
+  | `physical_ks_pluck` | a period past 2^63 samples | no burst | 2^63 iterations | `NAAD_ERR_BUFFER_OVERFLOW`, string silent |
+  | `detect_pitch_autocorr` | f64::MAX sample rate | no pitch | abort | no pitch |
+  | `naad_fdn_reverb_new` | +Inf or f64::MAX room dimension | built | gigabytes, then abort where they run out | `NAAD_ERR_COMPUTATION` |
+
+  The FDN row is goonj 2.0.6's, not cyrius's: it caps delays at
+  `FDN_MAX_DELAY_SAMPLES` and asks consumers to refuse such rooms first. naad now does,
+  for finite rooms past about 412 km at 48 kHz as well.
+- **`physical_ks_new` and `physical_wg_new` return `NAAD_ERR_BUFFER_OVERFLOW`** for a
+  period no buffer can hold. A period past 2^63 used to wrap into a 1-sample line, and
+  one from 2^28 to 2^63 ended the process on every toolchain.
+
+### Changed
+
+- **The eight hisab call sites moved to `Result`.** `num_fft`, `num_ifft`, `num_dct` and
+  `num_idct` return `Result` since hisab 3.0.0. The three `var e = ...` bindings were a
+  hard compile error, which is the failure cyrius's own changelog recorded for dhvani
+  against naad. The other five compiled and were wrong in a quieter way: a `Result` in
+  argument or comparison position degrades to its tag, so they kept working only
+  because `Ok`'s tag and `NAAD_ERR_NONE` are both 0. All are now
+  `var t, e = f(...)` plus `is_err_result(t)`, found by grep rather than by compile
+  errors, and `result` joins `[deps] stdlib`.
+- **`dist/naad.deps` is gone.** `cyrius distlib` 6.6.18 and later names only what the
+  fold needs beyond its named deps, and for naad that is nothing. A from-scratch
+  consumer declaring only hisab, goonj and naad builds and runs.
+- **`tests/modulation.tcyr` no longer pins libm's bits.** x86 `f64_sin` left x87 `fsin`
+  for fdlibm at cyrius 6.6.9, and sin(TAU * 440/44100) landed one ulp above libm. The
+  assertion now requires exact equality with the unmodulated sine, which is what it was
+  checking, plus 1 ulp of libm's value.
+- **Twelve public fns gained the doc comment they never had.** cyrdoc used to read
+  `#must_use` as documentation. `cyrius audit` gates on this.
+- **Input that was garbage now agrees with Rust**, all from the cast and with no code
+  change: `tuning_freq_to_midi(NaN)` is 0 rather than `INT64_MIN`, a NaN gate hold is 0
+  samples rather than `INT64_MIN`, a +Inf gate hold is effectively forever, and
+  `detect_pitch_autocorr` with a saturating `min_hz` searches the whole buffer.
+- `f64_neg(+0)` is -0 from 6.6.8, as Rust's unary minus gives. Nothing in the value
+  sweep below moved because of it.
+
+### Upgrading
+
+- **naad 2.2.5 needs hisab 3.x**, so a consumer moves its hisab and goonj pins with it.
+  Pin the tags in `cyrius.cyml`.
+- The constructors above can now return a negative code on input that used to build an
+  object. They already documented that return.
+- `physical_ks_pluck` can return a non-zero code. It used to return 0 unconditionally.
+
+### Verified
+
+- `lib/` is re-vendored from a regenerated lock: 33 of 35 files are byte-identical to
+  the 6.6.20 snapshot, the other two are the git+tag bundles, each byte-identical to
+  its tag's `dist/`, and `cyrius deps --verify` passes all 35.
+- **Value sweep, old tree against new.** 103 streams and 94,731 values across the
+  oscillators, filters, effects, dynamics, synthesis and acoustics paths: 4,922 values
+  differ, none by more than 1.5e-12 of peak, with no NaN, sign-of-zero or length change.
+  Everything but the FFT path stays within about 1e-15 of peak.
+- The largest move is an improvement. hisab's re-seeded FFT twiddles took the maximum
+  error of `naad_convolution_process_block` against the direct path from 1.9e-12 to
+  7.8e-15, about 240 times closer.
+- **Every new guard was reverted one at a time**, and all ten reverts fail or hang
+  `tests/hardening.tcyr`. The first pass found one that did not: at `sample_rate =
+  f64::MAX` a non-zero pre-delay overflows first and hides the comb bound. Fuzz catches
+  seven of the ten; the other three leave a usable object, so they are exact-value
+  checks. A fuzz row that could not reach `physical_ks_pluck` is fixed too.
+- The hotpath benchmarks are flat: `osc_next_sample` (sine) 53 -> 53 ns despite the
+  move off `fsin`, `filter_svf` 23 -> 24 ns, ADSR 12 -> 12 ns, pink noise 96 -> 96 ns,
+  same machine and regime.
+- 6.6.6's struct copy rules miss naad, as the roadmap predicted: 79 structs, all heap
+  layouts. Tests: **40 suites / 2399 assertions**, `cyrius audit`, `cyrius fuzz`,
+  `cyrius deny`, `cyrius distlib --check` and the symbol-collision gate all clean.
+
 ## [2.2.4] - 117 `#inline` markers that did nothing are gone
 
 No behaviour change. `#inline` became a real directive at cyrius v6.5.63 and gained a

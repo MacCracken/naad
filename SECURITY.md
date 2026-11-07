@@ -64,13 +64,20 @@ checklist rather than as historical anecdotes:
 A third hazard was added by the 2.1.3 sweep:
 
 - **`f64_to` does not saturate the way Rust's `as` casts do.** `as usize` maps
-  `NaN` and negatives to 0; `f64_to` overflows to `INT64_MIN`, which is neither
-  `> MAX` nor `== 0`, so a one-sided clamp written in the Rust idiom lets it
-  straight through to an index. 2.1.3 fixed five such sites
+  negatives to 0, and `f64_to` keeps them negative. Below cyrius 6.6.8 it also
+  overflowed to `INT64_MIN`, which is neither `> MAX` nor `== 0`, so a one-sided
+  clamp written in the Rust idiom let it straight through to an index. 2.1.3 fixed
+  five such sites
   (`wavetable_read_interpolated`, both morph paths, `granular_next_sample`,
   `db_to_amplitude_lut`). ⚠ **`INT64_MIN % 1024 == 0`**, so a power-of-two
   buffer masks the defect entirely — and audio buffers are habitually
   power-of-two. A reproducer needs a non-power-of-two length.
+
+  From 6.6.8 `f64_to` gives `INT64_MAX` on positive overflow, which inverts the
+  hazard: a floor-only length guard is now the half bound. 2.2.5 closed the five
+  paths this opened (`reverb_new`, chorus, flanger, `physical_ks_pluck`,
+  `detect_pitch_autocorr`) and refuses rooms goonj would clamp. See
+  [ADR-0004](docs/adr/0004-bound-delay-lengths-before-the-cast.md).
 
 2.1.3 also closed the largest availability issue: `lib/alloc.cyr` is a bump
 allocator with **no individual free**, so a per-call allocation on a streaming

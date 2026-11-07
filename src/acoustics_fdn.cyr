@@ -66,7 +66,11 @@ struct FdnReverb {
 # naad_fdn_reverb_new -- create a goonj-backed FDN reverb. Room dimensions
 # drive the delay-line lengths (larger room = longer delays = spacier tail);
 # `target_rt60` sets decay time. Returns the struct pointer on success, or
-# NAAD_ERR_COMPUTATION if any parameter is out of range. Ports FdnReverb::new.
+# NAAD_ERR_COMPUTATION if any parameter is out of range, which includes a room
+# whose delay reaches goonj's FDN_MAX_DELAY_SAMPLES (about 412 km at 48 kHz, and
+# every non-finite dimension). goonj clamps there and asks its consumers to
+# refuse such rooms first: the clamped lines would still take gigabytes and can
+# end the process. ADR-0004. Ports FdnReverb::new.
 # ================================================================
 #must_use
 fn naad_fdn_reverb_new(room_length, room_width, room_height, target_rt60, sample_rate, mix) {
@@ -78,6 +82,12 @@ fn naad_fdn_reverb_new(room_length, room_width, room_height, target_rt60, sample
     if (sample_rate <= 0) { return NAAD_ERR_COMPUTATION; }
 
     var config = fdn_config_for_room(room_length, room_width, room_height, target_rt60, sample_rate);
+    var lengths = FdnConfig_delay_lengths(config);
+    var li = 0;
+    while (li < vec_len(lengths)) {
+        if (vec_get(lengths, li) >= FDN_MAX_DELAY_SAMPLES) { return NAAD_ERR_COMPUTATION; }
+        li = li + 1;
+    }
     var fdn = fdn_new(config);
 
     var self = alloc(sizeof(FdnReverb));
@@ -160,6 +170,7 @@ fn _naad_fdn_hadamard8_into(x, out) {
     return 0;
 }
 
+# Allocating form of the eight-point Hadamard mix: a new vec of `x` mixed.
 #must_use
 fn naad_fdn_hadamard8(x) {
     var out = vec_new();

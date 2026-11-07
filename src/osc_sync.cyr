@@ -75,6 +75,7 @@ fn hardsync_master(self) {
     return HardSync_master(self);
 }
 
+# The slave oscillator (borrowed, not a copy).
 #must_use
 fn hardsync_slave(self) {
     return HardSync_slave(self);

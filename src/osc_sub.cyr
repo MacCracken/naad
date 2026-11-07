@@ -94,6 +94,7 @@ fn subosc_octave(self) {
     return SubOscillator_octave(self);
 }
 
+# The base frequency in Hz, before any sub-octave division.
 #inline
 #must_use
 fn subosc_base_frequency(self) {

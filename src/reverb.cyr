@@ -163,6 +163,11 @@ fn reverb_new(decay, damping, pre_delay_ms, mix, sample_rate) {
     var damp = f64_clamp(damping, 0, F64_ONE);
     var pre_samples = f64_max(f64_div(f64_mul(pre_delay_ms, sample_rate), f64_from(1000)), 0);
 
+    # The longest comb bounds every comb and all-pass built below.
+    var longest = f64_mul(f64_from(REVERB_COMB_3 + REVERB_STEREO_OFFSET), scale);
+    if (delay_len_overflows(longest) == 1) { return NAAD_ERR_BUFFER_OVERFLOW; }
+    if (delay_len_overflows(pre_samples) == 1) { return NAAD_ERR_BUFFER_OVERFLOW; }
+
     var pre_len = f64_to(f64_floor(pre_samples));
     if (pre_len < 1) { pre_len = 1; }
 

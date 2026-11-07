@@ -8,6 +8,21 @@
 `VERSION` at the repo root is the source of truth for the current number. The
 entries below are the release record.
 
+**2.2.5** — cyrius 6.6.3 -> **6.6.20**, hisab 2.22.1 -> **3.3.7**, goonj 2.0.4 ->
+**2.0.6**, sakshi 2.5.1 -> **2.5.7** (transitive), ganita 1.2.14. hisab 3.3.7 and goonj
+2.0.6 are the last of each on 6.6.x; their next tags need cyrius 6.7.x.
+
+`f64_to` saturates from 6.6.8, so +Inf arrives at a cast as `INT64_MAX` rather than
+`INT64_MIN`. That inverted the hazard the 2.1.3 sweep fixed: a floor-only length guard
+is now the half bound. `reverb_new`, chorus, flanger and `detect_pitch_autocorr`
+aborted and `physical_ks_pluck` hung on non-finite or overflowing input, **with the
+whole suite green**. All are closed, plus goonj's FDN clamp, in
+[ADR-0004](../adr/0004-bound-delay-lengths-before-the-cast.md). The eight hisab call
+sites moved to `Result`, and `dist/naad.deps` is gone (see Dependencies). Output moved
+by at most 1.5e-12 of peak over a 94,731-value old-against-new sweep, and that largest
+move is the FFT block path getting 240 times closer to direct convolution. Suite:
+**40 suites / 2399 assertions**.
+
 **2.2.2** — `naad_convolution_process_block` now STREAMS. It wrote only the first
 `block_len` samples of the convolution and discarded the rest -- the IR still
 ringing -- truncating the reverb tail at every block boundary. The oracle does
@@ -259,8 +274,10 @@ consumed.
 - **sakshi** — not declared directly. It arrives transitively (goonj's logging
   needs it) and is recorded in `cyrius.lock`. The vendored `lib/sakshi.cyr` is
   byte-identical to the toolchain snapshot's copy.
-- stdlib leaves are declared in `[deps].stdlib` and mirrored into
-  `dist/naad.deps` for consumers.
+- stdlib leaves are declared in `[deps].stdlib`. There is no `dist/naad.deps`:
+  `cyrius distlib` 6.6.18 and later names only what the fold needs beyond its named
+  deps, and hisab's and goonj's own `# Requires` blocks bring every leaf. Measured
+  with a from-scratch consumer declaring only hisab, goonj and naad.
 
 ## Source
 
@@ -340,8 +357,8 @@ Consequences for the port review:
 
 Per-module parity tracked in [`port-audit.md`](port-audit.md). Summary:
 
-**41 / 41 modules ported — PORT COMPLETE** · **2340 assertions green across 40
-suites**, covering **all 440 public fns** (0 untested; 12 `_`-prefixed internal
+**41 / 41 modules ported — PORT COMPLETE** · **2399 assertions green across 40
+suites**, covering **all 441 public fns** (0 untested; 12 `_`-prefixed internal
 helpers are exercised through their public callers) · `dist/naad.cyr` bundle assembled and collision-audited to zero across
 all **759** top-level symbols — `fn`, `var`, `const` and `struct` alike, against
 hisab, goonj, sakshi, abaco and the whole pinned stdlib. The audit was fn-scoped
@@ -402,10 +419,10 @@ run (hpet clocksource, floor ≈ 1.33–1.35 µs per clock read):
 
 | Path | Per call |
 |------|----------|
-| `osc_next_sample` (sine) | 59–64 ns |
-| `filter_svf` lowpass | 36–38 ns |
-| `envelope_adsr` `next_value` | 22–23 ns |
-| `noise` pink (Voss-McCartney) | 103–110 ns |
+| `osc_next_sample` (sine) | 53 ns |
+| `filter_svf` lowpass | 24 ns |
+| `envelope_adsr` `next_value` | 12 ns |
+| `noise` pink (Voss-McCartney) | 96 ns |
 
 ## Method
 

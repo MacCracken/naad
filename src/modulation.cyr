@@ -221,6 +221,7 @@ fn modulation_lfo_shape(self) {
     return Lfo_shape(self);
 }
 
+# The LFO output mode: MODULATION_LFO_BIPOLAR or MODULATION_LFO_UNIPOLAR.
 #inline
 #must_use
 fn modulation_lfo_mode(self) {
@@ -267,6 +268,7 @@ fn modulation_fm_carrier(self) {
     return FmModulator_carrier(self);
 }
 
+# The FM modulator oscillator (borrowed, not a copy).
 #inline
 #must_use
 fn modulation_fm_modulator(self) {

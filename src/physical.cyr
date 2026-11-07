@@ -60,6 +60,7 @@ fn physical_ks_new(frequency, decay, brightness, sample_rate) {
     if (naad_is_err(e) == 1) { return e; }
 
     var delay_samples = f64_div(sample_rate, frequency);
+    if (delay_len_overflows(delay_samples) == 1) { return NAAD_ERR_BUFFER_OVERFLOW; }
     var max_delay = f64_to(f64_ceil(delay_samples)) + 2;
     var dl = delay_line_new(max_delay);
 
@@ -87,10 +88,13 @@ fn physical_ks_next_noise(self) {
     return xorshift32_signed_f32(KarplusStrong_rng(self));
 }
 
-# Excite the string with a noise burst (pluck).
+# Excite the string with a noise burst (pluck). Returns NAAD_ERR_NONE, or
+# NAAD_ERR_BUFFER_OVERFLOW with the string left silent when set_frequency has
+# moved the period past any buffer (the burst would be 2^63 writes).
 fn physical_ks_pluck(self) {
     delay_line_clear(KarplusStrong_delay_line(self));
     KarplusStrong_set_damping_prev(self, 0);
+    if (delay_len_overflows(KarplusStrong_delay_samples(self)) == 1) { return NAAD_ERR_BUFFER_OVERFLOW; }
     var n = f64_to(f64_ceil(KarplusStrong_delay_samples(self)));
     var i = 0;
     while (i < n) {
@@ -181,6 +185,7 @@ fn physical_wg_new(frequency, damping, sample_rate) {
 
     # Each delay line is half the period (wave travels in both directions).
     var half_period = f64_div(f64_div(sample_rate, frequency), F64_TWO);
+    if (delay_len_overflows(half_period) == 1) { return NAAD_ERR_BUFFER_OVERFLOW; }
     var max_delay = f64_to(f64_ceil(half_period)) + 2;
 
     var self = alloc(sizeof(Waveguide));

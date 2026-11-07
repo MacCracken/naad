@@ -9,8 +9,11 @@
 # defect in this project or a sibling:
 #   0, -1                 -- the half-bound class: guards written `== 0` where
 #                            the oracle's unsigned type made that complete
-#   INT64_MIN             -- what `f64_to` produces on overflow, where Rust's
-#                            `as` saturates to 0
+#   INT64_MIN             -- what `f64_to` produced on every overflow below
+#                            cyrius 6.6.8, and still does below -2^63, where
+#                            Rust's `as` saturates to 0
+#   +inf, f64::MAX        -- `f64_to` gives INT64_MAX since 6.6.8, past every
+#                            floor-only length guard
 #   NaN, +/-inf           -- pass through f64_clamp (matching Rust), then reach
 #                            a cast site or poison persistent filter state
 #   709 / 710             -- the exact f64_exp overflow boundary that used to
@@ -206,6 +209,50 @@ fn main(): i64 {
         granular_set_position(g, fz_val(i));
         var k = 0;
         while (k < 64) { var gs = granular_next_sample(g); k = k + 1; }
+        i = i + 1;
+    }
+
+    # --- length casts: one parameter at a time, the rest VALID, for the same
+    # reason the oscillator sweep is split. Most of these aborted or hung the run
+    # when f64_to began to saturate, so the check is mainly that we get here.
+    var sr = f64_from(44100);
+    var pitch_sig = vec_new();
+    i = 0;
+    while (i < 1000) {
+        vec_push(pitch_sig, f64_sin(f64_div(f64_from(i), f64_from(5))));
+        i = i + 1;
+    }
+    i = 0;
+    while (i < 12) {
+        var v = fz_val(i);
+        fz_ctor(reverb_new(FZ_HALF, FZ_HALF, v, FZ_HALF, sr), "reverb_new pre-delay");
+        # Pre-delay 0: a non-zero one overflows first and hides the comb bound.
+        fz_ctor(reverb_new(FZ_HALF, FZ_HALF, 0, FZ_HALF, v), "reverb_new sample rate");
+        fz_ctor(effects_chorus_new(2, v, FZ_ONE, FZ_ONE, FZ_HALF, sr), "chorus base delay");
+        fz_ctor(effects_chorus_new(2, FZ_ONE, v, FZ_ONE, FZ_HALF, sr), "chorus depth");
+        fz_ctor(effects_chorus_new(2, FZ_ONE, FZ_ONE, FZ_ONE, FZ_HALF, v), "chorus sample rate");
+        fz_ctor(effects_flanger_new(v, FZ_ONE, FZ_ONE, FZ_HALF, FZ_HALF, sr), "flanger base delay");
+        fz_ctor(effects_flanger_new(FZ_ONE, v, FZ_ONE, FZ_HALF, FZ_HALF, sr), "flanger depth");
+        fz_ctor(effects_flanger_new(FZ_ONE, FZ_ONE, FZ_ONE, FZ_HALF, FZ_HALF, v), "flanger sample rate");
+        fz_ctor(physical_wg_new(v, FZ_HALF, sr), "physical_wg_new frequency");
+        fz_ctor(physical_wg_new(f64_from(440), FZ_HALF, v), "physical_wg_new sample rate");
+        fz_ctor(naad_fdn_reverb_new(v, FZ_ONE, FZ_ONE, FZ_ONE, 48000, FZ_HALF), "fdn length");
+        fz_ctor(naad_fdn_reverb_new(FZ_ONE, v, FZ_ONE, FZ_ONE, 48000, FZ_HALF), "fdn width");
+        fz_ctor(naad_fdn_reverb_new(FZ_ONE, FZ_ONE, v, FZ_ONE, 48000, FZ_HALF), "fdn height");
+
+        fz_ctor(physical_ks_new(v, FZ_HALF, FZ_HALF, sr), "physical_ks_new frequency");
+        fz_ctor(physical_ks_new(f64_from(440), FZ_HALF, FZ_HALF, v), "physical_ks_new sample rate");
+        # Reach the pluck through set_frequency: the constructor refuses these.
+        var ks = physical_ks_new(f64_from(440), FZ_HALF, FZ_HALF, sr);
+        physical_ks_set_frequency(ks, v);
+        physical_ks_pluck(ks);
+
+        fz_check(naad_is_finite(detect_pitch_autocorr(pitch_sig, v, f64_from(50), f64_from(2000))) == 1,
+          "detect_pitch_autocorr sample rate");
+        fz_check(naad_is_finite(detect_pitch_autocorr(pitch_sig, sr, v, f64_from(2000))) == 1,
+          "detect_pitch_autocorr min_hz");
+        fz_check(naad_is_finite(detect_pitch_autocorr(pitch_sig, sr, f64_from(50), v)) == 1,
+          "detect_pitch_autocorr max_hz");
         i = i + 1;
     }
 

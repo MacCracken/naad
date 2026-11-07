@@ -292,12 +292,14 @@ fn unison_num_voices(self) {
     return UnisonOscillator_num_voices(self);
 }
 
+# The centre frequency in Hz.
 #inline
 #must_use
 fn unison_frequency(self) {
     return UnisonOscillator_frequency(self);
 }
 
+# The total detune spread in cents.
 #inline
 #must_use
 fn unison_detune_cents(self) {

@@ -219,24 +219,28 @@ fn osc_waveform(self) {
     return Oscillator_waveform(self);
 }
 
+# The oscillator frequency in Hz.
 #inline
 #must_use
 fn osc_frequency(self) {
     return Oscillator_frequency(self);
 }
 
+# The current phase, in [0, 1).
 #inline
 #must_use
 fn osc_phase(self) {
     return Oscillator_phase(self);
 }
 
+# The sample rate in Hz.
 #inline
 #must_use
 fn osc_sample_rate(self) {
     return Oscillator_sample_rate(self);
 }
 
+# The pulse width, used by WAVEFORM_PULSE.
 #inline
 #must_use
 fn osc_pulse_width(self) {

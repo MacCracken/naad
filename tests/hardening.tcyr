@@ -14,7 +14,10 @@
 # than of the algorithms:
 #   1. Rust `usize`/enum guarantees erased by Cyrius's signed i64 -- a single
 #      upper-bound test is only HALF a bound.
-#   2. `f64_to` overflowing to INT64_MIN where Rust's `as` casts SATURATE.
+#   2. `f64_to` disagreeing with Rust's `as` casts. A negative value stays
+#      negative where Rust gives 0. Below cyrius 6.6.8 every overflow and NaN
+#      was INT64_MIN; since then +overflow is INT64_MAX and NaN is 0, which is
+#      why the length guards in group B1 exist.
 #
 # Runs against the shipped bundle (dist/naad.cyr), i.e. exactly the surface a
 # consumer links. Regenerate with `cyrius distlib` after changing src/.
@@ -109,7 +112,8 @@ test_group("A6: coefficient chain never publishes NaN");
 var a6f = filter_biquad_new(NAAD_FILTER_LOWPASS, f64_from(44100), f64_from(1000), H_ONE);
 BiquadFilter_set_filter_type(a6f, 8);
 filter_biquad_compute_coefficients(a6f);
-assert_eq(naad_is_finite(filter_biquad_process_sample(a6f, H_C0_5)), 1, "unknown type -> unity pass-through, not NaN");
+assert_eq(naad_is_finite(filter_biquad_process_sample(a6f, H_C0_5)),
+  1, "unknown type -> unity pass-through, not NaN");
 
 # ================================================================
 # A7 -- tuning_table_custom validated ratio VALUES but not the COUNT. The
@@ -132,8 +136,9 @@ assert_eq(naad_is_err(tuning_table_custom("thirteen", a7r, f64_from(440))), 1,
   "13 ratios rejected (!= 12, not just non-empty)");
 
 # ================================================================
-# A8 -- the f64_to truncation cluster. Rust's `as usize` SATURATES; f64_to
-# overflows to INT64_MIN, which no one-sided clamp catches.
+# A8 -- the f64_to truncation cluster. Rust's `as usize` SATURATES; f64_to does
+# not. These were written against the pre-6.6.8 cast, where every overflow and
+# NaN came back INT64_MIN.
 #
 # NOTE the buffer lengths below are deliberately NON-POWER-OF-TWO. INT64_MIN %
 # 1024 == 0, so with a power-of-two length the pre-fix code lands on index 0 and
@@ -270,6 +275,114 @@ while (a5i < 64) {
 assert_eq(vec_len(fit_polynomial(a5sx, a5sy, 2)), 3, "control: small inputs still fit");
 assert_eq(vec_len(fit_polynomial(a5sx, a5sy, 0 - 1)), 0, "control: negative degree still rejected");
 assert_eq(vec_len(fit_polynomial(a5sx, a5sy, 64)), 0, "control: fewer samples than coefficients still rejected");
+
+# ================================================================
+# B0 -- the toolchain contracts the port leans on. A move here is a bump's
+# semantic change, so it should fail by name rather than as a mystery below.
+# ================================================================
+test_group("B0: cyrius >= 6.6.8 float contracts");
+var B_PINF = 0x7FF0000000000000;
+var B_NINF = 0xFFF0000000000000;
+var B_NAN  = 0x7FF8000000000000;
+var B_HUGE = 0x7FEFFFFFFFFFFFFF;   # f64::MAX
+var B_TINY = 0x0000000000000001;   # smallest subnormal
+var B_I64_MAX = 9223372036854775807;
+assert_eq(f64_to(B_PINF), B_I64_MAX, "f64_to(+Inf) saturates to INT64_MAX");
+assert_eq(f64_to(B_HUGE), B_I64_MAX, "f64_to(f64::MAX) saturates to INT64_MAX");
+assert_eq(f64_to(B_NINF), 0 - B_I64_MAX - 1, "f64_to(-Inf) saturates to INT64_MIN");
+assert_eq(f64_to(B_NAN), 0, "f64_to(NaN) is 0, as Rust's `as` gives");
+assert_eq(f64_neg(0), 0x8000000000000000, "f64_neg(+0) is -0, as Rust's unary minus gives");
+
+# ================================================================
+# B1 -- length casts that a saturating f64_to opened. 2.2.4 on cyrius 6.6.3
+# returned from every call below, because +Inf cast to INT64_MIN and landed on
+# a floor. From 6.6.8 the same input casts to INT64_MAX and walks past that
+# floor: an abort at VEC_CAP_MAX, a 2^63-iteration pluck, an out-of-bounds lag.
+# The whole suite stayed green through that move. ADR-0004.
+# ================================================================
+test_group("B1: delay_len_overflows bounds the length, not the value");
+var B_CAP = f64_from(VEC_CAP_MAX);
+assert_eq(delay_len_overflows(f64_sub(B_CAP, H_ONE)), 0, "one under the vec cap still builds");
+assert_eq(delay_len_overflows(B_CAP), 1, "the vec cap itself is refused");
+assert_eq(delay_len_overflows(B_PINF), 1, "+Inf is refused");
+assert_eq(delay_len_overflows(B_HUGE), 1, "f64::MAX is refused");
+assert_eq(delay_len_overflows(B_NAN), 0, "NaN casts to 0 and floors to 1, as Rust does");
+assert_eq(delay_len_overflows(B_NINF), 0, "-Inf casts low and floors to 1, as Rust does");
+
+test_group("B1: reverb refuses an unbuildable delay");
+var B_SR = f64_from(44100);
+assert_eq(reverb_new(F64_HALF, F64_HALF, B_PINF, F64_HALF, B_SR), NAAD_ERR_BUFFER_OVERFLOW, "+Inf pre-delay");
+assert_eq(reverb_new(F64_HALF, F64_HALF, B_HUGE, F64_HALF, B_SR), NAAD_ERR_BUFFER_OVERFLOW, "f64::MAX pre-delay");
+# Pre-delay 0 here: a non-zero one overflows first and hides the comb bound.
+assert_eq(reverb_new(F64_HALF, F64_HALF, 0, F64_HALF, B_HUGE), NAAD_ERR_BUFFER_OVERFLOW, "f64::MAX sample rate");
+assert_gt(reverb_new(F64_HALF, F64_HALF, f64_from(100), F64_HALF, B_SR), 0, "control: an ordinary reverb builds");
+assert_gt(reverb_new(F64_HALF, F64_HALF, B_NAN, F64_HALF, B_SR), 0, "control: NaN pre-delay still builds");
+
+test_group("B1: chorus and flanger refuse an unbuildable delay");
+assert_eq(effects_chorus_new(2, B_PINF, H_ONE, H_ONE, F64_HALF, B_SR),
+  NAAD_ERR_BUFFER_OVERFLOW, "chorus +Inf base delay");
+assert_eq(effects_chorus_new(2, H_ONE, B_PINF, H_ONE, F64_HALF, B_SR), NAAD_ERR_BUFFER_OVERFLOW, "chorus +Inf depth");
+assert_eq(effects_chorus_new(2, H_ONE, H_ONE, H_ONE, F64_HALF, B_HUGE),
+  NAAD_ERR_BUFFER_OVERFLOW, "chorus f64::MAX sample rate");
+assert_eq(effects_flanger_new(B_PINF, H_ONE, H_ONE, F64_HALF, F64_HALF, B_SR),
+  NAAD_ERR_BUFFER_OVERFLOW, "flanger +Inf base delay");
+assert_eq(effects_flanger_new(H_ONE, B_PINF, H_ONE, F64_HALF, F64_HALF, B_SR),
+  NAAD_ERR_BUFFER_OVERFLOW, "flanger +Inf depth");
+assert_eq(effects_flanger_new(H_ONE, H_ONE, H_ONE, F64_HALF, F64_HALF, B_HUGE),
+  NAAD_ERR_BUFFER_OVERFLOW, "flanger f64::MAX sample rate");
+assert_gt(effects_chorus_new(2, f64_from(20), f64_from(5), H_ONE, F64_HALF, B_SR),
+  0, "control: an ordinary chorus builds");
+assert_gt(effects_flanger_new(f64_from(5), f64_from(2), H_ONE, F64_HALF, F64_HALF, B_SR),
+  0, "control: an ordinary flanger builds");
+
+test_group("B1: physical models refuse an unbuildable period");
+assert_eq(physical_ks_new(B_TINY, F64_HALF, F64_HALF, B_SR),
+  NAAD_ERR_BUFFER_OVERFLOW, "Karplus-Strong subnormal frequency");
+assert_eq(physical_ks_new(H_ONE, F64_HALF, F64_HALF, B_HUGE),
+  NAAD_ERR_BUFFER_OVERFLOW, "Karplus-Strong f64::MAX sample rate");
+assert_eq(physical_wg_new(B_TINY, F64_HALF, B_SR), NAAD_ERR_BUFFER_OVERFLOW, "waveguide subnormal frequency");
+assert_eq(physical_wg_new(H_ONE, F64_HALF, B_HUGE), NAAD_ERR_BUFFER_OVERFLOW, "waveguide f64::MAX sample rate");
+
+test_group("B1: a pluck past any buffer stops instead of writing 2^63 samples");
+var b_ks = physical_ks_new(f64_from(440), F64_HALF, F64_HALF, B_SR);
+assert_eq(physical_ks_pluck(b_ks), NAAD_ERR_NONE, "control: an ordinary pluck succeeds");
+assert_eq(physical_ks_set_frequency(b_ks, B_TINY),
+  NAAD_ERR_NONE, "set_frequency still takes what validate_frequency takes");
+assert_eq(physical_ks_pluck(b_ks), NAAD_ERR_BUFFER_OVERFLOW, "the pluck reports it");
+assert_eq(physical_ks_next_sample(b_ks), 0, "and the string is left silent");
+# A lower pitch than the line was built for is legal and still walks the oracle's
+# whole burst, so the guard must not cap at the line's own length.
+var b_ks2 = physical_ks_new(f64_from(440), F64_HALF, F64_HALF, B_SR);
+assert_eq(physical_ks_set_frequency(b_ks2, f64_from(110)), NAAD_ERR_NONE, "control: a lower pitch is accepted");
+assert_eq(physical_ks_pluck(b_ks2), NAAD_ERR_NONE, "control: and it plucks");
+
+test_group("B1: the FDN refuses a room goonj would clamp");
+var B_D = f64_from(5);
+var B_FAR = f64_from(500000);      # 500 km: past FDN_MAX_DELAY_SAMPLES at 48 kHz
+assert_eq(naad_fdn_reverb_new(B_PINF, B_D, B_D, H_ONE, 48000, F64_HALF), NAAD_ERR_COMPUTATION, "+Inf length");
+assert_eq(naad_fdn_reverb_new(B_D, B_PINF, B_D, H_ONE, 48000, F64_HALF), NAAD_ERR_COMPUTATION, "+Inf width");
+assert_eq(naad_fdn_reverb_new(B_D, B_D, B_PINF, H_ONE, 48000, F64_HALF), NAAD_ERR_COMPUTATION, "+Inf height");
+assert_eq(naad_fdn_reverb_new(B_HUGE, B_D, B_D, H_ONE, 48000, F64_HALF), NAAD_ERR_COMPUTATION, "f64::MAX length");
+assert_eq(naad_fdn_reverb_new(B_FAR, B_D, B_D, H_ONE, 48000, F64_HALF),
+  NAAD_ERR_COMPUTATION, "finite, and still past the clamp");
+assert_gt(naad_fdn_reverb_new(f64_from(10), B_D, f64_from(3), H_ONE, 48000, F64_HALF),
+  0, "control: an ordinary room builds");
+
+test_group("B1: detect_pitch_autocorr survives a saturated lag");
+var b_sig = vec_new();
+var b_i = 0;
+while (b_i < 2048) {
+    vec_push(b_sig, f64_sin(f64_div(f64_mul(F64_TAU, f64_from(440 * b_i)), B_SR)));
+    b_i = b_i + 1;
+}
+assert_eq(detect_pitch_autocorr(b_sig, B_HUGE, f64_from(50), f64_from(2000)),
+  f64_neg(H_ONE), "a saturated min_lag is an empty range");
+# A saturated max_lag clamps to the buffer, which is what Rust's `as usize` then
+# `.min(n - 1)` does. Below 6.6.8 this read as an empty range and gave no pitch.
+var b_low = detect_pitch_autocorr(b_sig, B_SR, H_ONE, f64_from(2000));
+assert_gt(b_low, 0, "control: the search finds a pitch");
+assert_eq(detect_pitch_autocorr(b_sig, B_SR, B_TINY, f64_from(2000)),
+  b_low, "a saturated max_lag matches the widest ordinary range");
 
 var rc = assert_summary();
 syscall(60, rc);

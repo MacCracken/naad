@@ -309,10 +309,10 @@ fn naad_convolution_process_block(self, input, output) {
     }
 
     # Forward FFT both. Fall back to direct convolution on failure.
-    var e1 = num_fft(ir_buf, fft_len);
-    if (e1 != 0) { return naad_convolution_process_block_direct(self, input, output); }
-    var e2 = num_fft(in_buf, fft_len);
-    if (e2 != 0) { return naad_convolution_process_block_direct(self, input, output); }
+    var ir_tag, ir_err = num_fft(ir_buf, fft_len);
+    if (is_err_result(ir_tag) == 1) { return naad_convolution_process_block_direct(self, input, output); }
+    var in_tag, in_err = num_fft(in_buf, fft_len);
+    if (is_err_result(in_tag) == 1) { return naad_convolution_process_block_direct(self, input, output); }
 
     # Pointwise multiply in the frequency domain into prod (struct-owned).
     var prod = ConvolutionReverb_scratch_product(self);
@@ -331,8 +331,8 @@ fn naad_convolution_process_block(self, input, output) {
     }
 
     # Inverse FFT. Fall back to direct convolution on failure.
-    var e3 = num_ifft(prod, fft_len);
-    if (e3 != 0) { return naad_convolution_process_block_direct(self, input, output); }
+    var ifft_tag, ifft_err = num_ifft(prod, fft_len);
+    if (is_err_result(ifft_tag) == 1) { return naad_convolution_process_block_direct(self, input, output); }
 
     # Extract the VALID window and apply the mix. The first `lead` outputs are the
     # circular-convolution wraparound and are discarded; the linear result for

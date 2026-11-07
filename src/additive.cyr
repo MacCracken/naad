@@ -220,7 +220,8 @@ fn additive_compress_amplitudes_dct(self, num_coeffs) {
         i = i + 1;
     }
 
-    if (num_dct(buf, n) != NAAD_ERR_NONE) { return NAAD_ERR_COMPUTATION; }
+    var dct_tag, dct_err = num_dct(buf, n);
+    if (is_err_result(dct_tag) == 1) { return NAAD_ERR_COMPUTATION; }
 
     var keep = num_coeffs;
     if (keep < 1) { keep = 1; }
@@ -261,7 +262,8 @@ fn additive_restore_amplitudes_dct(self, coeffs) {
         j = j + 1;
     }
 
-    if (num_idct(padded, n) != NAAD_ERR_NONE) { return NAAD_ERR_COMPUTATION; }
+    var idct_tag, idct_err = num_idct(padded, n);
+    if (is_err_result(idct_tag) == 1) { return NAAD_ERR_COMPUTATION; }
 
     var nyquist = f64_mul(AdditiveSynth_sample_rate(self), F64_HALF);
     var fundamental = AdditiveSynth_fundamental(self);

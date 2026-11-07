@@ -233,6 +233,7 @@ fn _db_lut() {
     return t;
 }
 
+# dB to linear amplitude through the interpolated table, clamped to its dB range.
 #must_use
 fn db_to_amplitude_lut(db) {
     var table = _db_lut();
@@ -241,8 +242,8 @@ fn db_to_amplitude_lut(db) {
     var normalized = f64_div(f64_sub(db, DB_LUT_MIN), DB_LUT_RANGE);
     var idx = f64_mul(normalized, f64_from(255));
     # Two-sided, matching Rust's saturating `idx as usize`
-    # (rust-old/src/dsp_util.rs:645-650); f64_to overflows to INT64_MIN where
-    # Rust saturates to 0. A NaN idx still yields NaN out -- Rust computes
+    # (rust-old/src/dsp_util.rs:645-650); f64_to keeps a negative value negative
+    # where Rust saturates to 0. A NaN idx still yields NaN out -- Rust computes
     # table[0]*(1-NaN) + table[1]*NaN = NaN -- so this is parity, not a
     # clamp-to-table[0].
     var i0 = f64_to(idx);

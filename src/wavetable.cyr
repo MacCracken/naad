@@ -159,8 +159,8 @@ fn wavetable_read_interpolated(self, phase) {
     var index_floor = f64_floor(index);
     var frac = f64_sub(index, index_floor);
 
-    # Rust's `as usize` SATURATES (NaN -> 0, negative -> 0); f64_to overflows
-    # to INT64_MIN, which no one-sided clamp catches. Saturate at the cast.
+    # Rust's `as usize` takes a negative value to 0; f64_to keeps it negative.
+    # Saturate at the cast. +overflow is INT64_MAX and `% n` keeps it in range.
     var floor_i = f64_to(index_floor);
     if (floor_i < 0) { floor_i = 0; }
     var i0 = floor_i % n;
@@ -420,8 +420,8 @@ fn wavetable_morph_next_sample(self) {
         sample = wavetable_read_interpolated(vec_get(tables, 0), phase);
     } else {
         var scaled = f64_mul(MorphWavetable_position(self), f64_from(num_tables - 1));
-        # Rust's `as usize` SATURATES (NaN -> 0, negative -> 0); f64_to overflows
-        # to INT64_MIN, which no one-sided clamp catches. Saturate at the cast.
+        # Rust's `as usize` takes a negative value to 0; f64_to keeps it negative.
+        # Saturate at the cast, on both sides: f64_to gives INT64_MAX on +overflow.
         var idx_low = f64_to(f64_floor(scaled));
         if (idx_low < 0) { idx_low = 0; }
         if (idx_low > num_tables - 2) {
@@ -481,8 +481,8 @@ fn wavetable_morph_next_sample_smooth(self) {
     if (naad_is_finite(sample) == 0) {
         # Defensive linear fallback (mirrors next_sample's two-table blend).
         var scaled = f64_mul(position, f64_from(num_tables - 1));
-        # Rust's `as usize` SATURATES (NaN -> 0, negative -> 0); f64_to overflows
-        # to INT64_MIN, which no one-sided clamp catches. Saturate at the cast.
+        # Rust's `as usize` takes a negative value to 0; f64_to keeps it negative.
+        # Saturate at the cast, on both sides: f64_to gives INT64_MAX on +overflow.
         var idx_low = f64_to(f64_floor(scaled));
         if (idx_low < 0) { idx_low = 0; }
         if (idx_low > num_tables - 2) { idx_low = num_tables - 2; }

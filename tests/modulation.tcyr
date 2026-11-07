@@ -146,7 +146,9 @@ var MT_NEG_1   = 0xBFF0000000000000;   # -1.0
 var MT_TOL15   = 0x3CD203AF9EE75616;   # 1e-15
 var MT_TOL12   = 0x3D719799812DEA11;   # 1e-12
 var MT_NAN     = 0x7FF8000000000000;   # NaN (quiet)
-# sin(TAU * 440/44100) = 0.06264832417874368 -- the unmodulated second FM sample
+# sin(TAU * 440/44100) = 0.06264832417874368 -- the unmodulated second FM sample,
+# correctly rounded, as libm and so the oracle give it. cyrius's fdlibm f64_sin
+# (x86 since 6.6.9) lands one ulp above it, within that sin's <= 1 ulp contract.
 var MT_SIN_440 = 0x3FB009B8777F3581;
 # The oracle's initial sample-and-hold value: rng = 42; three xorshift steps
 # -> 11355432; (11355432 / u32::MAX) * 2 - 1 = -0.9947122149157134.
@@ -423,7 +425,9 @@ assert_eq(b1, 0, "the first FM sample is exactly +0.0 (carrier phase 0)");
 # The modulator's first output is sin(0) == 0, so the deviation is 0 and the
 # second sample is an unmodulated sin(TAU * 440/44100).
 var b2 = modulation_fm_next_sample(fm_b);
-assert_eq(b2, MT_SIN_440, "the second FM sample is sin(TAU*440/44100)");
+assert_eq(b2, f64_sin(f64_mul(f64_div(f64_from(440), f64_from(44100)), F64_TAU)),
+  "the second FM sample is exactly the unmodulated sin");
+assert(b2 - MT_SIN_440 >= 0 - 1 && b2 - MT_SIN_440 <= 1, "the second FM sample is within 1 ulp of libm's");
 assert_neq(b2, 0, "the second FM sample is not stuck at zero");
 
 # mod_index 0 must degenerate to a plain sine oscillator, bit for bit: the

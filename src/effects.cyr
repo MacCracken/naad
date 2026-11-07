@@ -50,7 +50,9 @@ fn effects_chorus_new(num_voices, base_delay_ms, depth_ms, rate, mix, sample_rat
 
     var base_delay = f64_div(f64_mul(base_delay_ms, sample_rate), f64_from(1000));
     var depth = f64_div(f64_mul(depth_ms, sample_rate), f64_from(1000));
-    var max_delay = f64_to(f64_add(f64_add(base_delay, depth), F64_ONE));
+    var max_delay_f = f64_add(f64_add(base_delay, depth), F64_ONE);
+    if (delay_len_overflows(max_delay_f) == 1) { return NAAD_ERR_BUFFER_OVERFLOW; }
+    var max_delay = f64_to(max_delay_f);
 
     var delay_lines = vec_new();
     var lfos = vec_new();
@@ -126,7 +128,9 @@ fn effects_flanger_new(base_delay_ms, depth_ms, rate, feedback, mix, sample_rate
 
     var base_delay = f64_div(f64_mul(base_delay_ms, sample_rate), f64_from(1000));
     var depth = f64_div(f64_mul(depth_ms, sample_rate), f64_from(1000));
-    var max_delay = f64_to(f64_add(f64_add(base_delay, depth), F64_ONE));
+    var max_delay_f = f64_add(f64_add(base_delay, depth), F64_ONE);
+    if (delay_len_overflows(max_delay_f) == 1) { return NAAD_ERR_BUFFER_OVERFLOW; }
+    var max_delay = f64_to(max_delay_f);
 
     var lfo = osc_new(WAVEFORM_SINE, f64_max(rate, EFFECTS_C0_01), sample_rate);
     if (naad_is_err(lfo) == 1) { return lfo; }

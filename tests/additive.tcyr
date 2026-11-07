@@ -158,7 +158,8 @@ var p10 = AdditiveSynth_partials(s10);
 var dbuf = alloc(8 * 8);
 var jd = 0;
 while (jd < 8) { store64(dbuf + jd * 8, C0_5); jd = jd + 1; }
-assert_eq(num_dct(dbuf, 8), NAAD_ERR_NONE, "hisab dct ok");
+var dct10_tag, dct10_val = num_dct(dbuf, 8);
+assert_eq(is_ok(dct10_tag), 1, "hisab dct ok");
 var coeffs10 = vec_new();
 jd = 0;
 while (jd < 8) { vec_push(coeffs10, load64(dbuf + jd * 8)); jd = jd + 1; }
