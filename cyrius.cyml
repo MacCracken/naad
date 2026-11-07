@@ -5,7 +5,7 @@ description = "naad — audio synthesis primitives (oscillators, filters, envelo
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/naad"
 language = "cyrius"
-cyrius = "6.7.9"
+cyrius = "6.7.18"
 
 [build]
 entry = "src/main.cyr"
@@ -100,8 +100,8 @@ stdlib = [
 # physical, wavetable) and HComplex + num_fft/num_ifft/num_dct/num_idct/
 # num_rk4/calc_bspline/calc_catmull_rom (dsp_spectral, additive, wavetable)
 # from the single distlib bundle, same pattern goonj uses. Pinned to the
-# released tag for reproducible builds. 3.4.0 is the hisab pinned to exactly
-# cyrius 6.7.9, and 3.4.1 needs 6.7.18.
+# released tag for reproducible builds. 3.4.1 pins exactly cyrius 6.7.18 and
+# declares sakshi 2.5.10, the copy 6.7.18 folds.
 #   NOTE the least-squares path (`ganita_mat_*`, used by `fit_polynomial`)
 #   is NOT hisab's — it comes from the stdlib `ganita` leaf declared in
 #   [deps].stdlib above. `lib/hisab.cyr` defines no `ganita_mat_*`. Earlier
@@ -109,16 +109,16 @@ stdlib = [
 #   to hisab; that is where the 2.1.2 null-deref actually originated.
 [deps.hisab]
 git = "https://github.com/MacCracken/hisab.git"
-tag = "3.4.0"
+tag = "3.4.1"
 modules = ["dist/hisab.cyr"]
 
 # goonj — acoustics engine. Consumed by the `acoustics/*` wrapper modules
 # (room, impulse, binaural, material, analysis, coupled, portal, fdn,
 # directivity, ambisonics). Its bundle references sakshi (goonj's logging)
 # + hisab; both resolve from naad's own deps (sakshi arrives transitively
-# via hisab). Pinned to the released tag. 2.1.0 is the goonj pinned to exactly
-# cyrius 6.7.9 and pins hisab 3.4.0, so the two agree; 2.1.1 onward needs 6.7.18.
+# via hisab). Pinned to the released tag. 2.3.1 pins cyrius 6.7.18 and hisab
+# 3.4.1, so the two agree.
 [deps.goonj]
 git = "https://github.com/MacCracken/goonj.git"
-tag = "2.1.0"
+tag = "2.3.1"
 modules = ["dist/goonj.cyr"]

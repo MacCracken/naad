@@ -69,8 +69,8 @@ struct FdnReverb {
 # NAAD_ERR_COMPUTATION if any parameter is out of range, which includes a room
 # whose delay reaches goonj's FDN_MAX_DELAY_SAMPLES (about 412 km at 48 kHz, and
 # every non-finite dimension). goonj clamps there and asks its consumers to
-# refuse such rooms first: the clamped lines would still take gigabytes and can
-# end the process. ADR-0004. Ports FdnReverb::new.
+# refuse such rooms first: the clamped lines take about 5.5 GiB of address space,
+# and goonj ends the process if that is refused. ADR-0004. Ports FdnReverb::new.
 # ================================================================
 #must_use
 fn naad_fdn_reverb_new(room_length, room_width, room_height, target_rt60, sample_rate, mix) {

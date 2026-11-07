@@ -79,6 +79,12 @@ A third hazard was added by the 2.1.3 sweep:
   `detect_pitch_autocorr`) and refuses rooms goonj would clamp. See
   [ADR-0004](docs/adr/0004-bound-delay-lengths-before-the-cast.md).
 
+⚠ **An untrusted sample rate needs a bound of its own.** Room, convolution and binaural
+impulse responses are sized from it. naad refuses a rate goonj would clamp, but below
+that an IR costs about 165 B per Hz for room and convolution and about 27 B per Hz for
+binaural, and running out of that memory ends the process. A 32 MHz room fails under a
+4 GiB limit.
+
 2.1.3 also closed the largest availability issue: `lib/alloc.cyr` is a bump
 allocator with **no individual free**, so a per-call allocation on a streaming
 path is a permanent leak. `naad_convolution_process_block` was allocating three

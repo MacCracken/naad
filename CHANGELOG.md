@@ -5,6 +5,82 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.1] - Newest cyrius, hisab and goonj
+
+Toolchain and dependency release. `cyrius` 6.7.9 -> **6.7.18**, `hisab` 3.4.0 -> **3.4.1**,
+`goonj` 2.1.0 -> **2.3.1**, `sakshi` 2.5.8 -> **2.5.10** (transitive); ganita stays 1.2.15.
+Each is its project's newest tag, and they agree: hisab 3.4.1 and goonj 2.3.1 pin exactly
+6.7.18. **No result on valid input moves, and the consumer floor stays cyrius 6.7.2.** One
+fix came out of checking the new goonj: a sample rate goonj would clamp is now refused.
+
+### Fixed
+
+- **An impulse response goonj would clamp is refused instead of ending the process.**
+  `naad_room_reverb_new`, `naad_convolution_from_room` and `naad_binaural_new` forwarded
+  any positive `sample_rate`. goonj caps an IR at `MAX_IR_SAMPLES` (115.2M samples) and
+  returns fewer samples than were asked for, but only after allocating eight bands of
+  them: over 14 GiB, ending with `vec: alloc failed` under a 16 GiB limit. These now return
+  `NAAD_ERR_COMPUTATION` in under 0.1 s, from 115.2 MHz for room and convolution (a 1.0 s
+  IR) and from 384 MHz for binaural (0.3 s). 2.3.0 had the same abort, so this is not a
+  regression. New `naad_room_ir_overflows` and `naad_binaural_ir_overflows`. Rust clamps
+  here and returns the short IR; refusing is a recorded divergence, in
+  [ADR-0004](docs/adr/0004-bound-delay-lengths-before-the-cast.md).
+
+### Changed
+
+- **Eleven hostile inputs give a different result**, all from goonj 2.1.3's hardening, which
+  moved NaN and `Inf` handling toward Rust. Each still returns. They are a NaN source or
+  listener position and a +Inf room dimension through `naad_room_reverb_new` and
+  `naad_convolution_from_room`, and a NaN height through `naad_fdn_reverb_new`. The slowest
+  of them, a +Inf room length, drops from 11 s to 0.07 s.
+- **A refused allocation inside goonj now ends the process**, with
+  `goonj: allocation refused`, at the sizes that depend on input. The sweep below reached no
+  such exit, but a consumer that handles allocation failure should know about it.
+- **`naad_fdn_reverb_new` keeps refusing rooms goonj would clamp**, and only its comment
+  moves. A capped delay line now costs about 5.5 GiB of address space instead of resident
+  gigabytes, and goonj still asks consumers to refuse these rooms first.
+- **`lib/simd.cyr` joins `lib/`**, pulled in by goonj's row kernels. Consumers get it through
+  `dist/goonj.deps`.
+- **Size:** `dist/hisab.cyr` grows 2.64 -> 3.66 MB, and the smoke binary 2.16 -> 2.70 MB.
+
+### Known
+
+- ⚠ **Below the clamp an IR still costs memory, and running out of it ends the process.**
+  Measured: about 165 B per Hz of rate for room and convolution, and about 27 B per Hz for
+  binaural. A 16 MHz room builds in 2.5 GiB, and a 32 MHz one fails under a 4 GiB limit.
+  That is a valid request meeting a machine's limit, which ends a Rust process too, so no
+  bound here can remove it. A consumer forwarding an untrusted rate should cap it first.
+
+### Verified
+
+- **Audio output is byte-identical to 2.3.0**, over the same 103-stream, 94,731-value sweep.
+- **Hostile input.** A new sweep drives every numeric parameter of the goonj-backed
+  wrappers (room, convolution, binaural, FDN, coupled rooms, analysis, directivity,
+  ambisonics) through NaN, ±Inf, 0, -1, f64::MAX, the smallest subnormal and 1e9, and
+  integer rates up to `INT64_MAX`, each in its own limited process on both trees. All 344
+  cases now return: 321 are identical, 11 are the moves above, and 12 are the aborts fixed
+  above. None newly crashes or hangs.
+- **Library changes.** Of everything naad calls, 15 functions changed in body, and none on
+  valid input: guards on NaN, negative rates or negative lengths, `goonj_fmax` for `f64_max`,
+  a stable sort, and goonj's FDN storage. `fdn_reset` now clears only what was written, and
+  `tests/acoustics_fdn.tcyr` confirms a reset still clears every line. That is the path
+  goonj broke at 2.1.3 and repaired at 2.3.1 after reading naad's suite.
+- **The language changes do not reach naad's source.** 6.7.10 to 6.7.18 change structs by
+  value, multi-value receives, generics, vectors and pointers. naad has no type annotations,
+  enums, `for` loops, float literals, method calls or pointer dereferences.
+- **Consumer floor re-measured.** A from-scratch consumer builds and runs on 6.7.2, 6.7.3,
+  6.7.9 and 6.7.18, and 6.7.1 fails at compile time.
+- **The guards hold.** All 15 hazard probes match 2.3.0, and reverting each of the 15
+  guards fails or hangs `tests/hardening.tcyr`: the ten from 2.2.5 and the five here, whose
+  rows sit exactly on the clamp.
+- `lib/`: 34 of 36 files are byte-identical to the 6.7.18 snapshot, the other two are the
+  git+tag bundles, each byte-identical to its tag's `dist/`, and `cyrius deps --locked`
+  confirms `lib/` and the lock are what the tags resolve.
+- The hotpath benchmarks are flat: 0.985 to 1.000 over six interleaved runs.
+- Tests: **40 suites / 2418 assertions**, `cyrius audit`, `cyrius fuzz`, `cyrius fuzz
+  --poison` (new here), `cyrius deny`, `cyrius distlib --check` and the symbol-collision
+  gate all clean.
+
 ## [2.3.0] - Onto the cyrius 6.7.x language minor
 
 Toolchain and dependency release. `cyrius` 6.6.20 -> **6.7.9**, `hisab` 3.3.7 ->

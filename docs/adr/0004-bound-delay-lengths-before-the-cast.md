@@ -30,6 +30,12 @@ The test suite passed through all of this. It never drove these inputs: the port
 suites inherit the oracle's positive cases, and the negative sweep had no
 floor-only length row.
 
+2.3.1 added the same shape on the integer side. `naad_room_reverb_new`,
+`naad_convolution_from_room` and `naad_binaural_new` forward any positive `sample_rate`.
+goonj caps an impulse response at `MAX_IR_SAMPLES` (115.2M samples), but only after
+filling eight bands of them, so a rate at the cap took over 14 GiB and ended the process
+under a 16 GiB limit.
+
 The oracle is not a useful reference here. On these inputs Rust panics at
 `vec![0.0; usize::MAX]`, or spins in `pluck`, and in release builds the
 `min_lag + 2` overflow wraps. naad's old result, a 1-sample line for an infinite
@@ -51,6 +57,10 @@ constructor reports an error rather than building something it cannot honour.**
   code, when any delay reaches `FDN_MAX_DELAY_SAMPLES`.
 - `detect_pitch_autocorr` compares `min_lag >= max_lag - 2`, which cannot overflow,
   and returns its usual no-pitch value.
+- `naad_room_reverb_new`, `naad_convolution_from_room` and `naad_binaural_new` return
+  `NAAD_ERR_COMPUTATION`, their existing out-of-range code, when the IR would reach
+  `MAX_IR_SAMPLES`, through `naad_room_ir_overflows` and `naad_binaural_ir_overflows`.
+  That is the same rule as the FDN row: refuse what goonj would clamp.
 
 `NaN` still builds. It casts to 0 and floors to 1, which is what Rust's `as usize`
 gives, so `delay_len_overflows` answers 0 for it deliberately.
@@ -68,6 +78,18 @@ gives, so `delay_len_overflows` answers 0 for it deliberately.
   becoming an error, which is the port's standing convention.
 - **Neutral** — a line just under `VEC_CAP_MAX` is 2 GiB of samples and can still
   fail in `alloc`. This bound answers "can a vec hold it", not "is there memory".
+- **Neutral** — goonj 2.1.3 made a capped FDN line zeroed memory that costs nothing until
+  it is used, so the `naad_fdn_reverb_new` row now costs about 5.5 GiB of address space
+  and ends the process only where that is refused. The refusal stands, and goonj still
+  asks consumers to make it.
+- **Negative** — at and past the clamp, Rust returns a shorter IR than was asked for,
+  in about 3.7 GiB of lazily zeroed f32. naad refuses instead. A short IR is a silent
+  wrong answer, and it would cost over 14 GiB here. This diverges from the oracle.
+- **Known limit** — this bounds what a request can mean, not what a machine can hold.
+  Below the clamp an IR costs about 165 B per Hz of rate for room and convolution and
+  about 27 B per Hz for binaural, and running out of that ends the process, as an
+  allocation failure does in Rust. A 32 MHz room fails under a 4 GiB limit. A lower bound
+  would refuse rates that work on a larger machine, so it is not made here.
 
 ## Alternatives considered
 
@@ -81,5 +103,6 @@ gives, so `delay_len_overflows` answers 0 for it deliberately.
   finite overflow such as f64::MAX, and adds a gate the oracle has no equivalent of
   even for `NaN`, which Rust accepts here.
 - **Leave it.** Rust dies on these inputs too, so an abort has a claim to parity. But
-  naad's 2.1.3 sweep made "a numeric input never ends the process" the contract, and
-  shipping a toolchain bump that quietly withdrew it is not a decision anyone made.
+  naad's 2.1.3 sweep set out to make "a numeric input never ends the process" the
+  contract, and shipping a toolchain bump that quietly withdrew it is not a decision
+  anyone made.

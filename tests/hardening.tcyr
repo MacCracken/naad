@@ -384,5 +384,43 @@ assert_gt(b_low, 0, "control: the search finds a pitch");
 assert_eq(detect_pitch_autocorr(b_sig, B_SR, B_TINY, f64_from(2000)),
   b_low, "a saturated max_lag matches the widest ordinary range");
 
+# ================================================================
+# B2 -- an impulse response goonj would clamp. goonj caps an IR at
+# MAX_IR_SAMPLES and hands back fewer samples than were asked for, having spent
+# tens of gigabytes getting there. These refuse before any of that is allocated,
+# so the boundary rows can sit at the clamp without paying for it. ADR-0004.
+# ================================================================
+test_group("B2: the room IR boundary is goonj's clamp");
+# A valid concrete room config at `rate`, so only the rate can be refused.
+fn b_room_cfg(rate) {
+    return naad_room_reverb_config_new(f64_from(10), f64_from(5), f64_from(3), "concrete",
+      hvec3_new(f64_from(2), H_ONE, H_ONE), hvec3_new(f64_from(5), f64_from(2), H_ONE), rate);
+}
+var B_I31 = 2147483648;
+var B_ERR = NAAD_ERR_COMPUTATION;
+assert_eq(MAX_IR_SAMPLES, 192000 * 600, "the clamp is still 600 s at 192 kHz");
+assert_eq(naad_room_ir_overflows(b_room_cfg(MAX_IR_SAMPLES - 1)), 0, "one under the clamp is an IR");
+assert_eq(naad_room_ir_overflows(b_room_cfg(MAX_IR_SAMPLES)), 1, "the clamp itself is refused");
+assert_eq(naad_room_ir_overflows(b_room_cfg(8000)), 0, "control: an ordinary rate is an IR");
+
+test_group("B2: room and convolution refuse a rate goonj would clamp");
+assert_eq(naad_room_reverb_new(b_room_cfg(MAX_IR_SAMPLES)), B_ERR, "room at the clamp");
+assert_eq(naad_room_reverb_new(b_room_cfg(B_I31)), B_ERR, "room at 2^31 Hz");
+assert_eq(naad_room_reverb_new(b_room_cfg(B_I64_MAX)), B_ERR, "room at INT64_MAX Hz");
+assert_eq(naad_convolution_from_room(b_room_cfg(MAX_IR_SAMPLES)), B_ERR, "convolution at the clamp");
+assert_eq(naad_convolution_from_room(b_room_cfg(B_I31)), B_ERR, "convolution at 2^31 Hz");
+assert_eq(naad_convolution_from_room(b_room_cfg(B_I64_MAX)), B_ERR, "convolution at INT64_MAX Hz");
+assert_gt(naad_room_reverb_new(b_room_cfg(8000)), 0, "control: an ordinary room builds");
+assert_gt(naad_convolution_from_room(b_room_cfg(8000)), 0, "control: an ordinary convolution builds");
+
+test_group("B2: binaural refuses a rate goonj would clamp");
+assert_eq(naad_binaural_ir_overflows(384000000), 1, "0.3 s of 384 MHz lands on the clamp in f64");
+assert_eq(naad_binaural_ir_overflows(383999999), 0, "one under it is an IR");
+assert_eq(naad_binaural_ir_overflows(8000), 0, "control: an ordinary rate is an IR");
+assert_eq(naad_binaural_new(H_ONE, F64_HALF, 384000000), B_ERR, "binaural at the clamp");
+assert_eq(naad_binaural_new(H_ONE, F64_HALF, B_I31), B_ERR, "binaural at 2^31 Hz");
+assert_eq(naad_binaural_new(H_ONE, F64_HALF, B_I64_MAX), B_ERR, "binaural at INT64_MAX Hz");
+assert_gt(naad_binaural_new(H_ONE, F64_HALF, 8000), 0, "control: an ordinary binaural processor builds");
+
 var rc = assert_summary();
 syscall(60, rc);

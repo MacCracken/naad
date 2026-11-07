@@ -97,15 +97,28 @@ fn naad_binaural_build_minimal_hrtf(azimuth, elevation, sample_rate) {
 }
 
 # ================================================================
+# naad_binaural_ir_overflows -- 1 if the stereo IR at this rate reaches goonj's
+# MAX_IR_SAMPLES, the length generate_binaural_ir clamps to. It is measured the
+# way goonj measures it, in f64, so the two agree at the boundary. ADR-0004.
+# ================================================================
+#must_use
+fn naad_binaural_ir_overflows(sample_rate) {
+    return f64_ge(f64_mul(BIN_MAX_TIME, f64_from(sample_rate)), f64_from(MAX_IR_SAMPLES));
+}
+
+# ================================================================
 # naad_binaural_new -- create a binaural processor for a source direction.
 # Builds a 6x4x3 concrete shoebox, a minimal HRTF dataset, and generates the
 # stereo IR via goonj. Returns the struct pointer on success or NAAD_ERR_COMPUTATION
-# when sample_rate is not positive. Ports BinauralProcessor::new. (Oracle types
-# sample_rate `u32`; the signed Cyrius port must reject negatives explicitly.)
+# when sample_rate is not positive or the IR would reach MAX_IR_SAMPLES. Below
+# that it still costs about 27 B per Hz of rate, and running out of that memory
+# ends the process. Ports BinauralProcessor::new. (Oracle types sample_rate `u32`;
+# the signed Cyrius port must reject negatives explicitly.)
 # ================================================================
 #must_use
 fn naad_binaural_new(azimuth, elevation, sample_rate) {
     if (sample_rate <= 0) { return NAAD_ERR_COMPUTATION; }
+    if (naad_binaural_ir_overflows(sample_rate) == 1) { return NAAD_ERR_COMPUTATION; }
 
     var room = acoustic_room_shoebox(
       f64_from(6), f64_from(4), f64_from(3), acoustic_material_concrete());

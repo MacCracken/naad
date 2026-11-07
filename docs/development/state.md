@@ -8,6 +8,16 @@
 `VERSION` at the repo root is the source of truth for the current number. The
 entries below are the release record.
 
+**2.3.1** — cyrius 6.7.9 -> **6.7.18**, hisab 3.4.0 -> **3.4.1**, goonj 2.1.0 -> **2.3.1**,
+sakshi 2.5.8 -> **2.5.10** (transitive), ganita 1.2.15. Each is its project's newest tag.
+Output on valid input is byte-identical to 2.3.0, and the consumer floor stays 6.7.2. A
+344-case hostile sweep of the goonj-backed wrappers found no new crash or hang, and 11
+NaN or `Inf` results moved with goonj's hardening. It also found an older abort, now
+fixed: `naad_room_reverb_new`, `naad_convolution_from_room` and `naad_binaural_new` refuse
+a sample rate goonj would clamp, recorded in
+[ADR-0004](../adr/0004-bound-delay-lengths-before-the-cast.md). Suite: **40 suites / 2418
+assertions**.
+
 **2.3.0** — cyrius 6.6.20 -> **6.7.9**, hisab 3.3.7 -> **3.4.0**, goonj 2.0.6 ->
 **2.1.0**, sakshi 2.5.7 -> **2.5.8** (transitive), ganita 1.2.15. No source or test
 change, and output is byte-identical to 2.2.5 over the 94,731-value sweep. The minor is
@@ -245,8 +255,8 @@ coeffs) and per-sample heap allocations eliminated on 4 hot buffer paths
 - **Cyrius pin**: `cyrius.cyml [package].cyrius` is the source of truth — read
   it rather than trusting a number copied into prose. (This line previously
   inlined `6.3.18`, which never matched the committed manifest.)
-- **Moving the pin past 6.7.9 means moving hisab and goonj too**: hisab 3.4.1 and
-  goonj 2.1.1 need 6.7.18.
+- **cyrius, hisab and goonj move together.** hisab and goonj each pin one exact cyrius, so
+  read the tags' manifests before choosing a pin.
 - **Moving a pin**: read `docs/development/ecosystem-migration.md` at the new cyrius
   tag, then `rm lib/*.cyr cyrius.lock; cyrius deps; cyrius deps --locked`, then
   `cyrius distlib`, and diff `lib/` against `~/.cyrius/versions/<pin>/lib`.
@@ -285,9 +295,11 @@ consumed.
 - **sakshi** — not declared directly. It arrives transitively (goonj's logging
   needs it) and is recorded in `cyrius.lock`. The vendored `lib/sakshi.cyr` is
   byte-identical to the toolchain snapshot's copy.
-- **Consumer floor: cyrius 6.7.2.** sakshi 2.5.8 declares its syscall numbers `const`,
-  and goonj pulls sakshi in. Measured with a from-scratch consumer: 6.7.2 builds and
-  runs, 6.7.1 fails at compile time.
+- **Consumer floor: cyrius 6.7.2.** sakshi declares its syscall numbers `const`, and goonj
+  pulls sakshi in. Measured at 2.3.1 with a from-scratch consumer: 6.7.2, 6.7.3, 6.7.9 and
+  6.7.18 build and run, and 6.7.1 fails at compile time.
+- **goonj ends the process on a refused allocation** at sizes that depend on input, with
+  `goonj: allocation refused` (its ADR-0004, since 2.1.3).
 - stdlib leaves are declared in `[deps].stdlib`. There is no `dist/naad.deps`:
   `cyrius distlib` 6.6.18 and later names only what the fold needs beyond its named
   deps, and hisab's and goonj's own `# Requires` blocks bring every leaf. Measured
@@ -371,8 +383,8 @@ Consequences for the port review:
 
 Per-module parity tracked in [`port-audit.md`](port-audit.md). Summary:
 
-**41 / 41 modules ported — PORT COMPLETE** · **2399 assertions green across 40
-suites**, covering **all 441 public fns** (0 untested; 12 `_`-prefixed internal
+**41 / 41 modules ported — PORT COMPLETE** · **2418 assertions green across 40
+suites**, covering **all 443 public fns** (0 untested; 12 `_`-prefixed internal
 helpers are exercised through their public callers) · `dist/naad.cyr` bundle assembled and collision-audited to zero across
 all **759** top-level symbols — `fn`, `var`, `const` and `struct` alike, against
 hisab, goonj, sakshi, abaco and the whole pinned stdlib. The audit was fn-scoped
@@ -451,6 +463,13 @@ goonj's port ("six parallel workflows landed 30 of 37 modules").
 Nothing open in the port itself — 41 / 41 modules are done. The follow-ups
 below are genuinely open; the scheduled view lives in
 [`roadmap.md`](roadmap.md) under *Open gates*.
+
+**Known limit, measured at 2.3.1:**
+
+- **An IR below goonj's clamp still costs memory, and running out of it ends the process.**
+  About 165 B per Hz of rate for room and convolution, about 27 B per Hz for binaural: a
+  16 MHz room builds in 2.5 GiB, and a 32 MHz one fails under a 4 GiB limit. No lower bound
+  than the clamp is set, by decision: it would refuse rates that work on a larger machine.
 
 **Deliberately deferred by 2.1.2:**
 

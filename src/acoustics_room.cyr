@@ -78,12 +78,25 @@ struct RoomReverb {
 }
 
 # ================================================================
+# naad_room_ir_overflows -- 1 if this config's impulse response reaches goonj's
+# MAX_IR_SAMPLES. The room IR is 1.0 s long, so that is its sample rate. goonj
+# clamps there and returns a shorter IR than was asked for, after spending far
+# more memory than the clamp suggests: about 165 B per Hz of rate. ADR-0004.
+# ================================================================
+#must_use
+fn naad_room_ir_overflows(config) {
+    return RoomReverbConfig_sample_rate(config) >= MAX_IR_SAMPLES;
+}
+
+# ================================================================
 # naad_room_reverb_new -- create a room reverb from a config. Builds a
 # shoebox room in goonj, generates a broadband impulse response via
 # image-source + diffuse-rain, and stores it for sample-by-sample
 # convolution. Returns the struct pointer on success, or a negative
-# NAAD_ERR_COMPUTATION if the wall material name is unknown or the room
-# dimensions are not positive. Ports RoomReverb::new.
+# NAAD_ERR_COMPUTATION if the wall material name is unknown, the room
+# dimensions are not positive, or the sample rate reaches MAX_IR_SAMPLES.
+# Below that the IR still costs about 165 B per Hz of rate, and running out of
+# that memory ends the process. Ports RoomReverb::new.
 # ================================================================
 #must_use
 fn naad_room_reverb_new(config) {
@@ -93,6 +106,7 @@ fn naad_room_reverb_new(config) {
     if (f64_le(RoomReverbConfig_length(config), 0) == 1) { return NAAD_ERR_COMPUTATION; }
     if (f64_le(RoomReverbConfig_width(config), 0) == 1) { return NAAD_ERR_COMPUTATION; }
     if (f64_le(RoomReverbConfig_height(config), 0) == 1) { return NAAD_ERR_COMPUTATION; }
+    if (naad_room_ir_overflows(config) == 1) { return NAAD_ERR_COMPUTATION; }
 
     var room = acoustic_room_shoebox(RoomReverbConfig_length(config),
       RoomReverbConfig_width(config), RoomReverbConfig_height(config), material);

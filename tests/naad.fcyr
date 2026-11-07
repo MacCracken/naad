@@ -256,6 +256,27 @@ fn main(): i64 {
         i = i + 1;
     }
 
+    # --- impulse-response sizing: integer rates, the rest VALID. 8000 keeps this
+    # row affordable; the others must refuse before allocating anything, so each
+    # wrapper needs a rate on its OWN clamp. 115.2 MHz is under binaural's 384 MHz
+    # and would really build, about 3 GiB, which can kill a hosted runner silently.
+    i = 0;
+    while (i < 5) {
+        var ir_rate = 8000;
+        if (i == 1) { ir_rate = MAX_IR_SAMPLES; }
+        if (i == 2) { ir_rate = 2147483648; }
+        if (i == 3) { ir_rate = 1099511627776; }
+        if (i == 4) { ir_rate = 9223372036854775807; }
+        var ir_cfg = naad_room_reverb_config_new(f64_from(10), f64_from(5), f64_from(3), "concrete",
+          hvec3_new(f64_from(2), FZ_ONE, FZ_ONE), hvec3_new(f64_from(5), f64_from(2), FZ_ONE), ir_rate);
+        fz_ctor(naad_room_reverb_new(ir_cfg), "room reverb sample rate");
+        fz_ctor(naad_convolution_from_room(ir_cfg), "convolution sample rate");
+        var bin_rate = ir_rate;
+        if (i == 1) { bin_rate = 384000000; }
+        fz_ctor(naad_binaural_new(FZ_ONE, FZ_HALF, bin_rate), "binaural sample rate");
+        i = i + 1;
+    }
+
     # --- spectral: empty, tiny and adversarial-length inputs ---
     i = 0;
     while (i < 40) {
