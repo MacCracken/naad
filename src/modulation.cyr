@@ -44,6 +44,7 @@ var MODULATION_LFO_UNIPOLAR = 1;
 var MODULATION_C0_25 = 0x3FD0000000000000;   # 0.25 (triangle lower knee)
 var MODULATION_C0_75 = 0x3FE8000000000000;   # 0.75 (triangle upper knee)
 var MODULATION_C0_1  = 0x3FB999999999999A;   # 0.1  (FM instantaneous-freq floor)
+var MODULATION_C4    = 0x4010000000000000;   # 4.0  (triangle slope)
 
 # PRNG seed for the LFO sample-and-hold (matches Rust `let mut rng = 42u32`).
 var MODULATION_SH_SEED = 42;
@@ -122,11 +123,11 @@ fn modulation_lfo_raw_sample(self) {
         return f64_sin(f64_mul(t, F64_TAU));
     } elif (shape == MODULATION_LFO_TRIANGLE) {
         if (f64_lt(t, MODULATION_C0_25) == 1) {
-            return f64_mul(f64_from(4), t);
+            return f64_mul(MODULATION_C4, t);
         } elif (f64_lt(t, MODULATION_C0_75) == 1) {
-            return f64_sub(F64_TWO, f64_mul(f64_from(4), t));
+            return f64_sub(F64_TWO, f64_mul(MODULATION_C4, t));
         }
-        return f64_sub(f64_mul(f64_from(4), t), f64_from(4));
+        return f64_sub(f64_mul(MODULATION_C4, t), MODULATION_C4);
     } elif (shape == MODULATION_LFO_SQUARE) {
         if (f64_lt(t, F64_HALF) == 1) { return F64_ONE; }
         return f64_neg(F64_ONE);

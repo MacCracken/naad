@@ -283,5 +283,17 @@ while (vbi < 256) {
 assert(vs_ok, "process_sample == the band-by-band sum, bit for bit");
 assert(vs_any, "the 4-band vocoder produced non-zero output");
 
+# ================================================================
+test_group("band count bounds");
+var vbc_sr = f64_from(44100);
+assert_eq(vocoder_new(0, f64_from(200), f64_from(8000), vbc_sr), NAAD_ERR_INVALID_PARAMETER,
+  "0 bands is refused");
+assert_eq(vocoder_new(0 - 5, f64_from(200), f64_from(8000), vbc_sr), NAAD_ERR_INVALID_PARAMETER,
+  "a negative band count is refused, not a silent zero-band vocoder");
+assert_eq(vocoder_new(VEC_CAP_MAX + 1, f64_from(200), f64_from(8000), vbc_sr), NAAD_ERR_INVALID_PARAMETER,
+  "a band count past what a vec holds is refused before any band is built");
+assert_eq(vocoder_new(4, f64_from(200), f64_from(8000), 0), NAAD_ERR_INVALID_SAMPLE_RATE,
+  "the sample rate is still checked first");
+
 var rc = assert_summary();
 syscall(60, rc);

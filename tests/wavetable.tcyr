@@ -2,7 +2,7 @@
 # Ported from the non-serde #[test] blocks in rust-old/src/wavetable.rs
 # (test_serde_roundtrip dropped -- no serde). f32 tolerances widened to f64.
 # The three `synthesis`-gated next_sample_smooth tests ARE included (bottom):
-# that cubic B-spline morph wraps bspline_eval_1d, so this unit adds
+# that cubic B-spline morph calls into src/dsp_spectral.cyr, so this unit adds
 # lib/hisab.cyr + src/dsp_spectral.cyr ahead of wavetable.
 
 include "lib/hisab.cyr"
@@ -257,7 +257,7 @@ var cv_mb = _cv_table4(0, C0_5, 0, f64_neg(C0_5));
 var cv_mt = vec_new();
 vec_push(cv_mt, cv_ma); vec_push(cv_mt, cv_mb);
 var cv_mo = wavetable_morph_new(cv_mt, F64_ONE, f64_from(4));
-assert_eq(wavetable_morph_tables(cv_mo), cv_mt, "tables() is the vec passed to new()");
+assert_neq(wavetable_morph_tables(cv_mo), cv_mt, "tables() is not the vec passed to new()");
 assert_eq(vec_len(wavetable_morph_tables(cv_mo)), 2, "tables() holds both tables");
 assert_eq(vec_get(wavetable_morph_tables(cv_mo), 0), cv_ma, "tables()[0] is the first table");
 assert_eq(vec_get(wavetable_morph_tables(cv_mo), 1), cv_mb, "tables()[1] is the second table");
@@ -312,6 +312,213 @@ assert_eq(cv_h0, 0, "pos 0.5 -> (0 + 0)/2 == 0.0");
 assert_eq(cv_h1, C0_75, "pos 0.5 -> (1.0 + 0.5)/2 == 0.75");
 assert_eq(cv_h2, 0, "pos 0.5 -> (0 + 0)/2 == 0.0");
 assert_eq(cv_h3, f64_neg(C0_75), "pos 0.5 -> (-1.0 + -0.5)/2 == -0.75");
+
+# ================================================================
+# Rust moves the Vec into the Wavetable, so the caller cannot reach it afterward.
+test_group("from_samples owns its samples");
+var ow_v = vec_new();
+vec_push(ow_v, F64_ONE); vec_push(ow_v, F64_TWO);
+var ow_a = wavetable_from_samples(ow_v);
+vec_truncate(ow_v, 0);
+vec_push(ow_v, f64_from(7)); vec_push(ow_v, f64_from(8));
+var ow_b = wavetable_from_samples(ow_v);
+assert_eq(wavetable_read_interpolated(ow_a, 0), F64_ONE, "reusing the input vec leaves the first table alone");
+assert_eq(wavetable_read_interpolated(ow_b, 0), f64_from(7), "the second table has the new samples");
+vec_truncate(ow_v, 0);
+assert_eq(wavetable_len(ow_b), 2, "emptying the input vec leaves the table's length");
+assert_eq(wavetable_read_interpolated(ow_b, 0), f64_from(7), "emptying the input vec leaves the table readable");
+
+# Rust's samples() is a read-only slice. Wavetables stay immutable, which is what
+# lets oscillators share one by pointer with no copy of their own.
+test_group("wavetable_samples cannot reach the table");
+var ro_v = vec_new();
+vec_push(ro_v, F64_ONE); vec_push(ro_v, F64_TWO);
+var ro_t = wavetable_from_samples(ro_v);
+var ro_s = wavetable_samples(ro_t);
+assert_eq(vec_len(ro_s), 2, "the returned vec has every sample");
+assert_eq(vec_get(ro_s, 1), F64_TWO, "the returned vec has their values");
+vec_set(ro_s, 0, f64_from(9));
+assert_eq(wavetable_read_interpolated(ro_t, 0), F64_ONE, "a write to the returned vec does not reach the table");
+vec_truncate(ro_s, 0);
+assert_eq(wavetable_len(ro_t), 2, "truncating the returned vec does not reach the table");
+assert_eq(wavetable_read_interpolated(ro_t, 0), F64_ONE, "the table stays readable after that");
+
+test_group("oscillators share one table");
+var sh_o1 = wavetable_osc_new(ro_t, f64_from(FREQ), f64_from(SR));
+var sh_o2 = wavetable_osc_new(ro_t, f64_from(FREQ), f64_from(SR));
+assert_eq(wavetable_osc_table(sh_o1), ro_t, "the oscillator keeps the table pointer");
+assert_eq(wavetable_osc_table(sh_o1), wavetable_osc_table(sh_o2), "two oscillators share it");
+var sh_a = wavetable_osc_next_sample(sh_o1);
+sh_a = wavetable_osc_next_sample(sh_o1);
+assert_eq(wavetable_osc_next_sample(sh_o2), F64_ONE, "phases stay per-oscillator on a shared table");
+
+# ================================================================
+# Past VEC_CAP_MAX a vec cannot exist; the size must fail here, before any store.
+test_group("from_harmonics refuses a size no vec can hold");
+var cap_a = vec_new();
+vec_push(cap_a, F64_ONE);
+assert_eq(wavetable_from_harmonics(1, cap_a, VEC_CAP_MAX + 1), NAAD_ERR_INVALID_PARAMETER, "one past VEC_CAP_MAX");
+assert_eq(wavetable_from_harmonics(1, cap_a, 0x7FFFFFFFFFFFFFFF), NAAD_ERR_INVALID_PARAMETER, "INT64_MAX");
+assert_eq(wavetable_from_harmonics(1, cap_a, 0x2000000000000000), NAAD_ERR_INVALID_PARAMETER,
+  "a size whose byte count wraps");
+
+# ================================================================
+# Rust's `?` stops a failed table at the call site; here the error code would
+# otherwise be stored and dereferenced later.
+test_group("a failed table is refused");
+var ft_err = wavetable_from_samples(vec_new());
+assert_eq(ft_err, NAAD_ERR_INVALID_PARAMETER, "from_samples(empty) is the error under test");
+assert_eq(wavetable_osc_new(ft_err, f64_from(FREQ), f64_from(SR)), NAAD_ERR_INVALID_PARAMETER,
+  "osc_new refuses an error code");
+assert_eq(wavetable_osc_new(0, f64_from(FREQ), f64_from(SR)), NAAD_ERR_INVALID_PARAMETER, "osc_new refuses null");
+var ft_ok = _cv_table4(0, F64_ONE, 0, f64_neg(F64_ONE));
+var ft_tabs = vec_new();
+vec_push(ft_tabs, ft_ok);
+vec_push(ft_tabs, ft_err);
+assert_eq(wavetable_morph_new(ft_tabs, f64_from(FREQ), f64_from(SR)), NAAD_ERR_INVALID_PARAMETER,
+  "morph_new refuses an error code");
+vec_set(ft_tabs, 1, 0);
+assert_eq(wavetable_morph_new(ft_tabs, f64_from(FREQ), f64_from(SR)), NAAD_ERR_INVALID_PARAMETER,
+  "morph_new refuses null");
+
+# ================================================================
+# Rust moves the Vec into the morph and exposes only a slice. The scratch is sized
+# to the table count at construction, so nothing outside may change that count.
+test_group("the morph owns its table list");
+var ol_a = wavetable_from_harmonics(1, cap_a, 16);
+var ol_mk = vec_new();
+var ol_i = 0;
+while (ol_i < 4) { vec_push(ol_mk, ol_a); ol_i = ol_i + 1; }
+var ol_ctl = wavetable_morph_new(ol_mk, f64_from(FREQ), f64_from(SR));
+var ol_m = wavetable_morph_new(ol_mk, f64_from(FREQ), f64_from(SR));
+wavetable_morph_set_morph(ol_ctl, C0_5);
+wavetable_morph_set_morph(ol_m, C0_5);
+# Twelve pushes past a four-table build would overrun the knot scratch.
+ol_i = 0;
+while (ol_i < 12) { vec_push(ol_mk, ol_a); ol_i = ol_i + 1; }
+var ol_view = wavetable_morph_tables(ol_m);
+assert_eq(vec_len(ol_view), 4, "growing the input vec does not change the morph");
+ol_i = 0;
+while (ol_i < 12) { vec_push(ol_view, ol_a); ol_i = ol_i + 1; }
+assert_eq(vec_len(wavetable_morph_tables(ol_m)), 4, "growing the returned vec does not change the morph");
+assert_eq(wavetable_morph_next_sample_smooth(ol_m), wavetable_morph_next_sample_smooth(ol_ctl),
+  "smooth output is unchanged by growing either vec");
+vec_truncate(ol_mk, 0);
+vec_truncate(ol_view, 0);
+assert_eq(wavetable_morph_next_sample(ol_m), wavetable_morph_next_sample(ol_ctl),
+  "linear output is unchanged by emptying either vec");
+
+# ================================================================
+# rust-old/src/wavetable.rs:366-375 falls back to the linear blend only on None.
+# A NaN or infinity in a table is Some(non-finite), and must reach the output.
+test_group("smooth morph keeps a non-finite spline value");
+var NAN_BITS = 0x7FF8000000000000;
+var INF_BITS = 0x7FF0000000000000;
+fn _nf_morph(bad_table, bad_value) {
+    var tabs = vec_new();
+    var i = 0;
+    while (i < 6) {
+        var v = vec_new();
+        var j = 0;
+        while (j < 8) { vec_push(v, f64_div(f64_from(i + 1), f64_from(8))); j = j + 1; }
+        if (i == bad_table) { vec_set(v, 0, bad_value); }
+        vec_push(tabs, wavetable_from_samples(v));
+        i = i + 1;
+    }
+    return wavetable_morph_new(tabs, f64_from(750), f64_from(48000));
+}
+var nf_a = _nf_morph(0, NAN_BITS);
+wavetable_morph_set_morph(nf_a, 0x3FD3333340000000);
+assert_eq(naad_is_finite(wavetable_morph_next_sample_smooth(nf_a)), 0,
+  "NaN in a table inside the support, outside the blend pair: rust-old gives NaN");
+var nf_b = _nf_morph(2, INF_BITS);
+wavetable_morph_set_morph(nf_b, 0);
+assert_eq(naad_is_finite(wavetable_morph_next_sample_smooth(nf_b)), 0,
+  "infinity in a table at position 0: rust-old gives NaN");
+# Control: the same NaN outside the spline's support does not reach the sample.
+var nf_c = _nf_morph(5, NAN_BITS);
+wavetable_morph_set_morph(nf_c, 0);
+assert_eq(wavetable_morph_next_sample_smooth(nf_c), 0x3FC0000000000000,
+  "NaN outside the support leaves the sample finite (0.125, table 0)");
+# At a knot the table entering the span has weight 0, which a finite table cannot
+# show, but 0 * NaN does: the span search must hold that table at exactly the knot.
+var nf_k = _nf_morph(4, NAN_BITS);
+wavetable_morph_set_morph(nf_k, f64_div(F64_ONE, f64_from(3)));
+assert_eq(naad_is_finite(wavetable_morph_next_sample_smooth(nf_k)), 0,
+  "NaN in the table entering the span at knot 1/3 reaches the sample");
+# NaN position is the oracle's None: the linear fallback runs and yields NaN.
+var nf_d = _nf_morph(9, 0);
+wavetable_morph_set_morph(nf_d, NAN_BITS);
+assert_eq(naad_is_finite(wavetable_morph_next_sample_smooth(nf_d)), 0, "NaN position yields NaN");
+assert_neq(wavetable_morph_phase(nf_d), 0, "the phase still advances after the fallback");
+
+# ================================================================
+# The smooth morph reads only the four tables in the spline's span. The result must
+# still be the spline over every table, including at each knot and the ULP around
+# it, where the span changes.
+test_group("smooth morph equals the spline over every table");
+var sp_bad = 0;
+fn _sp_check(m, tabs, nt, pos) {
+    wavetable_morph_set_morph(m, pos);
+    var phase = wavetable_morph_phase(m);
+    var cps = vec_new();
+    var i = 0;
+    while (i < nt) {
+        vec_push(cps, wavetable_read_interpolated(vec_get(tabs, i), phase));
+        i = i + 1;
+    }
+    if (wavetable_morph_next_sample_smooth(m) != bspline_eval_1d(3, cps, pos)) { sp_bad = sp_bad + 1; }
+    return 0;
+}
+var sp_nt = 4;
+while (sp_nt <= 12) {
+    var sp_tabs = vec_new();
+    var sp_i = 0;
+    while (sp_i < sp_nt) {
+        var sp_v = vec_new();
+        var sp_j = 0;
+        while (sp_j < 9) {
+            vec_push(sp_v, f64_sin(f64_from((sp_i + 2) * (sp_j + 3))));
+            sp_j = sp_j + 1;
+        }
+        vec_push(sp_tabs, wavetable_from_samples(sp_v));
+        sp_i = sp_i + 1;
+    }
+    var sp_m = wavetable_morph_new(sp_tabs, f64_from(751), f64_from(48000));
+    sp_i = 0;
+    while (sp_i <= 64) {
+        _sp_check(sp_m, sp_tabs, sp_nt, f64_div(f64_from(sp_i), f64_from(64)));
+        sp_i = sp_i + 1;
+    }
+    sp_i = 0;
+    while (sp_i <= sp_nt - 3) {
+        var sp_k = f64_div(f64_from(sp_i), f64_from(sp_nt - 3));
+        _sp_check(sp_m, sp_tabs, sp_nt, sp_k);
+        if (sp_i > 0) { _sp_check(sp_m, sp_tabs, sp_nt, sp_k - 1); }
+        if (sp_i < sp_nt - 3) { _sp_check(sp_m, sp_tabs, sp_nt, sp_k + 1); }
+        sp_i = sp_i + 1;
+    }
+    sp_nt = sp_nt + 1;
+}
+assert_eq(sp_bad, 0, "4 to 12 tables, 65 positions, every knot and its neighbouring ULPs, bit for bit");
+
+# ================================================================
+test_group("morph: a table shortened by its setter reads inside itself");
+var dwa = vec_new();
+var dwb = vec_new();
+var dwi = 0;
+while (dwi < 2048) { vec_push(dwa, F64_ONE); vec_push(dwb, F64_ONE); dwi = dwi + 1; }
+var dwt = vec_new();
+vec_push(dwt, wavetable_from_samples(dwa));
+vec_push(dwt, wavetable_from_samples(dwb));
+var dwm = wavetable_morph_new(dwt, f64_from(440), f64_from(44100));
+wavetable_morph_set_morph(dwm, 0);
+MorphWavetable_set_phase(dwm, F64_HALF);
+var dwshort = vec_new();
+vec_push(dwshort, F64_ONE);
+vec_push(dwshort, F64_ONE);
+Wavetable_set_samples(vec_get(MorphWavetable_tables(dwm), 0), dwshort);
+assert_eq(wavetable_morph_next_sample(dwm), F64_ONE, "the read stays inside the 2-sample table");
 
 var rc = assert_summary();
 syscall(60, rc);

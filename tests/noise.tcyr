@@ -196,5 +196,31 @@ while (gi < 64) {
 }
 assert(g_all_diff, "white/pink/brown stay distinct for 64 samples from one seed");
 
+# ================================================================
+test_group("pink re-rolls one octave per flipped counter bit");
+# The PRNG advances once per octave re-rolled plus once for the white term, so
+# its position after a step shows exactly how many octaves were touched.
+fn pink_rng_steps(counter) {
+    var g = noise_new(NOISE_PINK, 42);
+    NoiseGenerator_set_pink_counter(g, counter);
+    var st = alloc(8);
+    store64(st, load64(NoiseGenerator_rng(g)));
+    var s = noise_next_sample(g);
+    var want = load64(NoiseGenerator_rng(g));
+    var steps = 0;
+    while (steps < 64) {
+        s = xorshift32(st);
+        steps = steps + 1;
+        if (load64(st) == want) { return steps; }
+    }
+    return 0 - 1;
+}
+assert_eq(pink_rng_steps(0), 2, "counter 0 -> 1 flips bit 0 only");
+assert_eq(pink_rng_steps(1), 3, "counter 1 -> 2 flips bits 0 and 1");
+assert_eq(pink_rng_steps(7), 5, "counter 7 -> 8 flips bits 0 to 3");
+assert_eq(pink_rng_steps(0x7FFF), 17, "counter 0x7FFF -> 0x8000 flips all 16 octave bits");
+assert_eq(pink_rng_steps(0xFFFF), 17, "a run past bit 15 stops at the 16 octaves");
+assert_eq(pink_rng_steps(0xFFFFFFFF), 17, "the u32 wrap flips every bit and re-rolls 16 octaves");
+
 var rc = assert_summary();
 syscall(60, rc);

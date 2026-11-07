@@ -115,13 +115,13 @@ assert_neq(ea_fenv, 0, "filter_env_mut is a live pointer, not null");
 # The two envelopes carry the oracle's distinct ADSR presets -- this is what
 # catches an accessor that returns the wrong envelope.
 # amp_env  = (0.01, 0.1, 0.7, 0.3); filter_env = (0.01, 0.2, 0.5, 0.5).
-assert_eq(Adsr_decay_time(ea_ro), SUB_C0_1, "amp env decay = 0.1 s");
+assert_eq(Adsr_decay_time(ea_ro), ENV_C0_1, "amp env decay = 0.1 s");
 assert_eq(Adsr_sustain_level(ea_ro), SUB_C0_7, "amp env sustain = 0.7");
-assert_eq(Adsr_release_time(ea_ro), SUB_C0_3, "amp env release = 0.3 s");
+assert_eq(Adsr_release_time(ea_ro), ENV_C0_3, "amp env release = 0.3 s");
 assert_eq(Adsr_decay_time(ea_fenv), SUB_C0_2, "filter env decay = 0.2 s");
 assert_eq(Adsr_sustain_level(ea_fenv), F64_HALF, "filter env sustain = 0.5");
 assert_eq(Adsr_release_time(ea_fenv), F64_HALF, "filter env release = 0.5 s");
-assert_eq(Adsr_attack_time(ea_ro), SUB_C0_01, "amp env attack = 0.01 s");
+assert_eq(Adsr_attack_time(ea_ro), ENV_C0_01, "amp env attack = 0.01 s");
 
 test_group("amp_env_mut mutations are visible through amp_env");
 assert_eq(envelope_adsr_state(ea_ro), ENV_STATE_IDLE, "fresh voice: amp env idle");
@@ -226,9 +226,9 @@ assert_eq(filter_svf_q(SubtractiveSynth_filter(sc)), C0_707, "set_cutoff preserv
 # Resonance floor: new() applies resonance.max(0.1), so 0.0 becomes 0.1 and
 # set_cutoff must carry that same Q through.
 var sc_lo = subtractive_new(WAVEFORM_SAW, f64_from(440), f64_from(2000), 0, f64_from(44100));
-assert_eq(filter_svf_q(SubtractiveSynth_filter(sc_lo)), SUB_C0_1, "resonance floored at 0.1");
+assert_eq(filter_svf_q(SubtractiveSynth_filter(sc_lo)), SUB_RESONANCE_FLOOR, "resonance floored at 0.1");
 assert_eq(subtractive_set_cutoff(sc_lo, f64_from(900)), NAAD_ERR_NONE, "set_cutoff on the floored voice ok");
-assert_eq(filter_svf_q(SubtractiveSynth_filter(sc_lo)), SUB_C0_1, "floored Q survives set_cutoff");
+assert_eq(filter_svf_q(SubtractiveSynth_filter(sc_lo)), SUB_RESONANCE_FLOOR, "floored Q survives set_cutoff");
 # Rejected cutoff: the oracle assigns base_cutoff BEFORE the fallible
 # set_params, so base_cutoff moves even when the filter refuses.
 assert_eq(subtractive_set_cutoff(sc, f64_from(30000)), NAAD_ERR_INVALID_FREQUENCY, "above-Nyquist cutoff rejected");
@@ -283,6 +283,138 @@ assert(f64_lt(filter_svf_frequency(SubtractiveSynth_filter(fdm)), f64_from(2000)
   "depth -2 drops the cutoff below base");
 assert(f64_ge(filter_svf_frequency(SubtractiveSynth_filter(fdm)), f64_from(500)),
   "depth -2 cannot fall below base / 2^2");
+
+# ================================================================
+test_group("the skipped cutoff evaluations change no output bit");
+# The oracle's next_sample term by term: f64_pow and the 0.5 Hz guard on every sample.
+fn sref_next(s) {
+    var osc_out = osc_next_sample(SubtractiveSynth_osc1(s));
+    var osc2 = SubtractiveSynth_osc2(s);
+    if (osc2 != 0) {
+        var o2 = osc_next_sample(osc2);
+        var mix = SubtractiveSynth_osc2_mix(s);
+        osc_out = f64_add(f64_mul(osc_out, f64_sub(F64_ONE, mix)), f64_mul(o2, mix));
+    }
+    var filter_mod = f64_mul(envelope_adsr_next_value(SubtractiveSynth_filter_env(s)),
+      SubtractiveSynth_filter_env_depth(s));
+    var modulated = f64_mul(SubtractiveSynth_base_cutoff(s), f64_pow(F64_TWO, filter_mod));
+    var clamped = f64_clamp(modulated, f64_from(20), f64_mul(SubtractiveSynth_sample_rate(s), SUB_C0_49));
+    var diff = f64_abs(f64_sub(clamped, SubtractiveSynth_prev_modulated_cutoff(s)));
+    if (f64_gt(diff, F64_HALF) == 1) {
+        var filter = SubtractiveSynth_filter(s);
+        filter_svf_set_params(filter, clamped, filter_svf_q(filter));
+        SubtractiveSynth_set_prev_modulated_cutoff(s, clamped);
+    }
+    var filtered = filter_svf_process_sample_lowpass(SubtractiveSynth_filter(s), osc_out);
+    return f64_mul(filtered, envelope_adsr_next_value(SubtractiveSynth_amp_env(s)));
+}
+# Drive the voice and the reference through one random control schedule. `slow`
+# stretches the filter envelope so the cutoff creeps past the 0.5 Hz guard, in both
+# directions, instead of jumping it, which is where a loose bound would show.
+fn sref_run(freq, cutoff, sr, slow, n, seed) {
+    var a = subtractive_new(WAVEFORM_SAW, freq, cutoff, F64_ONE, sr);
+    var b = subtractive_new(WAVEFORM_SAW, freq, cutoff, F64_ONE, sr);
+    if (slow == 1) {
+        Adsr_set_attack_time(subtractive_filter_env_mut(a), f64_from(3));
+        Adsr_set_attack_time(subtractive_filter_env_mut(b), f64_from(3));
+        Adsr_set_decay_time(subtractive_filter_env_mut(a), f64_from(3));
+        Adsr_set_decay_time(subtractive_filter_env_mut(b), f64_from(3));
+        Adsr_set_release_time(subtractive_filter_env_mut(a), f64_from(3));
+        Adsr_set_release_time(subtractive_filter_env_mut(b), f64_from(3));
+    }
+    subtractive_note_on(a);
+    subtractive_note_on(b);
+    var rng = alloc(8);
+    store64(rng, seed);
+    var bad = 0;
+    var i = 0;
+    while (i < n) {
+        if (subtractive_next_sample(a) != sref_next(b)) { bad = bad + 1; }
+        var r = xorshift32(rng);
+        if (r % 1500 == 0) {
+            var pick = (r >> 12) % 6;
+            var v = xorshift32_unit_f32(rng);
+            if (pick == 0) { subtractive_note_off(a); subtractive_note_off(b); }
+            elif (pick == 1) { subtractive_note_on(a); subtractive_note_on(b); }
+            elif (pick == 2) {
+                var c = f64_add(f64_from(5), f64_mul(v, f64_mul(sr, F64_HALF)));
+                subtractive_set_cutoff(a, c);
+                subtractive_set_cutoff(b, c);
+            } elif (pick == 3) {
+                var d = f64_mul(f64_sub(v, F64_HALF), f64_from(8));
+                subtractive_set_filter_env_depth(a, d);
+                subtractive_set_filter_env_depth(b, d);
+            } elif (pick == 4) {
+                subtractive_set_filter_env_depth(a, 0);
+                subtractive_set_filter_env_depth(b, 0);
+            } else {
+                subtractive_set_cutoff(a, cutoff);
+                subtractive_set_cutoff(b, cutoff);
+            }
+        }
+        i = i + 1;
+    }
+    return bad;
+}
+var srb = 0;
+srb = srb + sref_run(f64_from(220), f64_from(1000), f64_from(44100), 0, 150000, 11);
+assert_eq(srb, 0, "fast envelopes under random control changes");
+srb = sref_run(f64_from(110), f64_from(2000), f64_from(48000), 1, 150000, 22);
+assert_eq(srb, 0, "slow sweeps creeping past the 0.5 Hz guard");
+srb = sref_run(f64_from(55), f64_from(100), f64_from(8000), 1, 100000, 33);
+assert_eq(srb, 0, "low sample rate, cutoff near the clamp floor");
+# With the bounds crossed the clamp jumps as the raw cutoff rises through 20 Hz, and
+# only the upward jump lands on a cutoff the filter accepts. Whether a mid-attack
+# crossing lands on a skipped sample depends on the cutoff, so sweep the cutoff.
+srb = 0;
+var src = 0;
+while (src < 64) {
+    var src_cutoff = f64_add(f64_from(6), f64_div(f64_from(src), f64_from(8)));
+    srb = srb + sref_run(f64_from(5), src_cutoff, f64_from(30), 1, 120, 44);
+    src = src + 1;
+}
+assert_eq(srb, 0, "sample rate under 41 Hz, where the clamp's bounds cross");
+
+# ================================================================
+test_group("the cutoff memo keys on everything the cutoff depends on");
+# The filter envelope sits still in sustain, so these only catch a memo that ignores
+# an input: filter_mod and base do not move, and the result must still change.
+fn sdv(sr) {
+    var v = subtractive_new(WAVEFORM_SAW, f64_from(220), f64_from(6000), F64_HALF, sr);
+    subtractive_set_filter_env_depth(v, f64_from(2));
+    subtractive_note_on(v);
+    return v;
+}
+var sda = sdv(f64_from(48000));
+var sdb = sdv(f64_from(48000));
+var sdi = 0;
+while (sdi < 40000) {
+    var sdx = subtractive_next_sample(sda);
+    var sdy = sref_next(sdb);
+    sdi = sdi + 1;
+}
+SubtractiveSynth_set_sample_rate(sda, f64_from(20000));
+SubtractiveSynth_set_sample_rate(sdb, f64_from(20000));
+sdi = 0;
+var sdbad = 0;
+while (sdi < 200) {
+    if (subtractive_next_sample(sda) != sref_next(sdb)) { sdbad = sdbad + 1; }
+    sdi = sdi + 1;
+}
+assert_eq(sdbad, 0, "SubtractiveSynth_set_sample_rate moves the clamp");
+# Move the filter off the cutoff first: the guard refiring only shows if it has
+# something to put back.
+filter_svf_set_params(SubtractiveSynth_filter(sda), f64_from(500), F64_HALF);
+filter_svf_set_params(SubtractiveSynth_filter(sdb), f64_from(500), F64_HALF);
+SubtractiveSynth_set_prev_modulated_cutoff(sda, f64_from(100));
+SubtractiveSynth_set_prev_modulated_cutoff(sdb, f64_from(100));
+sdi = 0;
+sdbad = 0;
+while (sdi < 200) {
+    if (subtractive_next_sample(sda) != sref_next(sdb)) { sdbad = sdbad + 1; }
+    sdi = sdi + 1;
+}
+assert_eq(sdbad, 0, "SubtractiveSynth_set_prev_modulated_cutoff re-arms the guard");
 
 var rc = assert_summary();
 syscall(60, rc);

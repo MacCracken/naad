@@ -7,13 +7,8 @@
 # Requires (from the build/test unit): stdlib alloc/vec + math/ganita
 # (F64_* constants, f64_ln/pow/tanh/sin/cos/sqrt/clamp). No `include` lines.
 #
-# PENDING (hisab-interop analysis block, tracked in port-audit.md): the
-# `synthesis`-gated spectral functions -- fft_magnitudes, power_spectrum,
-# stft_magnitudes, chromagram, detect_onsets, detect_pitch_autocorr,
-# bspline_eval_1d, fit_polynomial. They wrap hisab num_fft / calc_bspline /
-# num_newton / least-squares and land in a dedicated follow-up. The scalar
-# core below (which every dependent module actually needs) is complete;
-# `eval_polynomial` is pure-f64 and included here.
+# The `synthesis`-gated half of the Rust file, which needs hisab, lives in
+# dsp_spectral.cyr. `eval_polynomial` is pure f64, so it stays here.
 
 # ================================================================
 # Enums -> integer constants.
@@ -27,8 +22,9 @@ var WINDOW_HAMMING     = 2;
 var WINDOW_BLACKMAN    = 3;
 
 # Extra IEEE-754 literals not in the stdlib.
-var DSP_C2_5 = 0x4004000000000000;   # 2.5   (hermite coefficient)
-var DSP_C1_5 = 0x3FF8000000000000;   # 1.5   (hermite coefficient)
+var DSP_C042 = 0x3FDAE147AE147AE1;   # 0.42  (Blackman a0)
+var DSP_C008 = 0x3FB47AE147AE147B;   # 0.08  (Blackman a2)
+var DSP_U32_MAX = 0x41EFFFFFFFE00000;   # 4294967295.0 (xorshift32 output range)
 
 # ================================================================
 # dB <-> linear amplitude.
@@ -134,9 +130,9 @@ fn hermite_interpolate(y0, y1, y2, y3, t) {
     var c0 = y1;
     var c1 = f64_mul(F64_HALF, f64_sub(y2, y0));
     # c2 = y0 - 2.5*y1 + 2*y2 - 0.5*y3
-    var c2 = f64_sub(f64_add(f64_sub(y0, f64_mul(DSP_C2_5, y1)), f64_mul(F64_TWO, y2)), f64_mul(F64_HALF, y3));
+    var c2 = f64_sub(f64_add(f64_sub(y0, f64_mul(F64_TWO_HALF, y1)), f64_mul(F64_TWO, y2)), f64_mul(F64_HALF, y3));
     # c3 = 0.5*(y3 - y0) + 1.5*(y1 - y2)
-    var c3 = f64_add(f64_mul(F64_HALF, f64_sub(y3, y0)), f64_mul(DSP_C1_5, f64_sub(y1, y2)));
+    var c3 = f64_add(f64_mul(F64_HALF, f64_sub(y3, y0)), f64_mul(F64_ONE_HALF, f64_sub(y1, y2)));
     # ((c3*t + c2)*t + c1)*t + c0
     var r = f64_add(f64_mul(c3, t), c2);
     r = f64_add(f64_mul(r, t), c1);
@@ -175,14 +171,12 @@ fn apply_blackman_window(buffer) {
     var len = vec_len(buffer);
     if (len == 0) { return 0; }
     var inv = f64_div(F64_ONE, f64_from(len));
-    var c042 = 0x3FDAE147AE147AE1;   # 0.42
-    var c008 = 0x3FB47AE147AE147B;   # 0.08
     var i = 0;
     while (i < len) {
         var t = f64_mul(f64_from(i), inv);
         var tau_t = f64_mul(F64_TAU, t);
-        var w = f64_sub(c042, f64_mul(F64_HALF, f64_cos(tau_t)));
-        w = f64_add(w, f64_mul(c008, f64_cos(f64_mul(F64_TWO, tau_t))));
+        var w = f64_sub(DSP_C042, f64_mul(F64_HALF, f64_cos(tau_t)));
+        w = f64_add(w, f64_mul(DSP_C008, f64_cos(f64_mul(F64_TWO, tau_t))));
         vec_set(buffer, i, f64_mul(vec_get(buffer, i), w));
         i = i + 1;
     }
@@ -191,8 +185,8 @@ fn apply_blackman_window(buffer) {
 
 # ================================================================
 # eval_polynomial -- Horner evaluation of ascending-degree coeffs (vec of
-# f64) at x. Empty coeffs -> 0.0. Pure f64 (no hisab), so ported here; its
-# companion fit_polynomial (hisab least-squares) is in the pending block.
+# f64) at x. Empty coeffs -> 0.0. Its companion fit_polynomial is in
+# dsp_spectral.cyr.
 # ================================================================
 #must_use
 fn eval_polynomial(coeffs, x) {
@@ -209,24 +203,26 @@ fn eval_polynomial(coeffs, x) {
 
 # ================================================================
 # dB -> linear amplitude via a 256-entry LUT with linear interpolation.
-# Rust used a LazyLock<[f32;256]>; here the table is a module-global vec
+# Rust used a LazyLock<[f32;256]>; here the table is a raw block of 256 doubles
 # built on first access. Range [-80, +20] dB; inputs outside clamp to the
-# edges. Avoids powf in per-sample gain stages (compressor/limiter/de-esser).
+# edges. Avoids powf in per-sample gain stages (compressor/limiter/de-esser), so
+# the lookup reads the block directly: both indices are clamped below, which
+# leaves vec_get's bounds checks nothing to catch.
 # ================================================================
 var DB_LUT_MIN   = 0xC054000000000000;   # -80.0
 var DB_LUT_MAX   = 0x4034000000000000;   #  20.0
 var DB_LUT_RANGE = 0x4059000000000000;   # 100.0
-var _DB_LUT      = 0;                     # 0 = not yet built
+var DB_LUT_TOP   = 0x406FE00000000000;   # 255.0, the last index
+var _DB_LUT      = 0;                     # table base, 0 until built
 
 #must_use
 fn _db_lut() {
-    if (_DB_LUT != 0) { return _DB_LUT; }
-    var t = vec_new();
+    var t = alloc(256 * 8);
     var i = 0;
     while (i < 256) {
-        var frac = f64_div(f64_from(i), f64_from(255));
+        var frac = f64_div(f64_from(i), DB_LUT_TOP);
         var db = f64_add(DB_LUT_MIN, f64_mul(frac, DB_LUT_RANGE));
-        vec_push(t, f64_pow(f64_from(10), f64_div(db, f64_from(20))));
+        store64(t + i * 8, f64_pow(f64_from(10), f64_div(db, f64_from(20))));
         i = i + 1;
     }
     _DB_LUT = t;
@@ -236,11 +232,12 @@ fn _db_lut() {
 # dB to linear amplitude through the interpolated table, clamped to its dB range.
 #must_use
 fn db_to_amplitude_lut(db) {
-    var table = _db_lut();
-    if (f64_le(db, DB_LUT_MIN) == 1) { return vec_get(table, 0); }
-    if (f64_ge(db, DB_LUT_MAX) == 1) { return vec_get(table, 255); }
+    var table = _DB_LUT;
+    if (table == 0) { table = _db_lut(); }
+    if (f64_le(db, DB_LUT_MIN) == 1) { return load64(table); }
+    if (f64_ge(db, DB_LUT_MAX) == 1) { return load64(table + 255 * 8); }
     var normalized = f64_div(f64_sub(db, DB_LUT_MIN), DB_LUT_RANGE);
-    var idx = f64_mul(normalized, f64_from(255));
+    var idx = f64_mul(normalized, DB_LUT_TOP);
     # Two-sided, matching Rust's saturating `idx as usize`
     # (rust-old/src/dsp_util.rs:645-650); f64_to keeps a negative value negative
     # where Rust saturates to 0. A NaN idx still yields NaN out -- Rust computes
@@ -252,18 +249,14 @@ fn db_to_amplitude_lut(db) {
     var i1 = i0 + 1;
     if (i1 > 255) { i1 = 255; }
     var frac = f64_sub(idx, f64_from(i0));
-    var lo = f64_mul(vec_get(table, i0), f64_sub(F64_ONE, frac));
-    var hi = f64_mul(vec_get(table, i1), frac);
+    var lo = f64_mul(load64(table + i0 * 8), f64_sub(F64_ONE, frac));
+    var hi = f64_mul(load64(table + i1 * 8), frac);
     return f64_add(lo, hi);
 }
 
 # ================================================================
 # xorshift32 PRNG -- the canonical PRNG for every noise site in the crate
 # (white/pink/brown noise, granular spray, drum clicks, physical exciters).
-# Rust took `&mut u32`; here `sp` is a POINTER to a 64-bit slot holding the
-# u32 state (load64/store64). u32 wrap is emulated with a 0xFFFFFFFF mask
-# after each left shift. Zero-state guard: a 0 state is reset to 1 (0 would
-# loop forever). Returns the new state (== the raw output).
 # ================================================================
 var U32_MASK = 0xFFFFFFFF;
 
@@ -287,7 +280,7 @@ fn xorshift32(sp) {
 #must_use
 fn xorshift32_signed_f32(sp) {
     var raw = xorshift32(sp);
-    var unit = f64_div(f64_from(raw), f64_from(4294967295));
+    var unit = f64_div(f64_from(raw), DSP_U32_MAX);
     return f64_sub(f64_mul(unit, F64_TWO), F64_ONE);
 }
 
@@ -295,6 +288,6 @@ fn xorshift32_signed_f32(sp) {
 #must_use
 fn xorshift32_unit_f32(sp) {
     var raw = xorshift32(sp);
-    return f64_div(f64_from(raw), f64_from(4294967295));
+    return f64_div(f64_from(raw), DSP_U32_MAX);
 }
 

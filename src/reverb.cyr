@@ -6,11 +6,11 @@
 # width. Rust's serde derives are dropped. The `(f32, f32)` tuple return of
 # process_sample becomes a `ReverbStereo` struct (left, right). The fixed
 # `[DampedComb; 4]` / `[ReverbAllpass; 2]` inline arrays become stdlib vecs of
-# struct pointers. Constructor returns the struct pointer on success or a
-# negative NAAD_ERR_* on invalid sample_rate.
+# struct pointers. Constructors return the struct pointer on success, or a
+# negative NAAD_ERR_* on an invalid sample_rate or a delay too long to hold.
 #
 # Requires (from the build/test unit): stdlib alloc/vec + math/ganita
-# (F64_ONE/HALF, f64_add/sub/mul/div/neg/clamp/max/floor/from/to) and the L0
+# (F64_ONE/HALF, f64_add/sub/mul/div/neg/clamp/max/from/to) and the L0
 # modules error.cyr (validate_sample_rate, flush_denormal, naad_is_finite,
 # NAAD_ERR_*) and delay.cyr (delay_line_*). The module file has no `include` lines.
 
@@ -36,7 +36,7 @@ var REVERB_STEREO_OFFSET = 23;
 # ================================================================
 # DampedComb -- comb filter + one-pole lowpass in the feedback path.
 #   delay         : DelayLine pointer
-#   delay_samples : delay time in samples (f32-widened)
+#   delay_samples : delay time in samples, as f64
 #   feedback      : feedback coefficient
 #   damp1         : lowpass state weight (== damping)
 #   damp2         : lowpass input weight (== 1 - damping)
@@ -46,10 +46,13 @@ var REVERB_STEREO_OFFSET = 23;
 struct DampedComb { delay; delay_samples; feedback; damp1; damp2; filter_state; }
 
 # Create a damped comb over `delay_samples` (int) with `feedback`/`damping`.
+# Returns the pointer, or NAAD_ERR_BUFFER_OVERFLOW for a refused length.
 #must_use
 fn reverb_damped_comb_new(delay_samples, feedback, damping) {
+    var dl = delay_line_new(delay_samples);
+    if (naad_is_err(dl) == 1) { return dl; }
     var self = alloc(sizeof(DampedComb));
-    DampedComb_set_delay(self, delay_line_new(delay_samples));
+    DampedComb_set_delay(self, dl);
     DampedComb_set_delay_samples(self, f64_from(delay_samples));
     DampedComb_set_feedback(self, feedback);
     DampedComb_set_damp1(self, damping);
@@ -74,17 +77,20 @@ fn reverb_damped_comb_process(self, input) {
 # ================================================================
 # ReverbAllpass -- simple Schroeder allpass for diffusion.
 #   delay         : DelayLine pointer
-#   delay_samples : delay time in samples (f32-widened)
+#   delay_samples : delay time in samples, as f64
 #   feedback      : allpass feedback coefficient
 # ================================================================
 #derive(accessors)
 struct ReverbAllpass { delay; delay_samples; feedback; }
 
-# Create an allpass over `delay_samples` (int) with `feedback`.
+# Create an allpass over `delay_samples` (int) with `feedback`. Returns the
+# pointer, or NAAD_ERR_BUFFER_OVERFLOW for a refused length.
 #must_use
 fn reverb_allpass_new(delay_samples, feedback) {
+    var dl = delay_line_new(delay_samples);
+    if (naad_is_err(dl) == 1) { return dl; }
     var self = alloc(sizeof(ReverbAllpass));
-    ReverbAllpass_set_delay(self, delay_line_new(delay_samples));
+    ReverbAllpass_set_delay(self, dl);
     ReverbAllpass_set_delay_samples(self, f64_from(delay_samples));
     ReverbAllpass_set_feedback(self, feedback);
     return self;
@@ -111,7 +117,7 @@ struct ReverbStereo { left; right; }
 # ================================================================
 # Reverb -- Schroeder algorithmic reverb.
 #   pre_delay         : pre-delay DelayLine pointer
-#   pre_delay_samples : pre-delay time in samples (f32-widened)
+#   pre_delay_samples : pre-delay time in samples, as f64
 #   combs_l/combs_r   : vecs of 4 DampedComb pointers (right offset for stereo)
 #   allpasses_l/_r    : vecs of 2 ReverbAllpass pointers
 #   mix               : wet/dry mix (0 = dry, 1 = wet)
@@ -131,27 +137,34 @@ struct Reverb {
     sample_rate;
 }
 
+# Delay length for `base + offset` samples at 44.1 kHz, scaled to the running
+# rate (min 1). f64_to truncates, which is `as usize` for every value above zero;
+# anything at or below zero takes the floor either way.
+#must_use
+fn _reverb_scaled_len(base, offset, scale) {
+    var len = f64_to(f64_mul(f64_from(base + offset), scale));
+    if (len < 1) { len = 1; }
+    return len;
+}
+
 # Build a damped comb sized `(base + offset) * scale` samples (min 1).
 #must_use
 fn reverb_make_comb(base, offset, scale, feedback, damp) {
-    var len = f64_to(f64_floor(f64_mul(f64_from(base + offset), scale)));
-    if (len < 1) { len = 1; }
-    return reverb_damped_comb_new(len, feedback, damp);
+    return reverb_damped_comb_new(_reverb_scaled_len(base, offset, scale), feedback, damp);
 }
 
 # Build an allpass sized `(base + offset) * scale` samples (min 1), fb 0.5.
 #must_use
 fn reverb_make_ap(base, offset, scale) {
-    var len = f64_to(f64_floor(f64_mul(f64_from(base + offset), scale)));
-    if (len < 1) { len = 1; }
-    return reverb_allpass_new(len, F64_HALF);
+    return reverb_allpass_new(_reverb_scaled_len(base, offset, scale), F64_HALF);
 }
 
 # ================================================================
 # reverb_new -- create a reverb. `decay` (0..1) controls feedback, `damping`
 # (0..1) high-frequency damping, `pre_delay_ms` pre-delay, `mix` (0..1)
-# wet/dry, `sample_rate` in Hz. Returns the struct pointer on success or a
-# negative NAAD_ERR_* on invalid sample_rate. Ports Reverb::new.
+# wet/dry, `sample_rate` in Hz. Returns the struct pointer on success, or a
+# negative NAAD_ERR_* on an invalid sample_rate or a delay too long to hold.
+# Ports Reverb::new.
 # ================================================================
 #must_use
 fn reverb_new(decay, damping, pre_delay_ms, mix, sample_rate) {
@@ -168,7 +181,7 @@ fn reverb_new(decay, damping, pre_delay_ms, mix, sample_rate) {
     if (delay_len_overflows(longest) == 1) { return NAAD_ERR_BUFFER_OVERFLOW; }
     if (delay_len_overflows(pre_samples) == 1) { return NAAD_ERR_BUFFER_OVERFLOW; }
 
-    var pre_len = f64_to(f64_floor(pre_samples));
+    var pre_len = f64_to(pre_samples);
     if (pre_len < 1) { pre_len = 1; }
 
     var combs_l = vec_new();
@@ -266,7 +279,9 @@ fn reverb_process_core(self, input, res) {
 
 # ================================================================
 # reverb_process_sample -- process a mono input, returning stereo (left,
-# right) as a ReverbStereo. Ports Reverb::process_sample.
+# right) as a ReverbStereo. Ports Reverb::process_sample. Every call allocates
+# the pair and the bump allocator never frees it, so per-sample loops pass their
+# own pair to reverb_process_core instead.
 # ================================================================
 #must_use
 fn reverb_process_sample(self, input) {
@@ -278,19 +293,19 @@ fn reverb_process_sample(self, input) {
 # ================================================================
 # reverb_process_buffer -- process a mono `input` vec into stereo `left`/
 # `right` vecs (writing only where the output vec is long enough). Ports
-# Reverb::process_buffer. Reuses a single scratch ReverbStereo across all
-# samples so the hot loop performs no per-sample allocation.
+# Reverb::process_buffer. The scratch pair lives on the stack: this runs once per
+# block, and anything it took from the bump allocator would never come back.
 # ================================================================
 fn reverb_process_buffer(self, input, left, right) {
     var n = vec_len(input);
     var ll = vec_len(left);
     var rl = vec_len(right);
-    var res = alloc(sizeof(ReverbStereo));
+    var res[16];
     var i = 0;
     while (i < n) {
-        reverb_process_core(self, vec_get(input, i), res);
-        if (i < ll) { vec_set(left, i, ReverbStereo_left(res)); }
-        if (i < rl) { vec_set(right, i, ReverbStereo_right(res)); }
+        reverb_process_core(self, vec_get(input, i), &res);
+        if (i < ll) { vec_set(left, i, ReverbStereo_left(&res)); }
+        if (i < rl) { vec_set(right, i, ReverbStereo_right(&res)); }
         i = i + 1;
     }
     return 0;

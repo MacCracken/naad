@@ -9,8 +9,9 @@
 # constants. `Option<usize>` returns use -1 as the None sentinel (valid voice
 # indices are always >= 0).
 #
-# Requires (from the build/test unit): stdlib alloc/vec + math (F64_HALF).
-# The module file itself has no `include` lines.
+# Requires (from the build/test unit): stdlib alloc/vec + math (f64_lt) and
+# error.cyr (NAAD_ERR_INVALID_PARAMETER). The module file itself has no `include`
+# lines.
 
 # ================================================================
 # Enums -> integer constants.
@@ -29,6 +30,9 @@ var STEAL_MODE_NONE     = 3;   # do not steal -- ignore new notes when full
 
 # None sentinel for Option<usize> returns (valid indices are >= 0).
 var NAAD_VOICE_NONE = (0 - 1);
+
+# The oracle's note is a u8; this is its upper bound.
+var NAAD_VOICE_NOTE_MAX = 255;
 
 # Default brightness (MIDI 2.0 CC74) = 0.5.
 var NAAD_VOICE_DEFAULT_BRIGHTNESS = 0x3FE0000000000000;   # 0.5
@@ -72,6 +76,22 @@ fn voice_is_active(v) {
     return Voice_active(v);
 }
 
+# The age counter: samples since this voice's note started, a u64 held in an i64
+# slot. Ports Voice::age().
+#inline
+#must_use
+fn voice_age(v) {
+    return Voice_age(v);
+}
+
+# 1 if `note` fits the oracle's u8, else 0.
+#must_use
+fn _voice_note_valid(note) {
+    if (note < 0) { return 0; }
+    if (note > NAAD_VOICE_NOTE_MAX) { return 0; }
+    return 1;
+}
+
 # ================================================================
 # VoiceManager -- voice allocation and stealing.
 #   voices     : vec of Voice pointers (the pool)
@@ -82,9 +102,16 @@ fn voice_is_active(v) {
 #derive(accessors)
 struct VoiceManager { voices; max_voices; poly_mode; steal_mode; }
 
-# Create a new voice manager. `max_voices` is clamped to 1..128.
+# Create a new voice manager. `max_voices` is clamped to 1..128. Returns the
+# pointer, or NAAD_ERR_INVALID_PARAMETER for a poly_mode or steal_mode outside its
+# constants: the oracle's enums cannot hold one, and the dispatch below would
+# otherwise give it the behaviour of whichever branch comes last.
 #must_use
 fn voice_manager_new(max_voices, poly_mode, steal_mode) {
+    if (poly_mode < POLY_MODE_POLY) { return NAAD_ERR_INVALID_PARAMETER; }
+    if (poly_mode > POLY_MODE_LEGATO) { return NAAD_ERR_INVALID_PARAMETER; }
+    if (steal_mode < STEAL_MODE_OLDEST) { return NAAD_ERR_INVALID_PARAMETER; }
+    if (steal_mode > STEAL_MODE_NONE) { return NAAD_ERR_INVALID_PARAMETER; }
     var n = max_voices;
     if (n < 1) { n = 1; }
     if (n > 128) { n = 128; }
@@ -105,8 +132,11 @@ fn voice_manager_new(max_voices, poly_mode, steal_mode) {
 # Allocate a voice for a new note. Returns the voice index, or NAAD_VOICE_NONE.
 #
 # Poly mode: find a free voice or steal one. Mono/Legato: always voice 0.
+# A note outside 0..255 is refused with no state change, as is an unknown mode
+# (VoiceManager_set_poly_mode is the oracle's `pub poly_mode`, which its enum bound).
 #must_use
 fn voice_manager_note_on(vm, note, velocity) {
+    if (_voice_note_valid(note) == 0) { return NAAD_VOICE_NONE; }
     var mode = VoiceManager_poly_mode(vm);
     var voices = VoiceManager_voices(vm);
     if (mode == POLY_MODE_MONO || mode == POLY_MODE_LEGATO) {
@@ -117,6 +147,7 @@ fn voice_manager_note_on(vm, note, velocity) {
         Voice_set_age(v, 0);
         return 0;
     }
+    if (mode != POLY_MODE_POLY) { return NAAD_VOICE_NONE; }
 
     # Poly: first, find a free voice.
     var n = vec_len(voices);
@@ -144,8 +175,11 @@ fn voice_manager_note_on(vm, note, velocity) {
     return idx;
 }
 
-# Release a voice by note number. Returns the released index, or NAAD_VOICE_NONE.
+# Release a voice by note number. Returns the released index, or NAAD_VOICE_NONE,
+# also for a note outside 0..255 (Voice_set_note can store one; the oracle's u8
+# could not).
 fn voice_manager_note_off(vm, note) {
+    if (_voice_note_valid(note) == 0) { return NAAD_VOICE_NONE; }
     var voices = VoiceManager_voices(vm);
     var n = vec_len(voices);
     var i = 0;
@@ -212,6 +246,10 @@ fn voice_manager_find_steal_target(vm) {
         }
         return best;
     }
+
+    # An unknown mode steals nothing (VoiceManager_set_steal_mode is the oracle's
+    # `pub steal_mode`, which its enum bound).
+    if (mode != STEAL_MODE_LOWEST) { return NAAD_VOICE_NONE; }
 
     # STEAL_MODE_LOWEST: min_by_key(note), first minimum on ties.
     var best = NAAD_VOICE_NONE;

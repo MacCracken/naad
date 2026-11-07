@@ -54,10 +54,36 @@ test_group("unknown_material_errors");
 var bad_mat = naad_room_reverb_new(make_config(f64_from(8), "unobtanium"));
 assert_eq(naad_is_err(bad_mat), 1, "unknown material -> error");
 
+# A null name reaches the same refusal as an unknown one.
+var null_mat = naad_room_reverb_new(make_config(f64_from(8), 0));
+assert_eq(null_mat, NAAD_ERR_COMPUTATION, "null material name -> error");
+
 # ================================================================
 test_group("invalid_dimensions_error");
 var bad_dim = naad_room_reverb_new(make_config(f64_neg(F64_ONE), "concrete"));
 assert_eq(naad_is_err(bad_dim), 1, "negative dimension -> error");
+
+# ================================================================
+test_group("negative_sample_rate_is_refused");
+# make_config fixes 48 kHz, so each rate gets its own config.
+fn rate_config(rate) {
+    var source = hvec3_new(F64_TWO, ear_height(), f64_from(3));
+    var listener = hvec3_new(f64_from(6), ear_height(), f64_from(3));
+    return naad_room_reverb_config_new(f64_from(8), f64_from(6), f64_from(3),
+      "concrete", source, listener, rate);
+}
+assert_eq(naad_room_reverb_new(rate_config(0 - 1)), NAAD_ERR_COMPUTATION, "rate -1 -> error");
+assert_eq(naad_room_reverb_new(rate_config(0 - 48000)), NAAD_ERR_COMPUTATION, "rate -48000 -> error");
+assert_eq(naad_room_reverb_new(rate_config(0 - 0x7FFFFFFFFFFFFFFF)), NAAD_ERR_COMPUTATION,
+  "most negative usable rate -> error");
+assert_eq(naad_room_ir_overflows(rate_config(0 - 1)), 1, "a negative rate cannot give an IR");
+assert_eq(naad_room_ir_overflows(rate_config(48000)), 0, "a working rate is not refused");
+
+# Rust accepts a zero rate and gets an empty IR, so the input passes through.
+var zero_rate = naad_room_reverb_new(rate_config(0));
+assert_eq(naad_is_err(zero_rate), 0, "rate 0 still builds, as in Rust");
+assert_eq(vec_len(RoomReverb_impulse_response(zero_rate)), 0, "rate 0 -> empty IR");
+assert_eq(naad_room_reverb_process_sample(zero_rate, F64_HALF), F64_HALF, "rate 0 passes input through");
 
 var rc = assert_summary();
 syscall(60, rc);

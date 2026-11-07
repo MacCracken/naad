@@ -438,5 +438,249 @@ assert(approx(tl_m1b, tl_m2b, CV_1E_9), "interleaved: sample 1 agrees");
 assert(approx(vec_get(tl_mo, 0), tl_m2c, CV_1E_9), "interleaved: block sample 2 agrees with the sample path");
 assert(approx(vec_get(tl_mo, 1), tl_m2d, CV_1E_9), "interleaved: block sample 3 agrees with the sample path");
 
+# ================================================================
+test_group("from_room_negative_sample_rate_is_refused");
+# The room fixture at the given sample rate.
+fn cv_rate_config(rate) {
+    return naad_room_reverb_config_new(f64_from(8), f64_from(6), f64_from(3), "concrete",
+      hvec3_new(F64_TWO, ear_height(), f64_from(3)),
+      hvec3_new(f64_from(6), ear_height(), f64_from(3)), rate);
+}
+assert_eq(naad_convolution_from_room(cv_rate_config(0 - 1)), NAAD_ERR_COMPUTATION, "rate -1 -> error");
+assert_eq(naad_convolution_from_room(cv_rate_config(0 - 48000)), NAAD_ERR_COMPUTATION, "rate -48000 -> error");
+var cv_zero = naad_convolution_from_room(cv_rate_config(0));
+assert_eq(naad_is_err(cv_zero), 0, "rate 0 still builds, as in Rust");
+assert_eq(naad_convolution_is_loaded(cv_zero), 0, "rate 0 -> no IR loaded");
+
+# ================================================================
+# Cyrius does not stop a caller passing one vec as both input and output, and the
+# direct fallback handles it, so the FFT route must too. The ring has to hold the
+# dry input: the third block below would show a wet one.
+test_group("process_block_in_place_matches_out_of_place");
+var ip_ir = vec4(F64_ONE, F64_HALF, CV_0_25, CV_0_1);
+var ip_rev = naad_convolution_from_ir(ip_ir, CV_0_7);
+var ip_ref = naad_convolution_from_ir(ip_ir, CV_0_7);
+var ip_blk = 0;
+var ip_same = 1;
+var ip_tail = 0;
+while (ip_blk < 3) {
+    var ip_buf = vec_new();
+    var ip_n = 0;
+    while (ip_n < 4) {
+        var ip_v = 0;
+        if (ip_blk == 0) { ip_v = f64_sub(F64_ONE, f64_mul(f64_from(ip_n), CV_0_3)); }
+        vec_push(ip_buf, ip_v);
+        ip_n = ip_n + 1;
+    }
+    var ip_dry = vec_new();
+    ip_n = 0;
+    while (ip_n < 4) { vec_push(ip_dry, vec_get(ip_buf, ip_n)); ip_n = ip_n + 1; }
+    naad_convolution_process_block(ip_rev, ip_buf, ip_buf);
+    ip_n = 0;
+    while (ip_n < 4) {
+        var ip_want = naad_convolution_process_sample(ip_ref, vec_get(ip_dry, ip_n));
+        if (approx(vec_get(ip_buf, ip_n), ip_want, CV_1E_9) == 0) { ip_same = 0; }
+        if (ip_blk > 0 && ip_n < 3) { ip_tail = f64_add(ip_tail, f64_abs(ip_want)); }
+        ip_n = ip_n + 1;
+    }
+    ip_blk = ip_blk + 1;
+}
+assert(f64_gt(ip_tail, CV_0_1), "the tail reaches later blocks (not a vacuous compare)");
+assert_eq(ip_same, 1, "in-place blocks == per-sample path across three blocks");
+
+# ================================================================
+# Rust takes the IR by value, so nothing the caller does to its vec afterwards can
+# reach the reverb. Growth would index past the ring; an edit would change the
+# reverb's sound. Each is tried straight after the handover.
+test_group("from_ir_and_rebuild_own_their_ir");
+var ow_ir = vec4(F64_ONE, F64_HALF, CV_0_25, CV_0_1);
+var ow_rev = naad_convolution_from_ir(ow_ir, F64_ONE);
+vec_push(ow_ir, F64_TWO);
+vec_set(ow_ir, 0, CV_SENTINEL);
+assert_eq(naad_convolution_ir_len(ow_rev), 4, "from_ir: the caller's growth does not reach the reverb");
+assert_eq(naad_convolution_process_sample(ow_rev, F64_ONE), F64_ONE,
+  "from_ir: the caller's edit does not reach the reverb");
+
+var ow_new = vec4(CV_0_25, CV_0_1, CV_0_1, CV_0_1);
+naad_convolution_rebuild_from_ir(ow_rev, ow_new);
+vec_push(ow_new, F64_TWO);
+vec_set(ow_new, 0, CV_SENTINEL);
+assert_eq(naad_convolution_ir_len(ow_rev), 4, "rebuild: the caller's growth does not reach the reverb");
+assert_eq(naad_convolution_process_sample(ow_rev, F64_ONE), CV_0_25,
+  "rebuild: the caller's edit does not reach the reverb");
+
+# ================================================================
+# A non-finite sample in the segment must cost what it costs on the sample path:
+# the ir_len outputs it reaches, not the whole of this block and the next.
+test_group("process_block_holds_a_non_finite_sample_to_the_sample_path");
+# An `n`-sample block of 0.5, with `bad` at slot `bad_at` if that is in range.
+fn nf_block(n, bad_at, bad) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) {
+        if (i == bad_at) { vec_push(v, bad); } else { vec_push(v, F64_HALF); }
+        i = i + 1;
+    }
+    return v;
+}
+# How many of `v`'s samples are not finite.
+fn nf_count(v) {
+    var c = 0;
+    var i = 0;
+    while (i < vec_len(v)) {
+        var x = vec_get(v, i);
+        if (naad_is_finite(x) == 0) { c = c + 1; }
+        i = i + 1;
+    }
+    return c;
+}
+# Runs three 64-sample blocks with `bad` at the last slot of the first, and
+# returns 1 if every output is bit-equal to the sample path over the first two.
+fn nf_run(bad, want0, want1) {
+    var ir = vec4(F64_ONE, F64_HALF, F64_HALF, F64_HALF);
+    var b = naad_convolution_from_ir(ir, F64_ONE);
+    var s = naad_convolution_from_ir(ir, F64_ONE);
+    var blk = 0;
+    var ok = 1;
+    while (blk < 3) {
+        var bad_at = 0 - 1;
+        if (blk == 0) { bad_at = 63; }
+        var inp = nf_block(64, bad_at, bad);
+        var out = nf_block(64, 0 - 1, 0);
+        naad_convolution_process_block(b, inp, out);
+        var i = 0;
+        while (i < 64) {
+            var want = naad_convolution_process_sample(s, vec_get(inp, i));
+            if (blk < 2 && vec_get(out, i) != want) { ok = 0; }
+            if (blk == 2 && approx(vec_get(out, i), want, CV_1E_9) == 0) { ok = 0; }
+            i = i + 1;
+        }
+        if (blk == 0) { assert_eq(nf_count(out), want0, "the block holding it"); }
+        if (blk == 1) { assert_eq(nf_count(out), want1, "the block after it"); }
+        if (blk == 2) { assert_eq(nf_count(out), 0, "the block after the ring clears"); }
+        blk = blk + 1;
+    }
+    return ok;
+}
+var NF_NAN = 0x7FF8000000000000;
+var NF_INF = 0x7FF0000000000000;
+assert_eq(nf_run(NF_NAN, 1, 3), 1, "NaN: blocks equal the sample path");
+assert_eq(nf_run(NF_INF, 1, 3), 1, "+Inf: blocks equal the sample path");
+
+# ================================================================
+# The IR's spectrum is kept between blocks. It must give the bits a fresh
+# transform gives, it must go when the IR goes, and it must follow fft_len.
+test_group("process_block_keeps_the_ir_spectrum_only_while_it_is_valid");
+# A deterministic `n`-sample signal in about [-0.9, 0.9].
+fn sp_input(n, seed) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) {
+        vec_push(v, f64_div(f64_from((i + 1) * seed % 89 - 44), f64_from(50)));
+        i = i + 1;
+    }
+    return v;
+}
+# Run one block through `rev` and return its output.
+fn sp_block(rev, input) {
+    var out = naad_vec_zeros(vec_len(input));
+    naad_convolution_process_block(rev, input, out);
+    return out;
+}
+# 1 if two vecs hold the same bits.
+fn sp_equal(a, b) {
+    if (vec_len(a) != vec_len(b)) { return 0; }
+    var i = 0;
+    while (i < vec_len(a)) {
+        if (vec_get(a, i) != vec_get(b, i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+var sp_ir_a = sp_input(16, 7);
+var sp_ir_b = sp_input(16, 13);
+
+# fft_len here is next_pow2(16 + 32 - 1) = 64.
+var sp_kept = naad_convolution_from_ir(sp_ir_a, CV_0_7);
+var sp_fresh = naad_convolution_from_ir(sp_ir_a, CV_0_7);
+var sp_first_k = sp_block(sp_kept, sp_input(32, 3));
+var sp_first_f = sp_block(sp_fresh, sp_input(32, 3));
+assert_eq(sp_equal(sp_first_k, sp_first_f), 1, "the first block matches");
+assert_eq(ConvolutionReverb_ir_spectrum_len(sp_kept), 64, "the spectrum is kept for its fft_len");
+ConvolutionReverb_set_ir_spectrum_len(sp_fresh, 0);
+assert_eq(sp_equal(sp_block(sp_kept, sp_input(32, 5)), sp_block(sp_fresh, sp_input(32, 5))), 1,
+  "a kept spectrum and a fresh transform give the same bits");
+
+# Same length, same fft_len, different IR: only the rebuild can tell them apart.
+var sp_rebuilt = naad_convolution_from_ir(sp_ir_a, CV_0_7);
+var sp_new = naad_convolution_from_ir(sp_ir_b, CV_0_7);
+var sp_old_out = sp_block(sp_rebuilt, sp_input(32, 3));
+naad_convolution_rebuild_from_ir(sp_rebuilt, sp_ir_b);
+assert_eq(ConvolutionReverb_ir_spectrum_len(sp_rebuilt), 0, "a rebuild drops the spectrum");
+var sp_new_out = sp_block(sp_new, sp_input(32, 3));
+assert_eq(sp_equal(sp_block(sp_rebuilt, sp_input(32, 3)), sp_new_out), 1,
+  "after a rebuild the block sounds like the new IR");
+assert_eq(sp_equal(sp_old_out, sp_new_out), 0, "the two IRs differ (not a vacuous compare)");
+
+# Block sizes that move fft_len down and back must keep matching the sample path.
+var sp_blocks = naad_convolution_from_ir(sp_ir_a, CV_0_7);
+var sp_samples = naad_convolution_from_ir(sp_ir_a, CV_0_7);
+var sp_sizes = vec_new();
+vec_push(sp_sizes, 32); vec_push(sp_sizes, 4); vec_push(sp_sizes, 100); vec_push(sp_sizes, 4); vec_push(sp_sizes, 32);
+var sp_same = 1;
+var sp_i = 0;
+while (sp_i < vec_len(sp_sizes)) {
+    var sp_in = sp_input(vec_get(sp_sizes, sp_i), 11 + sp_i * 2);
+    var sp_out = sp_block(sp_blocks, sp_in);
+    var sp_j = 0;
+    while (sp_j < vec_len(sp_in)) {
+        var sp_want = naad_convolution_process_sample(sp_samples, vec_get(sp_in, sp_j));
+        if (approx(vec_get(sp_out, sp_j), sp_want, CV_1E_9) == 0) { sp_same = 0; }
+        sp_j = sp_j + 1;
+    }
+    sp_i = sp_i + 1;
+}
+assert_eq(sp_same, 1, "changing fft_len rebuilds the spectrum for the new length");
+
+# ================================================================
+test_group("process_block_rebuilds_the_spectrum_after_scratch_grows");
+# A non-finite block grows the scratch, then leaves for the sample path before the
+# spectrum is rebuilt. The next short block must not trust the old fft_len.
+var gs_ir = vec_new();
+vec_push(gs_ir, F64_ONE);
+vec_push(gs_ir, F64_HALF);
+vec_push(gs_ir, F64_HALF);
+vec_push(gs_ir, F64_HALF);
+var gs_rev = naad_convolution_from_ir(gs_ir, F64_ONE);
+var gs_ref = naad_convolution_from_ir(gs_ir, F64_ONE);
+var gs_a = naad_vec_zeros(2);
+var gs_b = naad_vec_zeros(2);
+vec_set(gs_a, 0, F64_ONE);
+vec_set(gs_a, 1, F64_ONE);
+naad_convolution_process_block(gs_rev, gs_a, gs_b);
+var gs_sink = naad_convolution_process_sample(gs_ref, F64_ONE);
+gs_sink = naad_convolution_process_sample(gs_ref, F64_ONE);
+var gs_big = naad_vec_zeros(16);
+var gs_out = naad_vec_zeros(16);
+var gs_i = 0;
+while (gs_i < 16) { vec_set(gs_big, gs_i, F64_ONE); gs_i = gs_i + 1; }
+vec_set(gs_big, 15, 0x7FF8000000000000);
+naad_convolution_process_block(gs_rev, gs_big, gs_out);
+gs_i = 0;
+while (gs_i < 16) { gs_sink = naad_convolution_process_sample(gs_ref, vec_get(gs_big, gs_i)); gs_i = gs_i + 1; }
+var gs_round = 0;
+var gs_bad = 0;
+while (gs_round < 8) {
+    naad_convolution_process_block(gs_rev, gs_a, gs_b);
+    var gs_p = naad_convolution_process_sample(gs_ref, F64_ONE);
+    var gs_q = naad_convolution_process_sample(gs_ref, F64_ONE);
+    if (gs_round >= 3) {
+        if (f64_gt(f64_abs(f64_sub(vec_get(gs_b, 0), gs_p)), 0x3E7AD7F29ABCAF48) == 1) { gs_bad = gs_bad + 1; }
+        if (f64_gt(f64_abs(f64_sub(vec_get(gs_b, 1), gs_q)), 0x3E7AD7F29ABCAF48) == 1) { gs_bad = gs_bad + 1; }
+    }
+    gs_round = gs_round + 1;
+}
+assert_eq(gs_bad, 0, "short blocks after the growth agree with the sample path");
+
 var rc = assert_summary();
 syscall(60, rc);

@@ -35,6 +35,8 @@ var OSC_C0_01  = 0x3F847AE147AE147B;   # 0.01  (pulse-width lower clamp)
 var OSC_C0_99  = 0x3FEFAE147AE147AE;   # 0.99  (pulse-width upper clamp)
 var OSC_C0_25  = 0x3FD0000000000000;   # 0.25  (stateless triangle knee)
 var OSC_C0_75  = 0x3FE8000000000000;   # 0.75  (stateless triangle knee)
+var OSC_C4     = 0x4010000000000000;   # 4.0   (triangle slope)
+var OSC_NEG_ONE = 0xBFF0000000000000;  # -1.0  (naive square low level)
 
 # PRNG seed for noise waveforms (matches Rust NoiseGenerator::new(_, 42)).
 var OSC_NOISE_SEED = 42;
@@ -74,6 +76,30 @@ fn osc_polyblep(t, dt) {
         return f64_mul(f64_mul(nd2, f64_add(F64_ONE, nd)), F64_HALF);
     }
     return 0;
+}
+
+# ================================================================
+# _osc_rem1 -- x % 1.0 with Rust's semantics: the result takes the dividend's
+# sign. f64_fract floors, which is rem_euclid, a different value for negative x;
+# osc_set_phase wants that one and these wrap sites want this one. The phase goes
+# negative through osc_advance_phase_sine(self, dt < 0).
+# ================================================================
+#inline
+#must_use
+fn _osc_rem1(x) {
+    return f64_sub(x, f64_trunc(x));
+}
+
+# ================================================================
+# _osc_square_blep -- band-limited 50% square at phase t: the Square arm of both
+# waveform switches, and the input the Triangle integrates.
+# ================================================================
+#must_use
+fn _osc_square_blep(t, dt) {
+    var naive = OSC_NEG_ONE;
+    if (f64_lt(t, F64_HALF) == 1) { naive = F64_ONE; }
+    var t2 = _osc_rem1(f64_add(t, F64_HALF));
+    return f64_sub(f64_add(naive, osc_polyblep(t, dt)), osc_polyblep(t2, dt));
 }
 
 # ================================================================
@@ -160,25 +186,18 @@ fn osc_next_sample(self) {
         var saw_naive = f64_sub(f64_mul(F64_TWO, t), F64_ONE);
         sample = f64_sub(saw_naive, osc_polyblep(t, dt));
     } elif (wf == WAVEFORM_SQUARE) {
-        var sq_naive = f64_neg(F64_ONE);
-        if (f64_lt(t, F64_HALF) == 1) { sq_naive = F64_ONE; }
-        var sq_t2 = f64_fract(f64_add(t, F64_HALF));
-        sample = f64_sub(f64_add(sq_naive, osc_polyblep(t, dt)), osc_polyblep(sq_t2, dt));
+        sample = _osc_square_blep(t, dt);
     } elif (wf == WAVEFORM_TRIANGLE) {
-        var tr_square = f64_neg(F64_ONE);
-        if (f64_lt(t, F64_HALF) == 1) { tr_square = F64_ONE; }
-        var tr_t2 = f64_fract(f64_add(t, F64_HALF));
-        var tr_blep = f64_sub(f64_add(tr_square, osc_polyblep(t, dt)), osc_polyblep(tr_t2, dt));
         # leaky integrator: triangle_sum = 0.999*triangle_sum + square_blep*dt*4
         var tr_decay = f64_mul(OSC_C0_999, Oscillator_triangle_sum(self));
-        var ts = f64_add(tr_decay, f64_mul(f64_mul(tr_blep, dt), f64_from(4)));
+        var ts = f64_add(tr_decay, f64_mul(f64_mul(_osc_square_blep(t, dt), dt), OSC_C4));
         Oscillator_set_triangle_sum(self, ts);
-        sample = f64_clamp(ts, f64_neg(F64_ONE), F64_ONE);
+        sample = f64_clamp(ts, OSC_NEG_ONE, F64_ONE);
     } elif (wf == WAVEFORM_PULSE) {
         var pw = f64_clamp(Oscillator_pulse_width(self), OSC_C0_01, OSC_C0_99);
-        var pl_naive = f64_neg(F64_ONE);
+        var pl_naive = OSC_NEG_ONE;
         if (f64_lt(t, pw) == 1) { pl_naive = F64_ONE; }
-        var pl_t2 = f64_fract(f64_add(t, f64_sub(F64_ONE, pw)));
+        var pl_t2 = _osc_rem1(f64_add(t, f64_sub(F64_ONE, pw)));
         sample = f64_sub(f64_add(pl_naive, osc_polyblep(t, dt)), osc_polyblep(pl_t2, dt));
     } else {
         # Noise waveforms -- delegate to the owned NoiseGenerator (White =
@@ -306,22 +325,17 @@ fn osc_stateless_waveform_sample(waveform, t, dt) {
         var sw_naive = f64_sub(f64_mul(F64_TWO, t), F64_ONE);
         return f64_sub(sw_naive, osc_polyblep(t, dt));
     } elif (waveform == WAVEFORM_SQUARE) {
-        var sq_naive = f64_neg(F64_ONE);
-        if (f64_lt(t, F64_HALF) == 1) { sq_naive = F64_ONE; }
-        var sq_t2 = f64_fract(f64_add(t, F64_HALF));
-        return f64_sub(f64_add(sq_naive, osc_polyblep(t, dt)), osc_polyblep(sq_t2, dt));
+        return _osc_square_blep(t, dt);
     } elif (waveform == WAVEFORM_TRIANGLE) {
         if (f64_lt(t, OSC_C0_25) == 1) {
-            return f64_mul(f64_from(4), t);
+            return f64_mul(OSC_C4, t);
         } elif (f64_lt(t, OSC_C0_75) == 1) {
-            return f64_sub(F64_TWO, f64_mul(f64_from(4), t));
+            return f64_sub(F64_TWO, f64_mul(OSC_C4, t));
         }
-        return f64_sub(f64_mul(f64_from(4), t), f64_from(4));
+        return f64_sub(f64_mul(OSC_C4, t), OSC_C4);
     } elif (waveform == WAVEFORM_PULSE) {
-        var pl_naive = f64_neg(F64_ONE);
-        if (f64_lt(t, F64_HALF) == 1) { pl_naive = F64_ONE; }
-        var pl_t2 = f64_fract(f64_add(t, F64_HALF));
-        return f64_sub(f64_add(pl_naive, osc_polyblep(t, dt)), osc_polyblep(pl_t2, dt));
+        # Pulse width is not per-voice: unison pulse is a 50% square.
+        return _osc_square_blep(t, dt);
     }
     # Noise waveforms make no sense for unison detuning -> silence.
     return 0;

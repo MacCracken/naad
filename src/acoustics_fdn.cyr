@@ -17,9 +17,10 @@
 #
 # Requires (from the build/test unit): stdlib alloc/vec + math/ganita
 # (F64_ONE/HALF, f64_add/sub/mul/div/neg/abs/max/clamp/pow/sqrt/from/to/gt/le)
-# and the L0 modules error.cyr (flush_denormal, naad_is_finite, NAAD_ERR_*) and the
-# goonj fdn engine (fdn_config_for_room / fdn_new / fdn_process_sample /
-# fdn_reset). The module file has no `include` lines.
+# and the L0 modules error.cyr (flush_denormal, naad_is_finite, naad_vec_zeros,
+# NAAD_ERR_*) and delay.cyr (delay_len_overflows) and the goonj fdn engine
+# (fdn_config_for_room / fdn_new / fdn_process_sample / fdn_reset). The module
+# file has no `include` lines.
 
 # ================================================================
 # Float literals (IEEE-754 bit patterns).
@@ -40,6 +41,11 @@ var FDN_MS_7 = 0x40526ccccccccccd;   # 73.7
 # Number of delay lines in MatrixFdn (Hadamard requires a power of 2; 8 is a
 # sweet spot).
 var MATRIX_FDN_N = 8;
+
+# sqrt(MATRIX_FDN_N) and 1 / that: the output and feedback scales, used per
+# sample. tests/acoustics_fdn.tcyr pins them to the computed values.
+var FDN_SQRT_N     = 0x4006a09e667f3bcd;   # 2.8284271247461903
+var FDN_INV_SQRT_N = 0x3fd6a09e667f3bcc;   # 0.35355339059327373
 
 # ================================================================
 # FdnReverb -- goonj-backed FDN reverb with a wet/dry mix.
@@ -68,9 +74,11 @@ struct FdnReverb {
 # `target_rt60` sets decay time. Returns the struct pointer on success, or
 # NAAD_ERR_COMPUTATION if any parameter is out of range, which includes a room
 # whose delay reaches goonj's FDN_MAX_DELAY_SAMPLES (about 412 km at 48 kHz, and
-# every non-finite dimension). goonj clamps there and asks its consumers to
-# refuse such rooms first: the clamped lines take about 5.5 GiB of address space,
-# and goonj ends the process if that is refused. ADR-0004. Ports FdnReverb::new.
+# any infinite dimension). goonj clamps there and asks its consumers to refuse
+# such rooms first: the clamped lines take about 5.5 GiB of address space, and
+# goonj ends the process if that is refused. ADR-0004. A NaN dimension is not
+# refused: its delays cast to 1 sample, as Rust's `as u32` makes them. Ports
+# FdnReverb::new.
 # ================================================================
 #must_use
 fn naad_fdn_reverb_new(room_length, room_width, room_height, target_rt60, sample_rate, mix) {
@@ -136,8 +144,6 @@ fn naad_fdn_reverb_reset(self) {
 # caller-owned 8-slot scratch vec (via vec_set, no allocation). The hot buffer
 # loop calls this against struct-owned scratch to avoid a per-sample alloc; the
 # public one-shot wrapper below allocates a fresh vec once and delegates here.
-# Numerics are bit-identical to the original (same op order, vec_set only
-# replaces vec_push).
 fn _naad_fdn_hadamard8_into(x, out) {
     var x0 = vec_get(x, 0);
     var x1 = vec_get(x, 1);
@@ -173,12 +179,7 @@ fn _naad_fdn_hadamard8_into(x, out) {
 # Allocating form of the eight-point Hadamard mix: a new vec of `x` mixed.
 #must_use
 fn naad_fdn_hadamard8(x) {
-    var out = vec_new();
-    var i = 0;
-    while (i < MATRIX_FDN_N) {
-        vec_push(out, 0);
-        i = i + 1;
-    }
+    var out = naad_vec_zeros(MATRIX_FDN_N);
     _naad_fdn_hadamard8_into(x, out);
     return out;
 }
@@ -227,7 +228,9 @@ fn _matrix_fdn_ms(i) {
 # naad_fdn_matrix_new -- create a color-free Hadamard-FDN reverb. `target_rt60`
 # sets decay time; delay lengths are primes around 30-80 ms scaled to the
 # sample rate; per-line damping gains give a 60 dB drop per RT60. Returns the
-# struct pointer, or NAAD_ERR_COMPUTATION on bad parameters. Ports MatrixFdn::new.
+# struct pointer, or NAAD_ERR_COMPUTATION on bad parameters, which includes a
+# rate whose longest delay reaches VEC_CAP_MAX (from about 3.64 GHz). Below that
+# running out of memory ends the process. Ports MatrixFdn::new.
 # ================================================================
 #must_use
 fn naad_fdn_matrix_new(target_rt60, sample_rate, mix) {
@@ -237,12 +240,15 @@ fn naad_fdn_matrix_new(target_rt60, sample_rate, mix) {
 
     var sr = f64_from(sample_rate);
 
-    # Delay lengths (samples) = (ms * 0.001 * sample_rate).max(1) as usize.
+    # Delay lengths (samples) = (ms * 0.001 * sample_rate).max(1) as usize. Every
+    # length is tested before any line is allocated: a line a vec cannot hold
+    # would end the process. ADR-0004.
     var delay_lengths = vec_new();
     var i = 0;
     while (i < MATRIX_FDN_N) {
         var secs = f64_mul(_matrix_fdn_ms(i), FDN_MS_SCALE);
         var samples = f64_max(f64_mul(secs, sr), F64_ONE);
+        if (delay_len_overflows(samples) == 1) { return NAAD_ERR_COMPUTATION; }
         vec_push(delay_lengths, f64_to(samples));
         i = i + 1;
     }
@@ -258,48 +264,28 @@ fn naad_fdn_matrix_new(target_rt60, sample_rate, mix) {
         i = i + 1;
     }
 
-    # Allocate ring buffers, cursors, and damping state.
+    # One ring buffer per line.
     var buffers = vec_new();
-    var positions = vec_new();
-    var damping_state = vec_new();
     i = 0;
     while (i < MATRIX_FDN_N) {
-        var len = vec_get(delay_lengths, i);
-        var line = vec_new();
-        var j = 0;
-        while (j < len) {
-            vec_push(line, 0);
-            j = j + 1;
-        }
-        vec_push(buffers, line);
-        vec_push(positions, 0);
-        vec_push(damping_state, 0);
+        vec_push(buffers, naad_vec_zeros(vec_get(delay_lengths, i)));
         i = i + 1;
     }
 
-    # Per-instance scratch vecs (8 slots each), allocated ONCE here so the hot
-    # process_sample path can overwrite them in place instead of allocating a
-    # fresh result vec per sample (Cyrius bump allocator never frees).
-    var scratch_delay = vec_new();
-    var scratch_had = vec_new();
-    i = 0;
-    while (i < MATRIX_FDN_N) {
-        vec_push(scratch_delay, 0);
-        vec_push(scratch_had, 0);
-        i = i + 1;
-    }
-
+    # The two scratch vecs are built once here so the process_sample path can
+    # overwrite them in place: alloc never frees, so a result vec per sample
+    # would be a leak.
     var self = alloc(sizeof(MatrixFdn));
     MatrixFdn_set_buffers(self, buffers);
-    MatrixFdn_set_positions(self, positions);
+    MatrixFdn_set_positions(self, naad_vec_zeros(MATRIX_FDN_N));
     MatrixFdn_set_delay_lengths(self, delay_lengths);
-    MatrixFdn_set_damping_state(self, damping_state);
+    MatrixFdn_set_damping_state(self, naad_vec_zeros(MATRIX_FDN_N));
     MatrixFdn_set_damping_gain(self, damping_gain);
     MatrixFdn_set_target_rt60(self, target_rt60);
     MatrixFdn_set_sample_rate(self, sample_rate);
     MatrixFdn_set_mix(self, f64_clamp(mix, 0, F64_ONE));
-    MatrixFdn_set_scratch_delay(self, scratch_delay);
-    MatrixFdn_set_scratch_had(self, scratch_had);
+    MatrixFdn_set_scratch_delay(self, naad_vec_zeros(MATRIX_FDN_N));
+    MatrixFdn_set_scratch_had(self, naad_vec_zeros(MATRIX_FDN_N));
     return self;
 }
 
@@ -317,8 +303,6 @@ fn naad_fdn_matrix_process_sample(self, input) {
     var damping_gain = MatrixFdn_damping_gain(self);
     var damping_state = MatrixFdn_damping_state(self);
 
-    var norm = f64_sqrt(f64_from(MATRIX_FDN_N));
-
     # Read delay-line outputs, apply per-line damping, accumulate the sum.
     # Reuse the struct-owned scratch (overwrite via vec_set) -- no per-sample
     # allocation.
@@ -327,9 +311,11 @@ fn naad_fdn_matrix_process_sample(self, input) {
     var i = 0;
     while (i < MATRIX_FDN_N) {
         var line = vec_get(buffers, i);
-        var len = vec_len(line);
-        var read_pos = (vec_get(positions, i) + 1) % len;
-        var damped = f64_mul(vec_get(line, read_pos), vec_get(damping_gain, i));
+        # The oldest slot, read here, is the one written below, so the cursor
+        # advances once, here.
+        var cursor = (vec_get(positions, i) + 1) % vec_len(line);
+        vec_set(positions, i, cursor);
+        var damped = f64_mul(vec_get(line, cursor), vec_get(damping_gain, i));
         var slot = flush_denormal(damped);
         vec_set(delayed, i, slot);
         vec_set(damping_state, i, slot);
@@ -338,23 +324,18 @@ fn naad_fdn_matrix_process_sample(self, input) {
     }
 
     # Output sum before writing feedback: sum / sqrt(N).
-    var wet = f64_div(wet_sum, norm);
+    var wet = f64_div(wet_sum, FDN_SQRT_N);
 
     # Apply the normalised Hadamard mix: y = (1/sqrt(N)) * H * x. Write into the
     # struct-owned Hadamard scratch instead of allocating a result vec.
     var h = MatrixFdn_scratch_had(self);
     _naad_fdn_hadamard8_into(delayed, h);
-    var scale = f64_div(F64_ONE, norm);
 
     # Write input + scaled feedback into each line.
     i = 0;
     while (i < MATRIX_FDN_N) {
-        var line = vec_get(buffers, i);
-        var len = vec_len(line);
-        var v = f64_add(input, f64_mul(vec_get(h, i), scale));
-        var wp = (vec_get(positions, i) + 1) % len;
-        vec_set(positions, i, wp);
-        vec_set(line, wp, flush_denormal(v));
+        var v = f64_add(input, f64_mul(vec_get(h, i), FDN_INV_SQRT_N));
+        vec_set(vec_get(buffers, i), vec_get(positions, i), flush_denormal(v));
         i = i + 1;
     }
 

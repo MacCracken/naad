@@ -8,18 +8,23 @@
 # return the struct pointer on success or a negative NAAD_ERR_* on failure;
 # methods become free `wavetable_*` functions taking the struct pointer.
 #
-# MorphWavetable::next_sample_smooth is the cubic B-spline morph; it wraps
-# bspline_eval_1d (in dsp_spectral.cyr, hisab-backed), so ITS test unit adds
-# lib/hisab.cyr + src/dsp_spectral.cyr ahead of this module. Every other
-# wavetable method is hisab-free (only this one references dsp_spectral).
+# MorphWavetable::next_sample_smooth is the cubic B-spline morph. It calls
+# _bspline_eval_1d_into (dsp_spectral.cyr, hisab-backed) and wavetable_morph_new
+# builds HVec3 scratch for it, so any unit that uses a morph adds lib/hisab.cyr +
+# src/dsp_spectral.cyr ahead of this module. Wavetable and WavetableOscillator are
+# hisab-free.
 #
 # Requires (from the build/test unit): stdlib alloc/vec + math/ganita
 # (F64_ONE/TWO/HALF/TAU, f64_clamp, f64_sin/floor) and error.cyr
-# (validate_frequency/validate_sample_rate, naad_is_err/naad_is_finite,
+# (validate_frequency/validate_sample_rate, naad_is_err, naad_vec_copy/zeros,
 # NAAD_ERR_*). The module file itself has no `include` lines.
 
 # ================================================================
-# Wavetable -- one cycle of a waveform.
+# Wavetable -- one cycle of a waveform. Immutable once built: Rust moves a
+# Wavetable into each oscillator, while here oscillators share the pointer, and
+# that sharing is safe only because nothing can change the samples. So the vec
+# below is private: wavetable_from_samples copies its input and wavetable_samples
+# hands out a copy. Oscillators therefore keep the pointer without copying.
 #   samples : vec<f64> waveform samples (one cycle)
 # ================================================================
 #derive(accessors)
@@ -28,9 +33,9 @@ struct Wavetable {
 }
 
 # ================================================================
-# wavetable_from_samples -- build a wavetable from a vec of raw samples.
-# Returns the struct pointer, or NAAD_ERR_INVALID_PARAMETER if `samples` is
-# empty. Ports Wavetable::from_samples.
+# wavetable_from_samples -- build a wavetable from a vec of raw samples, which are
+# copied (Rust takes the Vec by value, ADR-0005). Returns the struct pointer, or
+# NAAD_ERR_INVALID_PARAMETER if `samples` is empty. Ports Wavetable::from_samples.
 # ================================================================
 #must_use
 fn wavetable_from_samples(samples) {
@@ -38,7 +43,7 @@ fn wavetable_from_samples(samples) {
         return NAAD_ERR_INVALID_PARAMETER;
     }
     var self = alloc(sizeof(Wavetable));
-    Wavetable_set_samples(self, samples);
+    Wavetable_set_samples(self, naad_vec_copy(samples));
     return self;
 }
 
@@ -48,8 +53,8 @@ fn wavetable_from_samples(samples) {
 # `amplitudes` (a vec of f64). Only the first min(num_harmonics,
 # amplitudes.len) harmonics are generated. The result is normalised so its
 # peak magnitude is 1.0. Returns the pointer, or NAAD_ERR_INVALID_PARAMETER if
-# num_harmonics == 0, amplitudes is empty, or size == 0.
-# Ports Wavetable::from_harmonics.
+# num_harmonics == 0, amplitudes is empty, size == 0, or size exceeds VEC_CAP_MAX,
+# the most a stdlib vec holds. Ports Wavetable::from_harmonics.
 # ================================================================
 #must_use
 fn wavetable_from_harmonics(num_harmonics, amplitudes, size) {
@@ -62,13 +67,11 @@ fn wavetable_from_harmonics(num_harmonics, amplitudes, size) {
     if (size <= 0) {
         return NAAD_ERR_INVALID_PARAMETER;
     }
-
-    var samples = vec_new();
-    var z = 0;
-    while (z < size) {
-        vec_push(samples, 0);
-        z = z + 1;
+    if (size > VEC_CAP_MAX) {
+        return NAAD_ERR_INVALID_PARAMETER;
     }
+
+    var samples = naad_vec_zeros(size);
 
     var harmonics_to_generate = num_harmonics;
     var alen = vec_len(amplitudes);
@@ -115,13 +118,15 @@ fn wavetable_from_harmonics(num_harmonics, amplitudes, size) {
 }
 
 # ================================================================
-# wavetable_samples -- shared reference to the waveform samples (the vec).
+# wavetable_samples -- the waveform samples, as a fresh vec. Rust returns a
+# read-only `&[f32]`; a vec has no read-only form, and every oscillator on this
+# table reads the original. Allocates n * 8 bytes per call and the allocator never
+# frees, so keep the result rather than calling this in a loop.
 # Ports Wavetable::samples.
 # ================================================================
-#inline
 #must_use
 fn wavetable_samples(self) {
-    return Wavetable_samples(self);
+    return naad_vec_copy(Wavetable_samples(self));
 }
 
 # ================================================================
@@ -146,6 +151,38 @@ fn wavetable_is_empty(self) {
 }
 
 # ================================================================
+# _wt_index -- the lower sample index for floored position `index_floor` in a
+# table of n samples. Rust's `as usize` takes a negative value to 0; f64_to keeps
+# it negative. Saturate at the cast. +overflow is INT64_MAX and `% n` keeps it in
+# range.
+# ================================================================
+#must_use
+fn _wt_index(index_floor, n) {
+    var floor_i = f64_to(index_floor);
+    if (floor_i < 0) { floor_i = 0; }
+    return floor_i % n;
+}
+
+# Linear interpolation between samples i0 and i1, which are reduced mod the length
+# by every caller, so the per-sample vec_get bounds checks are skipped. Relies on
+# the vec header layout, as naad_vec_zeros does.
+#must_use
+fn _wt_lerp(samples, i0, i1, frac) {
+    var data = load64(samples);
+    var s0 = load64(data + i0 * 8);
+    var s1 = load64(data + i1 * 8);
+    return f64_add(f64_mul(s0, f64_sub(F64_ONE, frac)), f64_mul(s1, frac));
+}
+
+# Advance a phase accumulator one sample, with the oracle's single subtraction.
+#must_use
+fn _wt_advance_phase(phase, frequency, sample_rate) {
+    var next = f64_add(phase, f64_div(frequency, sample_rate));
+    if (f64_ge(next, F64_ONE) == 1) { next = f64_sub(next, F64_ONE); }
+    return next;
+}
+
+# ================================================================
 # wavetable_read_interpolated -- read a sample at fractional `phase`
 # (0.0..1.0) with linear interpolation and wraparound.
 # Ports Wavetable::read_interpolated.
@@ -154,21 +191,11 @@ fn wavetable_is_empty(self) {
 fn wavetable_read_interpolated(self, phase) {
     var samples = Wavetable_samples(self);
     var n = vec_len(samples);
-    var len = f64_from(n);
-    var index = f64_mul(phase, len);
+    var index = f64_mul(phase, f64_from(n));
     var index_floor = f64_floor(index);
     var frac = f64_sub(index, index_floor);
-
-    # Rust's `as usize` takes a negative value to 0; f64_to keeps it negative.
-    # Saturate at the cast. +overflow is INT64_MAX and `% n` keeps it in range.
-    var floor_i = f64_to(index_floor);
-    if (floor_i < 0) { floor_i = 0; }
-    var i0 = floor_i % n;
-    var i1 = (i0 + 1) % n;
-
-    var s0 = vec_get(samples, i0);
-    var s1 = vec_get(samples, i1);
-    return f64_add(f64_mul(s0, f64_sub(F64_ONE, frac)), f64_mul(s1, frac));
+    var i0 = _wt_index(index_floor, n);
+    return _wt_lerp(samples, i0, (i0 + 1) % n, frac);
 }
 
 # ================================================================
@@ -187,12 +214,16 @@ struct WavetableOscillator {
 }
 
 # ================================================================
-# wavetable_osc_new -- new oscillator over `table`. Returns the pointer,
-# or a negative NAAD_ERR_* on invalid sample_rate/frequency.
-# Ports WavetableOscillator::new.
+# wavetable_osc_new -- new oscillator over `table`. Returns the pointer, or a
+# negative NAAD_ERR_* on invalid sample_rate/frequency, or on a `table` that is a
+# failed wavetable_from_*: Rust's `?` stops that at the call site, and stored here
+# it would fault on the first sample. Ports WavetableOscillator::new.
 # ================================================================
 #must_use
 fn wavetable_osc_new(table, frequency, sample_rate) {
+    if (table <= 0) {
+        return NAAD_ERR_INVALID_PARAMETER;
+    }
     var e = validate_sample_rate(sample_rate);
     if (naad_is_err(e) == 1) {
         return e;
@@ -257,14 +288,11 @@ fn wavetable_osc_set_frequency(self, freq) {
 # ================================================================
 #must_use
 fn wavetable_osc_next_sample(self) {
-    var sample = wavetable_read_interpolated(WavetableOscillator_table(self), WavetableOscillator_phase(self));
-
-    var phase = f64_add(WavetableOscillator_phase(self),
-      f64_div(WavetableOscillator_frequency(self), WavetableOscillator_sample_rate(self)));
-    if (f64_ge(phase, F64_ONE) == 1) {
-        phase = f64_sub(phase, F64_ONE);
-    }
-    WavetableOscillator_set_phase(self, phase);
+    var phase = WavetableOscillator_phase(self);
+    var sample = wavetable_read_interpolated(WavetableOscillator_table(self), phase);
+    var frequency = WavetableOscillator_frequency(self);
+    var sample_rate = WavetableOscillator_sample_rate(self);
+    WavetableOscillator_set_phase(self, _wt_advance_phase(phase, frequency, sample_rate));
     return sample;
 }
 
@@ -284,35 +312,46 @@ fn wavetable_osc_fill_buffer(self, buffer) {
 
 # ================================================================
 # MorphWavetable -- a vec of equal-length wavetables blended by position.
-#   tables      : vec of Wavetable pointers
+#   tables      : private vec of Wavetable pointers (a copy: Rust takes the Vec by
+#                 value and exposes only a read-only slice, ADR-0005)
+#   num_tables  : its length. Fixed at construction; every per-sample path reads
+#                 this, and the scratch below is sized to it.
 #   position    : f64 morph position (0.0..1.0)
 #   phase       : f64 current phase (0.0..1.0)
 #   sample_rate : f64 Hz
 #   frequency   : f64 playback frequency (Hz)
 # ================================================================
-# scratch_cps / scratch_knots / scratch_cps_arr / scratch_lifts: scratch for the
-# smooth (cubic B-spline) morph path, allocated once at construction. The oracle
-# allocates a Vec per call and DROPS it (rust-old/src/wavetable.rs:361-366);
-# under lib/alloc.cyr's bump allocator there is no free, so the same shape
-# leaked ~464 B/sample -- ~22 MB/s at 48 kHz. Sized for num_tables, which is
-# fixed for the object's lifetime.
+#   table_len   : samples per table (every table shares it, so they also share
+#                 one lookup: read_i0 / read_i1 / read_frac / read_phase, see
+#                 _morph_locate)
+#   span_knots  : vec of the interior knots, for _morph_span
+# scratch_cps / scratch_knots / scratch_cps_arr: scratch for the
+# smooth (cubic B-spline) morph path. Allocated once here because the oracle's
+# per-call Vec would be a permanent leak under a bump allocator with no free.
 #derive(accessors)
 struct MorphWavetable {
     tables;
+    num_tables;
+    table_len;
     position;
     phase;
     sample_rate;
     frequency;
+    read_i0;
+    read_i1;
+    read_frac;
+    read_phase;
+    span_knots;
     scratch_cps;
     scratch_knots;
     scratch_cps_arr;
-    scratch_lifts;
 }
 
 # ================================================================
 # wavetable_morph_new -- new morph wavetable over `tables`. Returns the
-# pointer, or a negative NAAD_ERR_* if tables is empty, the wavetables differ
-# in length, or sample_rate/frequency is invalid. Ports MorphWavetable::new.
+# pointer, or a negative NAAD_ERR_* if tables is empty, holds a failed
+# wavetable_from_*, the wavetables differ in length, or sample_rate/frequency is
+# invalid. Ports MorphWavetable::new.
 # ================================================================
 #must_use
 fn wavetable_morph_new(tables, frequency, sample_rate) {
@@ -320,9 +359,16 @@ fn wavetable_morph_new(tables, frequency, sample_rate) {
     if (nt == 0) {
         return NAAD_ERR_INVALID_PARAMETER;
     }
+    var i = 0;
+    while (i < nt) {
+        if (vec_get(tables, i) <= 0) {
+            return NAAD_ERR_INVALID_PARAMETER;
+        }
+        i = i + 1;
+    }
     # All tables must share a length for correct morphing.
     var first_len = wavetable_len(vec_get(tables, 0));
-    var i = 0;
+    i = 0;
     while (i < nt) {
         if (wavetable_len(vec_get(tables, i)) != first_len) {
             return NAAD_ERR_INVALID_PARAMETER;
@@ -338,33 +384,42 @@ fn wavetable_morph_new(tables, frequency, sample_rate) {
         return e;
     }
     var self = alloc(sizeof(MorphWavetable));
-    MorphWavetable_set_tables(self, tables);
+    MorphWavetable_set_tables(self, naad_vec_copy(tables));
+    MorphWavetable_set_num_tables(self, nt);
+    MorphWavetable_set_table_len(self, first_len);
     MorphWavetable_set_position(self, 0);
     MorphWavetable_set_phase(self, 0);
     MorphWavetable_set_sample_rate(self, sample_rate);
     MorphWavetable_set_frequency(self, frequency);
 
+    # The interior knots of the clamped open-uniform vector, by the same expression
+    # as _bspline_eval_1d_into, so _morph_span agrees with it bit for bit.
+    var interior = nt - 4;
+    if (interior < 0) { interior = 0; }
+    var span_knots = naad_vec_zeros(interior);
+    var ki = 0;
+    while (ki < interior) {
+        vec_set(span_knots, ki, f64_div(f64_from(ki + 1), f64_from(interior + 1)));
+        ki = ki + 1;
+    }
+    MorphWavetable_set_span_knots(self, span_knots);
+
     # Smooth-morph scratch, sized once for nt control points at cubic degree 3
     # (n_knots = nt + 3 + 1). Reused every sample by
     # wavetable_morph_next_sample_smooth via _bspline_eval_1d_into.
-    MorphWavetable_set_scratch_cps(self, vec_new());
+    MorphWavetable_set_scratch_cps(self, naad_vec_zeros(nt));
     MorphWavetable_set_scratch_knots(self, alloc((nt + 4) * 8));
     MorphWavetable_set_scratch_cps_arr(self, alloc(nt * 8));
-    var lifts = vec_new();
-    var li = 0;
-    while (li < nt) {
-        vec_push(lifts, hvec3_new(0, 0, 0));
-        li = li + 1;
-    }
-    MorphWavetable_set_scratch_lifts(self, lifts);
     return self;
 }
 
-# Shared reference to the wavetables (the vec). Ports MorphWavetable::tables.
-#inline
+# The wavetables, as a fresh vec of the shared Wavetable pointers. Rust returns a
+# read-only slice; the morph's own vec must keep the length its scratch is sized
+# to. Allocates per call, so keep the result rather than calling this in a loop.
+# Ports MorphWavetable::tables.
 #must_use
 fn wavetable_morph_tables(self) {
-    return MorphWavetable_tables(self);
+    return naad_vec_copy(MorphWavetable_tables(self));
 }
 
 # Current morph position (0.0..1.0). Ports MorphWavetable::position.
@@ -405,95 +460,138 @@ fn wavetable_morph_set_morph(self, position) {
 }
 
 # ================================================================
+# _morph_locate -- find `phase` in the tables once for this sample. They all have
+# table_len samples, so one index and fraction serves every read.
+# ================================================================
+fn _morph_locate(self, phase) {
+    var n = MorphWavetable_table_len(self);
+    var index = f64_mul(phase, f64_from(n));
+    var index_floor = f64_floor(index);
+    var i0 = _wt_index(index_floor, n);
+    MorphWavetable_set_read_i0(self, i0);
+    MorphWavetable_set_read_i1(self, (i0 + 1) % n);
+    MorphWavetable_set_read_frac(self, f64_sub(index, index_floor));
+    MorphWavetable_set_read_phase(self, phase);
+    return 0;
+}
+
+# Table `t` at the phase _morph_locate found. The shared index is only good for a
+# table of table_len samples, and Wavetable_samples is a public setter.
+#must_use
+fn _morph_read(self, t) {
+    var table = vec_get(MorphWavetable_tables(self), t);
+    var samples = Wavetable_samples(table);
+    if (vec_len(samples) != MorphWavetable_table_len(self)) {
+        return wavetable_read_interpolated(table, MorphWavetable_read_phase(self));
+    }
+    return _wt_lerp(samples, MorphWavetable_read_i0(self), MorphWavetable_read_i1(self),
+      MorphWavetable_read_frac(self));
+}
+
+# Linear blend of the two tables either side of `position`.
+#must_use
+fn _morph_linear(self, num_tables) {
+    var scaled = f64_mul(MorphWavetable_position(self), f64_from(num_tables - 1));
+    # Rust's `as usize` takes a negative value to 0; f64_to keeps it negative.
+    # Saturate at the cast, on both sides: f64_to gives INT64_MAX on +overflow.
+    var idx_low = f64_to(f64_floor(scaled));
+    if (idx_low < 0) { idx_low = 0; }
+    if (idx_low > num_tables - 2) { idx_low = num_tables - 2; }
+    var frac = f64_sub(scaled, f64_from(idx_low));
+    var s_low = _morph_read(self, idx_low);
+    var s_high = _morph_read(self, idx_low + 1);
+    return f64_add(f64_mul(s_low, f64_sub(F64_ONE, frac)), f64_mul(s_high, frac));
+}
+
+# Advance the morph's phase one sample from `phase`.
+fn _morph_advance(self, phase) {
+    var frequency = MorphWavetable_frequency(self);
+    var sample_rate = MorphWavetable_sample_rate(self);
+    MorphWavetable_set_phase(self, _wt_advance_phase(phase, frequency, sample_rate));
+    return 0;
+}
+
+# ================================================================
+# _morph_span -- the knot span holding t in [0, 1]: the largest k in
+# [3, num_tables - 1] with knots[k] <= t, which is hisab's span search. A cubic
+# reads control points k - 3 .. k and no others.
+# ================================================================
+#must_use
+fn _morph_span(self, t) {
+    var knots = MorphWavetable_span_knots(self);
+    var n = vec_len(knots);
+    var j = 0;
+    while (j < n) {
+        if (f64_gt(vec_get(knots, j), t) == 1) { return 3 + j; }
+        j = j + 1;
+    }
+    return 3 + n;
+}
+
+# ================================================================
 # wavetable_morph_next_sample -- next sample, linearly blending the two
 # adjacent tables at the current morph position, then advancing the phase.
 # Ports MorphWavetable::next_sample.
 # ================================================================
 #must_use
 fn wavetable_morph_next_sample(self) {
-    var tables = MorphWavetable_tables(self);
-    var num_tables = vec_len(tables);
+    var num_tables = MorphWavetable_num_tables(self);
     var phase = MorphWavetable_phase(self);
+    _morph_locate(self, phase);
 
     var sample = 0;
     if (num_tables == 1) {
-        sample = wavetable_read_interpolated(vec_get(tables, 0), phase);
+        sample = _morph_read(self, 0);
     } else {
-        var scaled = f64_mul(MorphWavetable_position(self), f64_from(num_tables - 1));
-        # Rust's `as usize` takes a negative value to 0; f64_to keeps it negative.
-        # Saturate at the cast, on both sides: f64_to gives INT64_MAX on +overflow.
-        var idx_low = f64_to(f64_floor(scaled));
-        if (idx_low < 0) { idx_low = 0; }
-        if (idx_low > num_tables - 2) {
-            idx_low = num_tables - 2;
-        }
-        var idx_high = idx_low + 1;
-        var frac = f64_sub(scaled, f64_from(idx_low));
-
-        var s_low = wavetable_read_interpolated(vec_get(tables, idx_low), phase);
-        var s_high = wavetable_read_interpolated(vec_get(tables, idx_high), phase);
-        sample = f64_add(f64_mul(s_low, f64_sub(F64_ONE, frac)), f64_mul(s_high, frac));
+        sample = _morph_linear(self, num_tables);
     }
 
-    var new_phase = f64_add(phase, f64_div(MorphWavetable_frequency(self), MorphWavetable_sample_rate(self)));
-    if (f64_ge(new_phase, F64_ONE) == 1) {
-        new_phase = f64_sub(new_phase, F64_ONE);
-    }
-    MorphWavetable_set_phase(self, new_phase);
+    _morph_advance(self, phase);
     return sample;
 }
 
 # wavetable_morph_next_sample_smooth -- cubic B-spline morph across tables.
 # Ports MorphWavetable::next_sample_smooth. With < 4 tables, falls back to the
-# linear wavetable_morph_next_sample. Otherwise samples every table at the
-# current phase and evaluates a degree-3 B-spline across those control points
-# at `position`, with a linear blend fallback if bspline_eval_1d returns None
-# (NaN sentinel). Requires bspline_eval_1d (dsp_spectral.cyr) + hisab.
+# linear wavetable_morph_next_sample. Otherwise evaluates a degree-3 B-spline with
+# the tables at the current phase as control points, at `position`, with a linear
+# blend fallback where the oracle's bspline_eval_1d returns None. Only the four
+# tables in the span are read: the oracle reads every table, but the rest cannot
+# reach the result and a table read has no side effect. Their scratch_cps entries
+# stay stale, so this needs _bspline_eval_1d_into (dsp_spectral.cyr) to read only
+# control points k - 3 .. k, as de Boor's algorithm does.
 #must_use
 fn wavetable_morph_next_sample_smooth(self) {
-    var tables = MorphWavetable_tables(self);
-    var num_tables = vec_len(tables);
+    var num_tables = MorphWavetable_num_tables(self);
     if (num_tables < 4) { return wavetable_morph_next_sample(self); }
 
     var phase = MorphWavetable_phase(self);
     var position = MorphWavetable_position(self);
+    _morph_locate(self, phase);
 
-    # Control points: each table read at the current phase. vec_truncate is the
-    # bounded-memory reset primitive -- vec_new here would leak 152 B/sample.
-    var cps = MorphWavetable_scratch_cps(self);
-    vec_truncate(cps, 0);
-    var i = 0;
-    while (i < num_tables) {
-        vec_push(cps, wavetable_read_interpolated(vec_get(tables, i), phase));
-        i = i + 1;
+    # The oracle's bspline_eval_1d returns None only outside 0.0..=1.0, NaN included,
+    # so both comparisons must hold. Inside that range its Some value is the sample
+    # even when a table's NaN or infinity made it non-finite, so the value must not
+    # decide the fallback.
+    var in_range = 0;
+    if (f64_ge(position, 0) == 1) {
+        if (f64_le(position, F64_ONE) == 1) { in_range = 1; }
     }
-
-    # Guards that bspline_eval_1d would apply; _into is the scratch-taking core.
-    var sample = SPEC_NAN;
-    if (f64_lt(position, 0) == 0) {
-        if (f64_gt(position, F64_ONE) == 0) {
-            sample = _bspline_eval_1d_into(3, cps, position,
-              MorphWavetable_scratch_knots(self),
-              MorphWavetable_scratch_cps_arr(self),
-              MorphWavetable_scratch_lifts(self));
+    var sample = 0;
+    if (in_range == 1) {
+        var cps = MorphWavetable_scratch_cps(self);
+        var k = _morph_span(self, position);
+        var i = k - 3;
+        while (i <= k) {
+            vec_set(cps, i, _morph_read(self, i));
+            i = i + 1;
         }
-    }
-    if (naad_is_finite(sample) == 0) {
-        # Defensive linear fallback (mirrors next_sample's two-table blend).
-        var scaled = f64_mul(position, f64_from(num_tables - 1));
-        # Rust's `as usize` takes a negative value to 0; f64_to keeps it negative.
-        # Saturate at the cast, on both sides: f64_to gives INT64_MAX on +overflow.
-        var idx_low = f64_to(f64_floor(scaled));
-        if (idx_low < 0) { idx_low = 0; }
-        if (idx_low > num_tables - 2) { idx_low = num_tables - 2; }
-        var frac = f64_sub(scaled, f64_from(idx_low));
-        var s_low = vec_get(cps, idx_low);
-        var s_high = vec_get(cps, idx_low + 1);
-        sample = f64_add(f64_mul(s_low, f64_sub(F64_ONE, frac)), f64_mul(s_high, frac));
+        sample = _bspline_eval_1d_into(3, cps, position,
+          MorphWavetable_scratch_knots(self),
+          MorphWavetable_scratch_cps_arr(self));
+    } else {
+        sample = _morph_linear(self, num_tables);
     }
 
-    var new_phase = f64_add(phase, f64_div(MorphWavetable_frequency(self), MorphWavetable_sample_rate(self)));
-    if (f64_ge(new_phase, F64_ONE) == 1) { new_phase = f64_sub(new_phase, F64_ONE); }
-    MorphWavetable_set_phase(self, new_phase);
+    _morph_advance(self, phase);
     return sample;
 }

@@ -1,18 +1,20 @@
 # dsp_spectral.cyr -- DSP spectral / analysis block (the `synthesis`-gated,
 # hisab-interop half of rust-old/src/dsp_util.rs). Kept OUT of dsp_util.cyr
-# because these functions need hisab (num_fft / calc_bspline / QR least
-# squares) while most dsp_util consumers don't pull hisab. f32 -> f64 as
-# usual; buffers are stdlib `vec` handles (one f64 per slot). `SpectralWindow`
-# reuses the WINDOW_* constants already defined in dsp_util.cyr.
+# because these functions need hisab (num_fft / calc_bspline) while most
+# dsp_util consumers don't pull hisab. f32 -> f64 as usual; buffers are stdlib
+# `vec` handles (one f64 per slot). `SpectralWindow` reuses the WINDOW_* constants
+# already defined in dsp_util.cyr.
 #
 # Requires (from the build/test unit): lib/hisab.cyr (num_fft / calc_bspline /
-# hvec3_new / HVec3_x), auto-stdlib math+ganita (F64_* / f64_clamp / ganita_mat_*)
-# and src/error.cyr (naad_is_finite, EPSILON tolerances). No `include` lines.
+# hvec3_new / HVec3_x), auto-stdlib math+ganita (F64_* / f64_clamp), src/error.cyr
+# (naad_is_finite, naad_vec_zeros) and src/dsp_util.cyr (WINDOW_*, DSP_C042/C008).
+# No `include` lines.
 #
-# Public API (names match the frozen Rust oracle): fft_magnitudes,
-# power_spectrum, stft_magnitudes, chromagram, detect_onsets,
-# detect_pitch_autocorr, bspline_eval_1d, fit_polynomial. Internal helpers
-# carry a `_dsp_` prefix. `eval_polynomial` already lives in dsp_util.cyr.
+# Public API (names match the frozen Rust oracle, except that chromagram is
+# naad_chromagram in the flat namespace): fft_magnitudes, power_spectrum,
+# stft_magnitudes, naad_chromagram, detect_onsets, detect_pitch_autocorr,
+# bspline_eval_1d, fit_polynomial. Internal helpers carry a `_dsp_` prefix.
+# `eval_polynomial` lives in dsp_util.cyr.
 
 # ================================================================
 # Extra IEEE-754 literals (non-integers only; integers via f64_from).
@@ -20,8 +22,6 @@
 var SPEC_NAN   = 0x7FF8000000000000;   # canonical quiet NaN (bspline None)
 var SPEC_C054  = 0x3FE147AE147AE148;   # 0.54  (Hamming a0)
 var SPEC_C046  = 0x3FDD70A3D70A3D71;   # 0.46  (Hamming a1)
-var SPEC_C042  = 0x3FDAE147AE147AE1;   # 0.42  (Blackman a0)
-var SPEC_C008  = 0x3FB47AE147AE147B;   # 0.08  (Blackman a2)
 var SPEC_C27_5 = 0x403B800000000000;   # 27.5  (A0, chroma lower bound)
 var SPEC_C030  = 0x3FD3333333333333;   # 0.30  (autocorr peak threshold)
 var SPEC_C1E6  = 0x3EB0C6F7A0B5ED8D;   # 1e-6  (onset flux floor)
@@ -80,28 +80,41 @@ fn _dsp_rem_euclid_12(x) {
 }
 
 # ================================================================
-# fft_magnitudes -- real-valued FFT magnitude spectrum, bins 0..N/2 (DC to
-# Nyquist), each scaled by 1/N. Input length must be a power of two. On FFT
-# failure returns an empty vec. Ports fft_magnitudes.
+# _dsp_fft_scratch -- the interleaved (re, im) buffer for an n-point FFT, or 0
+# where no transform can run: n is not a positive power of two, or alloc refuses
+# n * 16 bytes. Rust panics on n == 0 and returns empty for a length num_fft
+# rejects; both are the empty vec here, decided before any sample is touched.
 # ================================================================
 #must_use
-fn fft_magnitudes(input) {
+fn _dsp_fft_scratch(n) {
+    if (_dsp_is_pow2(n) == 0) { return 0; }
+    return alloc(n * 16);
+}
+
+# ================================================================
+# _dsp_fft_real -- load a real vec into `data` as (re, 0) pairs and transform it
+# in place. Returns 1, or 0 if num_fft refuses. `data` is a _dsp_fft_scratch
+# buffer for vec_len(input) points, so a caller with many frames can reuse one.
+# ================================================================
+#must_use
+fn _dsp_fft_real(input, data) {
     var n = vec_len(input);
-    var data = alloc(n * 16);
     var i = 0;
     while (i < n) {
         store64(data + i * 16, vec_get(input, i));
         store64(data + i * 16 + 8, 0);
         i = i + 1;
     }
-    var out = vec_new();
-    # Empty input: num_fft returns Ok(0) for n<=1 without validating, so it
-    # would fall through to a half=1 read/scale loop over alloc(0) (OOB) with a
-    # 1/0=+inf scale. Rust panics on the length-0 slice; we return empty. (n>=1
-    # is in-bounds and agrees with the oracle.)
-    if (n == 0) { return out; }
     var fft_tag, fft_err = num_fft(data, n);
-    if (is_err_result(fft_tag) == 1) { return out; }
+    if (is_err_result(fft_tag) == 1) { return 0; }
+    return 1;
+}
+
+# ================================================================
+# _dsp_magnitudes_into -- |X|/n for bins 0..n/2 of the n-point transform at
+# `data`, written to `out`, a vec of n/2 + 1 slots.
+# ================================================================
+fn _dsp_magnitudes_into(data, n, out) {
     var half = n / 2 + 1;
     var inv_n = f64_div(F64_ONE, f64_from(n));
     var b = 0;
@@ -109,9 +122,25 @@ fn fft_magnitudes(input) {
         var re = load64(data + b * 16);
         var im = load64(data + b * 16 + 8);
         var mag = f64_sqrt(f64_add(f64_mul(re, re), f64_mul(im, im)));
-        vec_push(out, f64_mul(mag, inv_n));
+        vec_set(out, b, f64_mul(mag, inv_n));
         b = b + 1;
     }
+    return 0;
+}
+
+# ================================================================
+# fft_magnitudes -- real-valued FFT magnitude spectrum, bins 0..N/2 (DC to
+# Nyquist), each scaled by 1/N. Input length must be a power of two. On FFT
+# failure returns an empty vec. Ports fft_magnitudes.
+# ================================================================
+#must_use
+fn fft_magnitudes(input) {
+    var n = vec_len(input);
+    var data = _dsp_fft_scratch(n);
+    if (data == 0) { return vec_new(); }
+    if (_dsp_fft_real(input, data) == 0) { return vec_new(); }
+    var out = naad_vec_zeros(n / 2 + 1);
+    _dsp_magnitudes_into(data, n, out);
     return out;
 }
 
@@ -122,29 +151,18 @@ fn fft_magnitudes(input) {
 #must_use
 fn power_spectrum(input) {
     var n = vec_len(input);
-    var data = alloc(n * 16);
-    var i = 0;
-    while (i < n) {
-        store64(data + i * 16, vec_get(input, i));
-        store64(data + i * 16 + 8, 0);
-        i = i + 1;
-    }
-    var out = vec_new();
-    # Empty input: num_fft returns Ok(0) for n<=1 without validating, so it
-    # would fall through to a half=1 read/scale loop over alloc(0) (OOB) with a
-    # 1/0=+inf scale. Rust panics on the length-0 slice; we return empty. (n>=1
-    # is in-bounds and agrees with the oracle.)
-    if (n == 0) { return out; }
-    var fft_tag, fft_err = num_fft(data, n);
-    if (is_err_result(fft_tag) == 1) { return out; }
+    var data = _dsp_fft_scratch(n);
+    if (data == 0) { return vec_new(); }
+    if (_dsp_fft_real(input, data) == 0) { return vec_new(); }
     var half = n / 2 + 1;
+    var out = naad_vec_zeros(half);
     var inv_n_sq = f64_div(F64_ONE, f64_mul(f64_from(n), f64_from(n)));
     var b = 0;
     while (b < half) {
         var re = load64(data + b * 16);
         var im = load64(data + b * 16 + 8);
         var p = f64_add(f64_mul(re, re), f64_mul(im, im));
-        vec_push(out, f64_mul(p, inv_n_sq));
+        vec_set(out, b, f64_mul(p, inv_n_sq));
         b = b + 1;
     }
     return out;
@@ -173,8 +191,8 @@ fn _dsp_apply_spectral_window(buf, window) {
         }
         if (window == WINDOW_BLACKMAN) {
             var c1 = f64_mul(F64_HALF, f64_cos(phase));
-            var c2 = f64_mul(SPEC_C008, f64_cos(f64_mul(F64_TWO, phase)));
-            w = f64_add(f64_sub(SPEC_C042, c1), c2);
+            var c2 = f64_mul(DSP_C008, f64_cos(f64_mul(F64_TWO, phase)));
+            w = f64_add(f64_sub(DSP_C042, c1), c2);
         }
         vec_set(buf, i, f64_mul(vec_get(buf, i), w));
         i = i + 1;
@@ -193,37 +211,40 @@ fn _dsp_apply_spectral_window(buf, window) {
 fn stft_magnitudes(signal, window_size, hop_size, window) {
     var sig_len = vec_len(signal);
     if (sig_len < window_size) { return vec_new(); }
-    if (hop_size == 0) { return vec_new(); }
+    if (hop_size <= 0) { return vec_new(); }
     if (_dsp_is_pow2(window_size) == 0) { return vec_new(); }
-    if (window_size == 0) { return vec_new(); }
 
     var num_frames = (sig_len - window_size) / hop_size + 1;
     var half = window_size / 2 + 1;
-    var frames = vec_new();
+
+    # One frame buffer and one FFT buffer serve every frame, as Rust reuses
+    # `frame`. alloc frees nothing, so per-frame scratch would be permanent.
+    var data = _dsp_fft_scratch(window_size);
+    if (data == 0) { return vec_new(); }
+    var frame = naad_vec_zeros(window_size);
+    var frames = naad_vec_zeros(num_frames);
 
     var f = 0;
     while (f < num_frames) {
         var start = f * hop_size;
-        var frame = vec_new();
         var k = 0;
         while (k < window_size) {
-            vec_push(frame, vec_get(signal, start + k));
+            vec_set(frame, k, vec_get(signal, start + k));
             k = k + 1;
         }
         _dsp_apply_spectral_window(frame, window);
-        var mag = fft_magnitudes(frame);
-        if (vec_len(mag) < half) {
-            # FFT failure -- bail out cleanly.
-            return vec_new();
-        }
-        vec_push(frames, mag);
+        # FFT failure -- bail out cleanly.
+        if (_dsp_fft_real(frame, data) == 0) { return vec_new(); }
+        var mag = naad_vec_zeros(half);
+        _dsp_magnitudes_into(data, window_size, mag);
+        vec_set(frames, f, mag);
         f = f + 1;
     }
     return frames;
 }
 
 # ================================================================
-# chromagram -- 12-bin pitch-class profile per STFT frame. Folds each bin's
+# naad_chromagram -- 12-bin pitch-class profile per STFT frame. Folds each bin's
 # centre frequency (piano range 27.5..4186 Hz only) into a chromatic pitch
 # class via its fractional MIDI number. Returns a vec of 12-slot vecs (bin 0
 # = C .. bin 11 = B). Ports chromagram.
@@ -231,7 +252,7 @@ fn stft_magnitudes(signal, window_size, hop_size, window) {
 #must_use
 fn naad_chromagram(magnitudes, window_size, sample_rate) {
     var chroma_frames = vec_new();
-    if (window_size == 0) { return chroma_frames; }
+    if (window_size <= 0) { return chroma_frames; }
     if (f64_le(sample_rate, 0) == 1) { return chroma_frames; }
     var bin_hz = f64_div(sample_rate, f64_from(window_size));
     var upper = f64_from(4186);
@@ -240,12 +261,7 @@ fn naad_chromagram(magnitudes, window_size, sample_rate) {
     var fi = 0;
     while (fi < nf) {
         var frame = vec_get(magnitudes, fi);
-        var chroma = vec_new();
-        var z = 0;
-        while (z < 12) {
-            vec_push(chroma, 0);
-            z = z + 1;
-        }
+        var chroma = naad_vec_zeros(12);
         var flen = vec_len(frame);
         var bin = 1;
         while (bin < flen) {
@@ -280,7 +296,7 @@ fn naad_chromagram(magnitudes, window_size, sample_rate) {
 fn detect_onsets(magnitudes, hop_size, sample_rate, threshold_factor) {
     var nf = vec_len(magnitudes);
     if (nf < 3) { return vec_new(); }
-    if (hop_size == 0) { return vec_new(); }
+    if (hop_size <= 0) { return vec_new(); }
     if (f64_le(sample_rate, 0) == 1) { return vec_new(); }
 
     # Spectral flux per frame (frame 0 has no flux).
@@ -461,62 +477,12 @@ fn detect_pitch_autocorr(buffer, sample_rate, min_hz, max_hz) {
 }
 
 # ================================================================
-# bspline_eval_1d -- evaluate a 1-D clamped open-uniform B-spline of `degree`
-# through `control_points` (a vec of f64) at t in [0, 1]. Lifts each scalar
-# control point into HVec3.x for hisab's calc_bspline, builds the clamped knot
-# vector, and returns the .x component. Returns NaN bits for the Rust `None`:
-# degree == 0, control_points.len() <= degree, or t outside [0, 1]. Ports
-# bspline_eval_1d.
+# _bspline_knots -- the clamped open-uniform knot vector for n control points:
+# (degree+1) zeros, uniform interior, (degree+1) ones. `knots` holds
+# n + degree + 1 doubles.
 # ================================================================
-#must_use
-fn bspline_eval_1d(degree, control_points, t) {
-    var n = vec_len(control_points);
-    # `degree` is `usize` in the oracle (rust-old/src/dsp_util.rs:223), so
-    # `== 0` was the complete bound there. Signed here: degree <= -2 drives
-    # n_knots to 0 while interior_count grows, and the knot loop then stores
-    # through a null/undersized buffer.
-    if (degree <= 0) { return SPEC_NAN; }
-    if (n <= degree) { return SPEC_NAN; }
-    if (f64_lt(t, 0) == 1) { return SPEC_NAN; }
-    if (f64_gt(t, F64_ONE) == 1) { return SPEC_NAN; }
-
-    var n_knots = n + degree + 1;
-    var knots = alloc(n_knots * 8);
-    if (knots == 0) { return SPEC_NAN; }
-    var cps = alloc(n * 8);
-    if (cps == 0) { return SPEC_NAN; }
-    var lifts = vec_new();
-    var li = 0;
-    while (li < n) {
-        vec_push(lifts, hvec3_new(0, 0, 0));
-        li = li + 1;
-    }
-    return _bspline_eval_1d_into(degree, control_points, t, knots, cps, lifts);
-}
-
-# ================================================================
-# _bspline_eval_1d_into -- the scratch-taking core of bspline_eval_1d. Same
-# math; the caller owns the three buffers so a per-sample caller can hoist them
-# out of its loop. lib/alloc.cyr is a bump allocator with NO individual free, so
-# the allocating wrapper above leaks ~192 bytes per call; the oracle's
-# equivalents are stack/Vec values dropped at scope exit. Mirrors the
-# naad_fdn_hadamard8 / _naad_fdn_hadamard8_into split in acoustics_fdn.cyr.
-#
-#   knots : byte buffer, >= (n + degree + 1) * 8
-#   cps   : byte buffer, >= n * 8 (holds HVec3 POINTERS, not values)
-#   lifts : vec of >= n pre-allocated HVec3, mutated in place via HVec3_set_x
-#
-# Guards are the caller's responsibility -- bspline_eval_1d has already applied
-# them. Returns SPEC_NAN (the port's None) on a hisab failure.
-# ================================================================
-#must_use
-fn _bspline_eval_1d_into(degree, control_points, t, knots, cps, lifts) {
-    var n = vec_len(control_points);
-
-    # Clamped open-uniform knots: (degree+1) zeros, uniform interior,
-    # (degree+1) ones. Total length n + degree + 1.
+fn _bspline_knots(degree, n, knots) {
     var interior_count = n - degree - 1;
-    var n_knots = n + degree + 1;
     var idx = 0;
     var z = 0;
     while (z <= degree) {
@@ -537,20 +503,124 @@ fn _bspline_eval_1d_into(degree, control_points, t, knots, cps, lifts) {
         idx = idx + 1;
         z = z + 1;
     }
+    return 0;
+}
 
-    # Lift scalar control points into HVec3.x (as the Rust oracle does), reusing
-    # the caller's HVec3 slots rather than allocating fresh ones.
+# ================================================================
+# bspline_eval_1d -- evaluate a 1-D clamped open-uniform B-spline of `degree`
+# through `control_points` (a vec of f64) at t in [0, 1]. Lifts each scalar
+# control point into HVec3.x for hisab's calc_bspline, builds the clamped knot
+# vector, and returns the .x component. Returns NaN bits for the Rust `None`:
+# degree == 0, control_points.len() <= degree, or t outside [0, 1]. Ports
+# bspline_eval_1d. Allocates on every call; a per-sample caller uses
+# _bspline_eval_1d_into.
+# ================================================================
+#must_use
+fn bspline_eval_1d(degree, control_points, t) {
+    var n = vec_len(control_points);
+    # `degree` is `usize` in the oracle (rust-old/src/dsp_util.rs:223), so
+    # `== 0` was the complete bound there. Signed here: degree <= -2 drives
+    # n_knots to 0 while interior_count grows, and the knot loop then stores
+    # through a null/undersized buffer.
+    if (degree <= 0) { return SPEC_NAN; }
+    if (n <= degree) { return SPEC_NAN; }
+    if (f64_lt(t, 0) == 1) { return SPEC_NAN; }
+    if (f64_gt(t, F64_ONE) == 1) { return SPEC_NAN; }
+
+    var n_knots = n + degree + 1;
+    var knots = alloc(n_knots * 8);
+    if (knots == 0) { return SPEC_NAN; }
+    var cps = alloc(n * 8);
+    if (cps == 0) { return SPEC_NAN; }
+    _bspline_knots(degree, n, knots);
     var i = 0;
     while (i < n) {
-        var lv = vec_get(lifts, i);
-        HVec3_set_x(lv, vec_get(control_points, i));
-        store64(cps + i * 8, lv);
+        store64(cps + i * 8, hvec3_new(vec_get(control_points, i), 0, 0));
         i = i + 1;
     }
-
     var result = calc_bspline(degree, cps, n, knots, n_knots, t);
     if (result == 0) { return SPEC_NAN; }
     return HVec3_x(result);
+}
+
+# ================================================================
+# _bspline_eval_1d_into -- the same evaluation without allocating, for a caller
+# that runs it per sample. calc_bspline makes three scratch arrays and a result
+# HVec3 per call, and alloc frees nothing, so that path costs 120 bytes a sample
+# at degree 3. This is its de Boor on the x component alone: the same refusals,
+# the same span search, and the same operations in the same order, so the bits
+# match. tests/dsp_spectral.tcyr holds the two together over a grid.
+#
+#   knots : byte buffer, >= (n + degree + 1) * 8, overwritten
+#   cps   : byte buffer, >= n * 8, overwritten: de Boor's working array
+#
+# Returns SPEC_NAN, the port's None, for what calc_bspline refuses: a negative
+# degree, n <= degree, or t that is NaN or outside [0, 1]. Generated knots are
+# never NaN, so its degree-0 NaN-knot branch cannot arise here.
+# ================================================================
+#must_use
+fn _bspline_eval_1d_into(degree, control_points, t, knots, cps) {
+    var n = vec_len(control_points);
+    if (degree < 0) { return SPEC_NAN; }
+    if (n <= degree) { return SPEC_NAN; }
+    if (f64_eq(t, t) == 0) { return SPEC_NAN; }
+    if (f64_lt(t, 0) == 1) { return SPEC_NAN; }
+    if (f64_gt(t, F64_ONE) == 1) { return SPEC_NAN; }
+
+    _bspline_knots(degree, n, knots);
+
+    # Span: the largest k in [degree, n-1] with knots[k] <= t.
+    var k = degree;
+    while (k < n - 1 && f64_lt(t, load64(knots + (k + 1) * 8)) == 0) {
+        k = k + 1;
+    }
+
+    var first = k - degree;
+    var j = 0;
+    while (j <= degree) {
+        store64(cps + j * 8, vec_get(control_points, first + j));
+        j = j + 1;
+    }
+
+    var r = 1;
+    while (r <= degree) {
+        j = degree;
+        while (j >= r) {
+            var idx = first + j;
+            var ki = load64(knots + idx * 8);
+            var denom = f64_sub(load64(knots + (idx + degree + 1 - r) * 8), ki);
+            if (f64_eq(denom, 0) == 0) {
+                var alpha = f64_div(f64_sub(t, ki), denom);
+                var one_minus = f64_sub(F64_ONE, alpha);
+                var prev = load64(cps + (j - 1) * 8);
+                var cur = load64(cps + j * 8);
+                store64(cps + j * 8, f64_add(f64_mul(one_minus, prev), f64_mul(alpha, cur)));
+            }
+            j = j - 1;
+        }
+        r = r + 1;
+    }
+    return load64(cps + degree * 8);
+}
+
+# ================================================================
+# _dsp_alloc_columns -- a table of n pointers to separate m-double columns, or 0
+# if alloc refuses any of them. alloc caps one request at 2 GiB, so holding a
+# matrix in one block would refuse a size whose columns each fit, where Rust's
+# Vec<Vec<f64>> succeeds. The limit this leaves is m <= 2^28, the longest vec.
+# ================================================================
+#must_use
+fn _dsp_alloc_columns(n, m) {
+    var table = alloc(n * 8);
+    if (table == 0) { return 0; }
+    var j = 0;
+    while (j < n) {
+        var col = alloc(m * 8);
+        if (col == 0) { return 0; }
+        store64(table + j * 8, col);
+        j = j + 1;
+    }
+    return table;
 }
 
 # ================================================================
@@ -562,16 +632,10 @@ fn _bspline_eval_1d_into(degree, control_points, t, knots, cps, lifts) {
 #
 # Solved by a THIN modified-Gram-Schmidt QR over the Vandermonde, ported
 # line-for-line from hisab 1.4.0's `qr_decompose` + `least_squares_poly`
-# (src/num/linalg.rs) -- the crate rust-old/Cargo.lock actually pins. Q is
-# n_samples x (degree+1); no square Q is ever formed.
-#
-# 2.2.0 replaced a `ganita_mat_least_squares` call that materialised a full
-# n_samples x n_samples orthogonal Q, never checked its own allocation, and
-# therefore faulted at 5793 samples. That forced the sample cap ADR-0001
-# recorded as a knowing divergence; both the cap and the ADR are retired --
-# large inputs now succeed as they do in Rust. `degree` is `usize` in the
-# oracle, so a negative degree remains a state Rust cannot express; it maps to
-# the same empty vec.
+# (src/num/linalg.rs), the crate rust-old/Cargo.lock pins. Q is degree+1 columns
+# of m rows, so memory is O(m * degree); ADR-0002. `degree` is `usize` in the
+# oracle, so a negative degree is a state Rust cannot express; it maps to the
+# same empty vec.
 # ================================================================
 #must_use
 fn fit_polynomial(xs, ys, degree) {
@@ -584,26 +648,23 @@ fn fit_polynomial(xs, ys, degree) {
 
     var n = degree + 1;
 
-    # Q: n columns of m rows, column-major -- q[j][k] at qbuf + (j*m + k)*8.
-    # This is the THIN factor: n*m, not the m*m ganita_mat_least_squares used to
-    # form. At nx = 100000, degree = 2 that is 2.4 MB instead of 80 TB.
-    var qbuf = alloc(n * m * 8);
-    if (qbuf == 0) { return out; }
+    # Q: n columns of m rows -- q[j][k] at load64(q + j*8) + k*8.
+    var q = _dsp_alloc_columns(n, m);
+    if (q == 0) { return out; }
     # R: n x n, stored r[col][row] exactly as the oracle stores it, so the
     # back-substitution indexing below can be read against it line for line.
     var rbuf = alloc(n * n * 8);
     if (rbuf == 0) { return out; }
 
-    # Vandermonde, column-major: column j is xs[k]^j. Built incrementally rather
-    # than via powi -- retained from the original port for the reason its comment
-    # gave (robust for negative and zero xs, unlike an exp/ln pow).
+    # Vandermonde: column j is xs[k]^j. Built incrementally, not through a pow,
+    # which goes by exp/ln and is not defined for negative or zero xs.
     var k = 0;
     while (k < m) {
         var xk = vec_get(xs, k);
         var pw = F64_ONE;
         var j = 0;
         while (j < n) {
-            store64(qbuf + (j * m + k) * 8, pw);
+            store64(load64(q + j * 8) + k * 8, pw);
             pw = f64_mul(pw, xk);
             j = j + 1;
         }
@@ -619,21 +680,20 @@ fn fit_polynomial(xs, ys, degree) {
     # Modified Gram-Schmidt over the columns of Q, in place.
     var jj = 0;
     while (jj < n) {
+        var qj = load64(q + jj * 8);
         var ii = 0;
         while (ii < jj) {
+            var qi = load64(q + ii * 8);
             var dot = 0;
             var kd = 0;
             while (kd < m) {
-                dot = f64_add(dot, f64_mul(load64(qbuf + (ii * m + kd) * 8),
-                    load64(qbuf + (jj * m + kd) * 8)));
+                dot = f64_add(dot, f64_mul(load64(qi + kd * 8), load64(qj + kd * 8)));
                 kd = kd + 1;
             }
             store64(rbuf + (jj * n + ii) * 8, dot);
             kd = 0;
             while (kd < m) {
-                var qv = load64(qbuf + (jj * m + kd) * 8);
-                store64(qbuf + (jj * m + kd) * 8,
-                  f64_sub(qv, f64_mul(dot, load64(qbuf + (ii * m + kd) * 8))));
+                store64(qj + kd * 8, f64_sub(load64(qj + kd * 8), f64_mul(dot, load64(qi + kd * 8))));
                 kd = kd + 1;
             }
             ii = ii + 1;
@@ -641,7 +701,7 @@ fn fit_polynomial(xs, ys, degree) {
         var ss = 0;
         var kn = 0;
         while (kn < m) {
-            var qn = load64(qbuf + (jj * m + kn) * 8);
+            var qn = load64(qj + kn * 8);
             ss = f64_add(ss, f64_mul(qn, qn));
             kn = kn + 1;
         }
@@ -652,8 +712,7 @@ fn fit_polynomial(xs, ys, degree) {
         store64(rbuf + (jj * n + jj) * 8, norm);
         kn = 0;
         while (kn < m) {
-            store64(qbuf + (jj * m + kn) * 8,
-              f64_div(load64(qbuf + (jj * m + kn) * 8), norm));
+            store64(qj + kn * 8, f64_div(load64(qj + kn * 8), norm));
             kn = kn + 1;
         }
         jj = jj + 1;
@@ -664,10 +723,11 @@ fn fit_polynomial(xs, ys, degree) {
     if (qty == 0) { return out; }
     var jq = 0;
     while (jq < n) {
+        var qc = load64(q + jq * 8);
         var sq = 0;
         var kq = 0;
         while (kq < m) {
-            sq = f64_add(sq, f64_mul(load64(qbuf + (jq * m + kq) * 8), vec_get(ys, kq)));
+            sq = f64_add(sq, f64_mul(load64(qc + kq * 8), vec_get(ys, kq)));
             kq = kq + 1;
         }
         store64(qty + jq * 8, sq);
@@ -690,11 +750,10 @@ fn fit_polynomial(xs, ys, degree) {
         ib = ib - 1;
     }
 
-    # RETAINED DIVERGENCE (predates 2.2.0; added in 2.1.0). A non-finite INPUT
-    # gives a NaN norm, which passes the `< EPSILON` test above, so the oracle
-    # would return Ok with NaN coefficients. naad returns the empty vec instead
-    # -- the same None channel, rather than poisoned coefficients a caller has
-    # no obvious way to notice. The singular case above IS now exact parity.
+    # DIVERGENCE: a non-finite input gives a NaN norm, which passes the
+    # `< EPSILON` test above, so the oracle returns Ok with NaN coefficients. The
+    # empty vec is the same None channel, without poisoned coefficients a caller
+    # has no obvious way to notice. The singular case above is exact parity.
     var c = 0;
     while (c < n) {
         if (naad_is_finite(load64(co + c * 8)) == 0) { return out; }

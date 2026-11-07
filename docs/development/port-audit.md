@@ -112,7 +112,7 @@ still is, for any change to a ported module — "matches what Rust did".
 | formant (synth) |  336 | ✅  5 | filter | Vowel formant filter banks; tuple→FormantBand struct. |
 | vocoder (synth) |  249 | ✅  9 | filter | Channel vocoder; SmallVec→vec bands. |
 | drum (synth)    |  501 | ✅ 12 | dsp_util, filter | Kick/snare/hat; xorshift + biquad. |
-| envelope        |  688 | ✅ 20 | (error), hisab | ADSR + curve morph via hisab `calc_catmull_rom`. |
+| envelope        |  688 | ✅ 20 | (error), hisab | ADSR + Catmull-Rom curves, ported in scalars. |
 | additive (synth)|  411 | ✅ 21 | (error), hisab | Additive/DCT via hisab `num_dct`/`num_idct`; `NAAD_ERR_COMPUTATION` on failure. |
 | physical (synth)|  637 | ✅ 15 | delay, dsp_util, hisab | Karplus-Strong/waveguide; hisab `num_rk4` derivative via fn-ptr. |
 | wavetable       |  505 | ✅ 11 | dsp_util, dsp_spectral, hisab | Full: core + cubic B-spline morph (`next_sample_smooth` → `bspline_eval_1d`). |

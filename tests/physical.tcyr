@@ -518,5 +518,15 @@ assert_eq(vec_get(pmg_z, 1), C0_3, "omega = 0 leaves state[1] untouched");
 assert_eq(vec_get(pmg_z, 2), C0_01, "omega = 0 leaves state[2] untouched");
 assert_eq(vec_get(pmg_z, 3), F64_ONE, "omega = 0 leaves state[3] untouched");
 
+# ================================================================
+test_group("a period just under the vec cap is refused, not aborted");
+# Each line holds ceil(period) + 2 slots. These periods are below VEC_CAP_MAX, so
+# only the length test can catch them before vec_push ends the process.
+var pcap_near = f64_from(VEC_CAP_MAX - 1);
+assert_eq(physical_ks_new(F64_ONE, F64_HALF, F64_HALF, pcap_near), NAAD_ERR_BUFFER_OVERFLOW,
+  "ks: period VEC_CAP_MAX-1 needs VEC_CAP_MAX+1 slots -> BUFFER_OVERFLOW");
+assert_eq(physical_wg_new(F64_ONE, F64_HALF, f64_mul(F64_TWO, pcap_near)), NAAD_ERR_BUFFER_OVERFLOW,
+  "wg: half period VEC_CAP_MAX-1 needs VEC_CAP_MAX+1 slots -> BUFFER_OVERFLOW");
+
 var rc = assert_summary();
 syscall(60, rc);

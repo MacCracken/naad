@@ -475,5 +475,20 @@ assert(f64_gt(vec_get(gb_buf, 31), vec_get(gb_buf, 0)), "gate opens across the l
 var gb_empty = vec_new();
 assert_eq(dynamics_noise_gate_process_buffer(gb_a, gb_empty), 0, "gate empty buffer returns 0");
 
+# ================================================================
+test_group("noise gate hold saturates like as u32");
+# hold_samples of a gate built with `hold` seconds at 44.1 kHz.
+fn hold_samples_for(hold) {
+    var gate = dynamics_noise_gate_new(f64_neg(f64_from(40)), C0_001, hold, C0_01, f64_from(44100));
+    return NoiseGate_hold_samples(gate);
+}
+assert_eq(hold_samples_for(f64_from(1000000)), 4294967295, "past u32::MAX saturates");
+assert_eq(hold_samples_for(NAAD_POS_INF), 4294967295, "+Inf saturates");
+assert_eq(hold_samples_for(f64_neg(F64_ONE)), 0, "a negative hold is 0");
+assert_eq(hold_samples_for(NAAD_NEG_INF), 0, "-Inf is 0");
+assert_eq(hold_samples_for(0x7FF8000000000000), 0, "NaN is 0");
+# 2 seconds is exact and in range, so it passes through untouched.
+assert_eq(hold_samples_for(f64_from(2)), 88200, "an ordinary hold is unchanged");
+
 var rc = assert_summary();
 syscall(60, rc);

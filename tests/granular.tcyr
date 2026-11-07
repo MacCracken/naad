@@ -4,6 +4,7 @@
 # are dropped -- no serde in Cyrius, and the reload test's non-serde core is
 # already covered by test_empty_source / test_loaded_source.
 
+include "lib/hisab.cyr"
 include "src/error.cyr"
 include "src/dsp_util.cyr"
 include "src/granular.cyr"
@@ -389,6 +390,121 @@ granular_set_source(gt_b, vec_new());
 assert_eq(granular_is_active(gt_b), 0, "clearing the source reports inactive even with a live grain");
 assert_eq(Grain_active(vec_get(GranularEngine_grains(gt_b), 0)), 1,
   "...although the grain itself is still flagged active");
+
+# ================================================================
+test_group("the spawn loop ends at any rate");
+# An engine at `sr` with a 1000-sample ramp loaded.
+fn gsp_engine(sr) {
+    var g = granular_new(sr);
+    granular_set_source(g, granular_test_ramp(1000));
+    return g;
+}
+# How many pool slots are active.
+fn gsp_active(g) {
+    var n = 0;
+    var gs = GranularEngine_grains(g);
+    var i = 0;
+    while (i < vec_len(gs)) {
+        if (Grain_active(vec_get(gs, i)) == 1) { n = n + 1; }
+        i = i + 1;
+    }
+    return n;
+}
+var gsp_x = 0;
+# acc - 1 == acc from 2^53 up, so counting down could never reach 1.
+var gsp_a = gsp_engine(f64_from(44100));
+granular_set_grain_rate(gsp_a, 0x7E37E43C8800759C);   # 1e300
+gsp_x = granular_next_sample(gsp_a);
+assert_eq(gsp_active(gsp_a), GRAIN_MAX_GRAINS, "rate 1e300 fills the pool and returns");
+assert_eq(GranularEngine_spawn_accumulator(gsp_a), 0, "an integral accumulator leaves no fraction");
+gsp_x = granular_next_sample(gsp_a);
+assert_eq(gsp_active(gsp_a), GRAIN_MAX_GRAINS, "...and keeps returning on later samples");
+var gsp_b = gsp_engine(f64_from(44100));
+granular_set_grain_rate(gsp_b, 0x7FF0000000000000);   # +Inf
+gsp_x = granular_next_sample(gsp_b);
+assert_eq(GranularEngine_spawn_accumulator(gsp_b), 0, "rate +Inf leaves the accumulator at 0, not NaN");
+var gsp_c = gsp_engine(0);   # rate / 0 is +Inf, and new() does not validate, as in Rust
+gsp_x = granular_next_sample(gsp_c);
+assert_eq(GranularEngine_spawn_accumulator(gsp_c), 0, "sample rate 0 returns");
+
+# ================================================================
+test_group("a full pool drops spawns exactly as counting them down would");
+# 1000.25 spawns owed in one sample: 64 land and consume the PRNG, 936 are dropped.
+var gfp_sr = f64_from(32768);
+var gfp = gsp_engine(gfp_sr);
+granular_set_grain_rate(gfp, f64_mul(f64_add(f64_from(1000), GRAIN_C0_25), gfp_sr));
+granular_set_spray(gfp, F64_ONE);
+gsp_x = granular_next_sample(gfp);
+assert_eq(GranularEngine_spawn_accumulator(gfp), GRAIN_C0_25, "the fraction of the owed spawns survives");
+var gfp_rng = alloc(8);
+store64(gfp_rng, 42);
+var gfp_i = 0;
+while (gfp_i < GRAIN_MAX_GRAINS) { gsp_x = xorshift32(gfp_rng); gfp_i = gfp_i + 1; }
+assert_eq(load64(GranularEngine_rng_state(gfp)), load64(gfp_rng), "dropped spawns draw nothing from the PRNG");
+# One spawn owed per sample at a full pool must not lose the running fraction.
+var gfq = gsp_engine(gfp_sr);
+granular_set_grain_rate(gfq, f64_mul(f64_add(F64_ONE, GRAIN_C0_25), gfp_sr));
+granular_set_grain_duration(gfq, f64_from(1000));
+gfp_i = 0;
+while (gfp_i < 100) { gsp_x = granular_next_sample(gfq); gfp_i = gfp_i + 1; }
+assert_eq(GranularEngine_spawn_accumulator(gfq), 0, "100 * 1.25 owed spawns leave no fraction");
+gsp_x = granular_next_sample(gfq);
+assert_eq(GranularEngine_spawn_accumulator(gfq), GRAIN_C0_25, "one more sample leaves 0.25");
+
+# ================================================================
+test_group("set_window refuses a value outside the enum");
+var gw = granular_new(f64_from(44100));
+assert_eq(granular_set_window(gw, GRAIN_WINDOW_RECTANGULAR), 0, "the last enum value returns 0");
+assert_eq(GranularEngine_window(gw), GRAIN_WINDOW_RECTANGULAR, "a valid window is stored");
+assert_eq(granular_set_window(gw, GRAIN_WINDOW_RECTANGULAR + 1), NAAD_ERR_INVALID_PARAMETER,
+  "one past the enum is refused");
+assert_eq(granular_set_window(gw, 0 - 1), NAAD_ERR_INVALID_PARAMETER, "a negative window is refused");
+assert_eq(GranularEngine_window(gw), GRAIN_WINDOW_RECTANGULAR, "a refused window leaves the old one in place");
+
+# ================================================================
+test_group("grain duration saturates like Rust's `as u32`");
+var gd_hi = gsp_engine(f64_from(44100));
+granular_set_grain_duration(gd_hi, f64_from(1000000000));   # 4.41e10 samples
+granular_spawn_grain(gd_hi);
+assert_eq(Grain_duration_samples(vec_get(GranularEngine_grains(gd_hi), 0)), 0xFFFFFFFF, "past u32::MAX -> u32::MAX");
+var gd_inf = gsp_engine(f64_from(44100));
+granular_set_grain_duration(gd_inf, 0x7FF0000000000000);
+granular_spawn_grain(gd_inf);
+assert_eq(Grain_duration_samples(vec_get(GranularEngine_grains(gd_inf), 0)), 0xFFFFFFFF, "+Inf -> u32::MAX");
+var gd_neg = gsp_engine(f64_neg(f64_from(44100)));
+granular_spawn_grain(gd_neg);
+assert_eq(Grain_duration_samples(vec_get(GranularEngine_grains(gd_neg), 0)), 0, "negative -> 0");
+var gd_nan = gsp_engine(0x7FF8000000000000);
+granular_spawn_grain(gd_nan);
+assert_eq(Grain_duration_samples(vec_get(GranularEngine_grains(gd_nan), 0)), 0, "NaN -> 0");
+
+# ================================================================
+test_group("rem_euclid is exact at any magnitude");
+# Reference values are C fmod results; a quotient-and-multiply form gives 0 for all four.
+assert_eq(granular_rem_euclid(0x7E37E43C8800759C, f64_from(17)), f64_from(6), "rem_euclid(1e300, 17) = 6");
+assert_eq(granular_rem_euclid(0xFE37E43C8800759C, f64_from(17)), f64_from(11), "rem_euclid(-1e300, 17) = 11");
+assert_eq(granular_rem_euclid(0x4376345785D8A000, f64_from(7)), f64_from(5), "rem_euclid(1e17, 7) = 5");
+assert_eq(granular_rem_euclid(0xC376345785D8A000, f64_from(7)), f64_from(2), "rem_euclid(-1e17, 7) = 2");
+assert_eq(granular_rem_euclid(0x8000000000000000, f64_from(3)), 0, "rem_euclid(-0, 3) = +0.0, the documented sign");
+
+# ================================================================
+test_group("the engine owns its source");
+var gs_buf = granular_test_ramp(1000);
+var gs_a = granular_new(f64_from(44100));
+var gs_b = granular_new(f64_from(44100));
+granular_set_source(gs_a, gs_buf);
+granular_set_source(gs_b, granular_test_ramp(1000));
+vec_set(gs_buf, 0, f64_from(99));
+vec_truncate(gs_buf, 0);
+assert_eq(vec_len(GranularEngine_source(gs_a)), 1000, "truncating the caller's vec leaves the source");
+assert_eq(granular_is_active(gs_a), 0, "no grain yet");
+var gs_same = 1;
+var gs_i = 0;
+while (gs_i < 4000) {
+    if (granular_next_sample(gs_a) != granular_next_sample(gs_b)) { gs_same = 0; }
+    gs_i = gs_i + 1;
+}
+assert_eq(gs_same, 1, "output is bit-identical to an engine that never shared a vec");
 
 var rc = assert_summary();
 syscall(60, rc);

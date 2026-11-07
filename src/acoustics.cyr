@@ -2,15 +2,20 @@
 #
 # Ports the shared helper from rust-old/src/acoustics/mod.rs: material_by_name,
 # used by the room / convolution / coupled / analysis wrappers. naad's acoustics
-# modules are thin wrappers over the goonj acoustics engine; this file holds the
-# one cross-cutting helper. Requires goonj (acoustic_material_* constructors) and
-# stdlib string (streq). No `include` lines.
+# modules are thin wrappers over the goonj acoustics engine; this file holds what
+# they share, which also includes the ring convolution of the room, convolution
+# and binaural processors. Requires goonj (acoustic_material_* constructors),
+# stdlib string (streq) and math (f64_add/mul), and error.cyr (naad_vec_zeros).
+# No `include` lines.
 
 # Look up a built-in goonj AcousticMaterial by name. Returns the material
 # pointer, or 0 (Rust None) for an unknown name. Mirrors material_by_name's
 # exact 7-name set: concrete, carpet, glass, wood, curtain, drywall, tile.
+# A null name is an unknown name: Rust's &str cannot be null, a cstring can, and
+# streq would read it.
 #must_use
 fn naad_acoustics_material_by_name(name) {
+    if (name == 0) { return 0; }
     if (streq(name, "concrete") == 1) { return acoustic_material_concrete(); }
     if (streq(name, "carpet") == 1) { return acoustic_material_carpet(); }
     if (streq(name, "glass") == 1) { return acoustic_material_glass(); }
@@ -19,4 +24,40 @@ fn naad_acoustics_material_by_name(name) {
     if (streq(name, "drywall") == 1) { return acoustic_material_drywall(); }
     if (streq(name, "tile") == 1) { return acoustic_material_tile(); }
     return 0;
+}
+
+# ================================================================
+# _naad_ring_new -- a zeroed input ring for an IR of `ir_len` taps. Rust's
+# `.max(1)`: an empty IR still has a ring of one slot.
+# ================================================================
+#must_use
+fn _naad_ring_new(ir_len) {
+    if (ir_len < 1) { return naad_vec_zeros(1); }
+    return naad_vec_zeros(ir_len);
+}
+
+# ================================================================
+# _naad_ring_convolve -- sum(ring[(pos - k) mod ring_len] * ir[k]) for every tap
+# of `ir`, in tap order from +0.0, where `pos` holds the newest sample. `pos` must
+# be inside the ring, and the vecs are read through their data pointers (the
+# header lib/vec.cyr documents): every index below is in range by construction,
+# and this loop runs once per tap per sample, so the bounds checks and a `%` per
+# tap are most of its cost.
+# ================================================================
+#must_use
+fn _naad_ring_convolve(ring, pos, ir) {
+    var ring_len = vec_len(ring);
+    var ir_len = vec_len(ir);
+    var ring_data = load64(ring);
+    var ir_data = load64(ir);
+    var out = 0;
+    var idx = pos;
+    var k = 0;
+    while (k < ir_len) {
+        out = f64_add(out, f64_mul(load64(ring_data + idx * 8), load64(ir_data + k * 8)));
+        idx = idx - 1;
+        if (idx < 0) { idx = ring_len - 1; }
+        k = k + 1;
+    }
+    return out;
 }

@@ -62,6 +62,19 @@ constructor reports an error rather than building something it cannot honour.**
   `MAX_IR_SAMPLES`, through `naad_room_ir_overflows` and `naad_binaural_ir_overflows`.
   That is the same rule as the FDN row: refuse what goonj would clamp.
 
+2.3.2 found three holes in that rule and two more paths it should have reached:
+
+- `naad_fdn_matrix_new` sized its lines with no test at all. It now tests each delay and
+  returns `NAAD_ERR_COMPUTATION`.
+- `physical_ks_new` and `physical_wg_new` tested the period before adding 2, so periods
+  in (2^28 - 2, 2^28) passed and aborted. They now test the length they build.
+- Integer lengths are in scope too. `delay_line_new`, `comb_filter_new`,
+  `allpass_delay_new`, the phaser and chorus counts, `vocoder_new` and
+  `wavetable_from_harmonics` refuse past `VEC_CAP_MAX`.
+- A stall is treated as an abort. `granular_next_sample` stops spawning once the pool
+  is full, so a huge grain rate returns, where Rust hangs. Output is unchanged wherever
+  Rust finishes.
+
 `NaN` still builds. It casts to 0 and floors to 1, which is what Rust's `as usize`
 gives, so `delay_len_overflows` answers 0 for it deliberately.
 
@@ -86,10 +99,10 @@ gives, so `delay_len_overflows` answers 0 for it deliberately.
   in about 3.7 GiB of lazily zeroed f32. naad refuses instead. A short IR is a silent
   wrong answer, and it would cost over 14 GiB here. This diverges from the oracle.
 - **Known limit** — this bounds what a request can mean, not what a machine can hold.
-  Below the clamp an IR costs about 165 B per Hz of rate for room and convolution and
-  about 27 B per Hz for binaural, and running out of that ends the process, as an
+  Below the clamp an IR costs about 160 B per Hz of rate for room and convolution and
+  about 18 B per Hz for binaural, and running out of that ends the process, as an
   allocation failure does in Rust. A 32 MHz room fails under a 4 GiB limit. A lower bound
-  would refuse rates that work on a larger machine, so it is not made here.
+  would refuse rates that work on a larger machine, and that was decided against.
 
 ## Alternatives considered
 

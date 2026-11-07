@@ -25,3 +25,6 @@ Decisions about naad — what we chose, the context, and the consequences we acc
 | [0002](0002-port-thin-qr-in-tree.md) | Port hisab's thin QR into `fit_polynomial` rather than call ganita | Accepted |
 | [0003](0003-convolution-block-path-streams.md) | Convolution's block path streams instead of truncating | Accepted |
 | [0004](0004-bound-delay-lengths-before-the-cast.md) | Bound delay lengths in f64 before the cast | Accepted |
+| [0005](0005-copy-at-the-ownership-boundary.md) | Copy at the ownership boundary | Accepted |
+| [0006](0006-refused-allocation-stops-at-the-null-page.md) | A refused allocation stops at the null page | Accepted |
+| [0007](0007-hostile-input-gaps-we-accept.md) | Hostile-input gaps we accept | Accepted |

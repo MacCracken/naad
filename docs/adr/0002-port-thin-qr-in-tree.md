@@ -12,7 +12,9 @@ cause, established by reading the crate `rust-old/Cargo.lock` pins:
 - The oracle's `hisab::num::least_squares_poly` (hisab 1.4.0,
   `src/num/linalg.rs`) solves via `qr_decompose`, a **thin** modified
   Gram-Schmidt QR. `Q` is `m × n` — samples by coefficients — and `R` is
-  `n × n`. Peak allocation is `O(m · n)`. It succeeds at every `m`.
+  `n × n`. Peak allocation is `O(m · n)`. It succeeds at every `m`. (2.3.2: the port's
+  Q is allocated by column to match, which made that true here up to `m = 2^28`; one
+  block stopped at `ALLOC_MAX`.)
 - The Cyrius port instead called the stdlib's `ganita_mat_least_squares`, which
   materialises a **full `m × m` orthogonal Q**. Polynomial least-squares does
   not need one. `ganita_mat_new` refuses designs over `GANITA_MAT_MAX_ELEMS` by

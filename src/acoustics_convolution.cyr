@@ -4,20 +4,17 @@
 # response to an audio stream via direct time-domain convolution (per sample)
 # or FFT convolution (per block, through hisab num_fft/num_ifft). An IR can be
 # supplied raw or generated from a goonj shoebox-room simulation. f32 -> f64
-# throughout. Rust's serde derives and the reusable Complex scratch vectors are
-# dropped, but the scratch vectors are NOT: process_block reuses struct-owned
-# interleaved complex buffers, growing them only when fft_len exceeds the
-# largest seen so far, exactly as the oracle does. Allocating them per call was
-# behaviourally identical NUMERICALLY and wrong for resource behaviour -- under
-# lib/alloc.cyr's bump allocator (no individual free) it leaked 3 * fft_len * 16
-# bytes per block, ~147 MB/s for a 0.5 s IR at 48 kHz in 512-sample blocks.
+# throughout. Rust's serde derives are dropped. process_block keeps the oracle's
+# reusable scratch: struct-owned interleaved complex buffers that grow only when
+# fft_len exceeds the largest seen so far. lib/alloc.cyr has no individual free,
+# so allocating them per call would leak 3 * fft_len * 16 bytes per block.
 #
 # DIVERGENCE FROM THE ORACLE (docs/adr/0003): process_block STREAMS. The Rust
 # original writes only the first block_len samples of the convolution and drops
 # the rest -- the IR still ringing -- so it truncates the tail at every block
 # boundary and keeps history separate from process_sample. This port uses
 # overlap-save, which reuses the input_buffer ring process_sample already
-# maintains, so no new state is needed and the two entry points are coherent.
+# maintains, so the two entry points are coherent.
 #
 # Cross-crate mapping (discovered from lib/goonj.cyr + goonj src/tests, and
 # reused from the already-green src/acoustics_room.cyr wrapper):
@@ -34,7 +31,8 @@
 # The wall material name resolves through naad_acoustics_material_by_name
 # (src/acoustics.cyr). Result<Self> -> struct pointer on success, or a negative
 # NAAD_ERR_COMPUTATION on unknown material / non-positive dimensions. Reuses
-# RoomReverbConfig + its accessors from src/acoustics_room.cyr. No `include`.
+# RoomReverbConfig + its accessors and _naad_room_ir from src/acoustics_room.cyr,
+# and _naad_ring_new / _naad_ring_convolve from src/acoustics.cyr. No `include`.
 
 # ================================================================
 # ConvolutionReverb -- convolution reverb processor.
@@ -47,6 +45,9 @@
 #                   #[serde(skip)] Vec<Complex> fields
 #   scratch_cap   : the fft_len the three buffers are currently sized for; 0
 #                   until the first process_block
+#   ir_spectrum_len : the fft_len whose IR spectrum scratch_ir holds; 0 when it
+#                   holds none. Editing the IR through its accessors leaves this
+#                   stale, so a new IR goes through naad_convolution_rebuild_from_ir
 # ================================================================
 #derive(accessors)
 struct ConvolutionReverb {
@@ -58,30 +59,19 @@ struct ConvolutionReverb {
     scratch_in;
     scratch_product;
     scratch_cap;
+    ir_spectrum_len;
 }
 
 # ================================================================
-# naad_convolution_from_ir -- create a convolution reverb from a raw impulse
-# response `ir` (vec of f64) and a `mix` clamped to [0, 1]. The input ring
-# buffer is sized to max(ir_len, 1) and zero-filled. Ports ConvolutionReverb::
-# from_ir.
+# _naad_convolution_adopt -- build a reverb around `ir`, which it keeps: the
+# caller must hold no other reference. A ring sized for one length and an IR
+# that later grows would index past the ring.
 # ================================================================
 #must_use
-fn naad_convolution_from_ir(ir, mix) {
-    var ir_len = vec_len(ir);
-    var buf_len = ir_len;
-    if (buf_len < 1) { buf_len = 1; }
-
-    var input_buffer = vec_new();
-    var i = 0;
-    while (i < buf_len) {
-        vec_push(input_buffer, 0);
-        i = i + 1;
-    }
-
+fn _naad_convolution_adopt(ir, mix) {
     var self = alloc(sizeof(ConvolutionReverb));
     ConvolutionReverb_set_ir(self, ir);
-    ConvolutionReverb_set_input_buffer(self, input_buffer);
+    ConvolutionReverb_set_input_buffer(self, _naad_ring_new(vec_len(ir)));
     ConvolutionReverb_set_position(self, 0);
     ConvolutionReverb_set_mix(self, f64_clamp(mix, 0, F64_ONE));
     # Scratch grows lazily on the first process_block (see scratch_cap).
@@ -89,7 +79,20 @@ fn naad_convolution_from_ir(ir, mix) {
     ConvolutionReverb_set_scratch_in(self, 0);
     ConvolutionReverb_set_scratch_product(self, 0);
     ConvolutionReverb_set_scratch_cap(self, 0);
+    ConvolutionReverb_set_ir_spectrum_len(self, 0);
     return self;
+}
+
+# ================================================================
+# naad_convolution_from_ir -- create a convolution reverb from a raw impulse
+# response `ir` (vec of f64) and a `mix` clamped to [0, 1]. The input ring
+# buffer is sized to max(ir_len, 1) and zero-filled. The reverb keeps a copy:
+# Rust takes `ir` by value, so the caller can change its vec afterwards without
+# reaching the reverb (ADR-0005). Ports ConvolutionReverb::from_ir.
+# ================================================================
+#must_use
+fn naad_convolution_from_ir(ir, mix) {
+    return _naad_convolution_adopt(naad_vec_copy(ir), mix);
 }
 
 # ================================================================
@@ -99,33 +102,15 @@ fn naad_convolution_from_ir(ir, mix) {
 # seed 42 -- the Rust IrConfig literal), and loads it fully wet (mix 1.0).
 # Returns the struct pointer on success, or a negative NAAD_ERR_COMPUTATION if the
 # wall material name is unknown, the room dimensions are not positive, or the
-# sample rate reaches MAX_IR_SAMPLES (see naad_room_ir_overflows).
+# sample rate is negative or reaches MAX_IR_SAMPLES (see naad_room_ir_overflows).
 # Ports ConvolutionReverb::from_room. Reuses RoomReverbConfig from
 # src/acoustics_room.cyr.
 # ================================================================
 #must_use
 fn naad_convolution_from_room(config) {
-    var material = naad_acoustics_material_by_name(RoomReverbConfig_wall_material_name(config));
-    if (material == 0) { return NAAD_ERR_COMPUTATION; }
-
-    if (f64_le(RoomReverbConfig_length(config), 0) == 1) { return NAAD_ERR_COMPUTATION; }
-    if (f64_le(RoomReverbConfig_width(config), 0) == 1) { return NAAD_ERR_COMPUTATION; }
-    if (f64_le(RoomReverbConfig_height(config), 0) == 1) { return NAAD_ERR_COMPUTATION; }
-    if (naad_room_ir_overflows(config) == 1) { return NAAD_ERR_COMPUTATION; }
-
-    var room = acoustic_room_shoebox(RoomReverbConfig_length(config),
-      RoomReverbConfig_width(config), RoomReverbConfig_height(config), material);
-
-    var source = RoomReverbConfig_source_position(config);
-    var listener = RoomReverbConfig_listener_position(config);
-
-    var ir_config = ir_config_new(RoomReverbConfig_sample_rate(config), 3, 2000, 30, F64_ONE, 42);
-
-    var multiband = generate_ir(source, listener, room, ir_config);
-    var broadband = multiband_ir_to_broadband(multiband);
-    var ir = ImpulseResponse_samples(broadband);
-
-    return naad_convolution_from_ir(ir, F64_ONE);
+    var ir = _naad_room_ir(config);
+    if (naad_is_err(ir) == 1) { return ir; }
+    return _naad_convolution_adopt(ir, F64_ONE);
 }
 
 # ================================================================
@@ -145,14 +130,7 @@ fn naad_convolution_process_sample(self, input) {
     vec_set(buf, pos, input);
 
     # wet = sum(input_buffer[(pos + ir_len - k) % ir_len] * ir[k]).
-    var wet = 0;
-    var k = 0;
-    while (k < ir_len) {
-        var idx_raw = pos + ir_len - k;
-        var idx = idx_raw % ir_len;
-        wet = f64_add(wet, f64_mul(vec_get(buf, idx), vec_get(ir, k)));
-        k = k + 1;
-    }
+    var wet = _naad_ring_convolve(buf, pos, ir);
 
     var nextp = pos + 1;
     var np = nextp % ir_len;
@@ -218,24 +196,17 @@ fn naad_convolution_next_pow2(v) {
 # `output`. Both `input` and `output` are vec handles; up to min(len) samples
 # are written. An empty IR or empty input block copies the dry signal through.
 # On (never-reached, size is always a power of two) FFT failure it falls back to
-# direct per-sample convolution. Ports ConvolutionReverb::process_block.
+# direct per-sample convolution. Ports ConvolutionReverb::process_block, except
+# that it streams: the output is the stream process_sample gives, across block
+# boundaries. Deliberate divergence from the oracle, see docs/adr/0003.
 #
-# STREAMING (OVERLAP-SAVE). Until 2.2.2 this function -- and the Rust oracle it
-# ports, rust-old/src/acoustics/convolution.rs, which does the same
-# `.take(block_len)` -- wrote only the first block_len samples of the convolution
-# and DISCARDED the rest. The tail past block_len is the IR still ringing, so
-# every block boundary truncated it: for any IR longer than one tap the reverb
-# restarted each block, a discontinuity at the block rate (86 Hz at 512 samples).
-# Proof, 4-tap all-ones IR and one impulse -- per-sample path 1,1,1,1; block path
-# 1,1,0,0. It was also incoherent with process_sample: the FFT route never
-# touched position/input_buffer, so the two APIs could not be interleaved on one
-# object. Deliberate divergence from the oracle, see docs/adr/0003.
+# STREAMING (OVERLAP-SAVE). The segment is the previous (ir_len - 1) inputs
+# followed by this block, and that history is exactly what the input_buffer ring
+# process_sample maintains. So the two paths share one history and may be
+# interleaved on one object, and `input` and `output` may be the same vec.
 #
-# The fix is overlap-SAVE rather than overlap-add, because it needs no new state:
-# the segment is the previous (ir_len - 1) inputs followed by this block, and
-# that history is exactly what the input_buffer ring process_sample already
-# maintains. So the two paths now share one history and ARE interleavable, the
-# struct is unchanged, and fft_len is unchanged.
+# A segment holding a non-finite sample takes the direct path instead, which is
+# what lets one NaN cost ir_len outputs rather than two blocks.
 #
 # Segment length L = ir_len + block_len - 1, zero-padded to fft_len =
 # next_pow2(L). Circular convolution aliases only the first ir_len - 1 outputs
@@ -248,8 +219,7 @@ fn naad_convolution_process_block(self, input, output) {
     var ir_len = vec_len(ir);
     # Consume exactly as many samples as we emit, which is what
     # naad_convolution_process_block_direct does (it calls process_sample `limit`
-    # times). Before 2.2.2 the FFT path sized itself on the INPUT length while
-    # writing min(len) samples, so a short output silently dropped history.
+    # times): a short output must not drop history.
     var block_len = vec_len(input);
     var n_out_avail = vec_len(output);
     if (n_out_avail < block_len) { block_len = n_out_avail; }
@@ -263,7 +233,7 @@ fn naad_convolution_process_block(self, input, output) {
     # reused; reallocated only when fft_len exceeds the largest seen so far, the
     # same policy as the oracle's "resize keeps capacity" comment. A failed
     # allocation falls back to direct convolution rather than storing through a
-    # null -- the leak used to make its own null-deref reachable.
+    # null.
     if (fft_len > ConvolutionReverb_scratch_cap(self)) {
         var nir = alloc(fft_len * 16);
         var nin = alloc(fft_len * 16);
@@ -272,22 +242,13 @@ fn naad_convolution_process_block(self, input, output) {
         if (nin == 0) { return naad_convolution_process_block_direct(self, input, output); }
         if (npr == 0) { return naad_convolution_process_block_direct(self, input, output); }
         ConvolutionReverb_set_scratch_ir(self, nir);
+        ConvolutionReverb_set_ir_spectrum_len(self, 0);
         ConvolutionReverb_set_scratch_in(self, nin);
         ConvolutionReverb_set_scratch_product(self, npr);
         ConvolutionReverb_set_scratch_cap(self, fft_len);
     }
     var ir_buf = ConvolutionReverb_scratch_ir(self);
     var in_buf = ConvolutionReverb_scratch_in(self);
-
-    # IR -> ir_buf (real = sample for i < ir_len, else 0; im = 0).
-    var i = 0;
-    while (i < fft_len) {
-        var re = 0;
-        if (i < ir_len) { re = vec_get(ir, i); }
-        store64(ir_buf + i * 16, re);
-        store64(ir_buf + i * 16 + 8, 0);
-        i = i + 1;
-    }
 
     # Segment -> in_buf: the previous (ir_len - 1) inputs, oldest first, then this
     # block, then zeros. `position` is where the NEXT sample goes, so the history
@@ -305,14 +266,35 @@ fn naad_convolution_process_block(self, input, output) {
         } elif (j < span) {
             re2 = vec_get(input, j - lead);
         }
+        # A transform spreads one non-finite sample over the whole segment, so a
+        # NaN would take every output in the block. The sample path holds it to
+        # the ir_len outputs it reaches, and this block has changed no state yet.
+        if (naad_is_finite(re2) == 0) { return naad_convolution_process_block_direct(self, input, output); }
         store64(in_buf + j * 16, re2);
         store64(in_buf + j * 16 + 8, 0);
         j = j + 1;
     }
 
-    # Forward FFT both. Fall back to direct convolution on failure.
-    var ir_tag, ir_err = num_fft(ir_buf, fft_len);
-    if (is_err_result(ir_tag) == 1) { return naad_convolution_process_block_direct(self, input, output); }
+    # The IR's spectrum depends only on the IR and fft_len, so ir_buf keeps it
+    # between blocks. It holds none during the rewrite, so a failed transform
+    # cannot leave a half-built spectrum marked as valid.
+    if (ConvolutionReverb_ir_spectrum_len(self) != fft_len) {
+        ConvolutionReverb_set_ir_spectrum_len(self, 0);
+        # IR -> ir_buf (real = sample for i < ir_len, else 0; im = 0).
+        var i = 0;
+        while (i < fft_len) {
+            var re = 0;
+            if (i < ir_len) { re = vec_get(ir, i); }
+            store64(ir_buf + i * 16, re);
+            store64(ir_buf + i * 16 + 8, 0);
+            i = i + 1;
+        }
+        var ir_tag, ir_err = num_fft(ir_buf, fft_len);
+        if (is_err_result(ir_tag) == 1) { return naad_convolution_process_block_direct(self, input, output); }
+        ConvolutionReverb_set_ir_spectrum_len(self, fft_len);
+    }
+
+    # Forward FFT of the segment. Fall back to direct convolution on failure.
     var in_tag, in_err = num_fft(in_buf, fft_len);
     if (is_err_result(in_tag) == 1) { return naad_convolution_process_block_direct(self, input, output); }
 
@@ -336,6 +318,18 @@ fn naad_convolution_process_block(self, input, output) {
     var ifft_tag, ifft_err = num_ifft(prod, fft_len);
     if (is_err_result(ifft_tag) == 1) { return naad_convolution_process_block_direct(self, input, output); }
 
+    # Advance the SHARED history exactly as process_sample would have, so the two
+    # entry points stay coherent and may be interleaved on one object. This comes
+    # before the output loop because `input` and `output` may be the same vec: the
+    # ring must hold the dry input, and that loop overwrites it.
+    var w = 0;
+    while (w < block_len) {
+        vec_set(hist, hpos, vec_get(input, w));
+        hpos = (hpos + 1) % ir_len;
+        w = w + 1;
+    }
+    ConvolutionReverb_set_position(self, hpos);
+
     # Extract the VALID window and apply the mix. The first `lead` outputs are the
     # circular-convolution wraparound and are discarded; the linear result for
     # this block starts at index `lead`.
@@ -348,40 +342,21 @@ fn naad_convolution_process_block(self, input, output) {
         vec_set(output, o, f64_add(f64_mul(inp, dry), f64_mul(wet, mix)));
         o = o + 1;
     }
-
-    # Advance the SHARED history exactly as process_sample would have, so the two
-    # entry points stay coherent and may be interleaved on one object.
-    var w = 0;
-    while (w < block_len) {
-        vec_set(hist, hpos, vec_get(input, w));
-        hpos = (hpos + 1) % ir_len;
-        w = w + 1;
-    }
-    ConvolutionReverb_set_position(self, hpos);
     return 0;
 }
 
 # ================================================================
 # naad_convolution_rebuild_from_ir -- replace the IR (e.g. after a serde-free
 # restore), resizing and zeroing the input ring buffer and resetting position.
-# The Rust FFT scratch is dropped in this port, so there is nothing to clear.
-# Ports ConvolutionReverb::rebuild_from_ir.
+# Keeps a copy of `ir`, as naad_convolution_from_ir does. The FFT scratch stays
+# allocated: process_block rewrites what it uses, and a bump allocator would not
+# get the old buffers back. Ports ConvolutionReverb::rebuild_from_ir.
 # ================================================================
 fn naad_convolution_rebuild_from_ir(self, ir) {
-    var ir_len = vec_len(ir);
-    var buf_len = ir_len;
-    if (buf_len < 1) { buf_len = 1; }
-
-    var input_buffer = vec_new();
-    var i = 0;
-    while (i < buf_len) {
-        vec_push(input_buffer, 0);
-        i = i + 1;
-    }
-
-    ConvolutionReverb_set_input_buffer(self, input_buffer);
+    ConvolutionReverb_set_input_buffer(self, _naad_ring_new(vec_len(ir)));
     ConvolutionReverb_set_position(self, 0);
-    ConvolutionReverb_set_ir(self, ir);
+    ConvolutionReverb_set_ir(self, naad_vec_copy(ir));
+    ConvolutionReverb_set_ir_spectrum_len(self, 0);
     return 0;
 }
 

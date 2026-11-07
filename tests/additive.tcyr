@@ -397,5 +397,64 @@ while (ski < 64) {
 }
 assert(sq_all_zero, "a fully silenced bank emits exactly +0.0");
 
+# ================================================================
+test_group("cached phase increments follow every retune");
+var ainc_sr = f64_from(44100);
+var ainc_a = additive_new(f64_from(100), 4, ainc_sr);
+var ainc_b = additive_new(f64_from(200), 4, ainc_sr);
+additive_set_fundamental(ainc_a, f64_from(200));
+var ainc_same = 1;
+var ainc_i = 0;
+while (ainc_i < 2000) {
+    if (additive_next_sample(ainc_a) != additive_next_sample(ainc_b)) { ainc_same = 0; }
+    ainc_i = ainc_i + 1;
+}
+assert_eq(ainc_same, 1, "set_fundamental: bit-identical to a synth built at that fundamental");
+var ainc_c = additive_new(f64_from(100), 2, ainc_sr);
+additive_set_partial(ainc_c, 1, f64_from(3), F64_HALF);
+var ainc_x = additive_next_sample(ainc_c);
+assert_eq(vec_get(AdditiveSynth_phases(ainc_c), 1), f64_div(f64_from(300), ainc_sr),
+  "set_partial: the new ratio drives the next phase step");
+
+# ================================================================
+test_group("derived setters reach the next sample");
+var dsa = additive_new(f64_from(110), 3, f64_from(44100));
+var dsb = additive_new(f64_from(220), 3, f64_from(44100));
+AdditiveSynth_set_fundamental(dsa, f64_from(220));
+var dsi = 0;
+var dsbad = 0;
+while (dsi < 200) {
+    if (additive_next_sample(dsa) != additive_next_sample(dsb)) { dsbad = dsbad + 1; }
+    dsi = dsi + 1;
+}
+assert_eq(dsbad, 0, "AdditiveSynth_set_fundamental");
+var dsc = additive_new(f64_from(220), 2, f64_from(44100));
+var dsd = additive_new(f64_from(220), 2, f64_from(44100));
+Partial_set_frequency_ratio(vec_get(AdditiveSynth_partials(dsc), 1), f64_from(3));
+additive_set_partial(dsd, 1, f64_from(3), Partial_amplitude(vec_get(AdditiveSynth_partials(dsd), 1)));
+dsi = 0;
+dsbad = 0;
+while (dsi < 200) {
+    if (additive_next_sample(dsc) != additive_next_sample(dsd)) { dsbad = dsbad + 1; }
+    dsi = dsi + 1;
+}
+assert_eq(dsbad, 0, "Partial_set_frequency_ratio");
+
+test_group("a partial pushed past the phase slots cannot write past them");
+var dse = additive_new(f64_from(220), 1, f64_from(44100));
+var dse_ref = additive_new(f64_from(220), 1, f64_from(44100));
+var dsk = 0;
+while (dsk < 40) {
+    vec_push(AdditiveSynth_partials(dse), additive_partial_new(f64_from(2), F64_HALF, 0));
+    dsk = dsk + 1;
+}
+dsi = 0;
+dsbad = 0;
+while (dsi < 8) {
+    if (additive_next_sample(dse) != additive_next_sample(dse_ref)) { dsbad = dsbad + 1; }
+    dsi = dsi + 1;
+}
+assert_eq(dsbad, 0, "only partials that have a phase slot sound");
+
 var rc = assert_summary();
 syscall(60, rc);

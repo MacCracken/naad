@@ -8,6 +8,18 @@
 `VERSION` at the repo root is the source of truth for the current number. The
 entries below are the release record.
 
+**2.3.2** — P(-1) audit, hardening, optimization and refactor sweep. Audio on valid input
+is byte-identical to 2.3.1 over 94,731 values, and all 47 generators agree with the
+compiled Rust oracle on valid input. Of the audits' 50 findings, 45 are fixed and 5 are
+accepted, and the review of the merged diff found 8 more; none was visible to the old
+suite. The class that mattered most was ownership: the port kept
+pointers Rust moves ([ADR-0005](../adr/0005-copy-at-the-ownership-boundary.md)). A refused
+allocation is measured fail-stop
+([ADR-0006](../adr/0006-refused-allocation-stops-at-the-null-page.md)), and what stays
+different is listed in [ADR-0007](../adr/0007-hostile-input-gaps-we-accept.md), with the
+rule that a value derived from public fields is not cached unless the read compares it.
+Suite: **40 suites / 2861 assertions**.
+
 **2.3.1** — cyrius 6.7.9 -> **6.7.18**, hisab 3.4.0 -> **3.4.1**, goonj 2.1.0 -> **2.3.1**,
 sakshi 2.5.8 -> **2.5.10** (transitive), ganita 1.2.15. Each is its project's newest tag.
 Output on valid input is byte-identical to 2.3.0, and the consumer floor stays 6.7.2. A
@@ -285,8 +297,8 @@ consumed.
 
 - **hisab** — `[deps.hisab]` in `cyrius.cyml`, git+tag, `modules =
   ["dist/hisab.cyr"]`. The symbols `src/` actually calls are `hvec3_new` /
-  `HVec3_x`, `num_fft` / `num_ifft`, `num_dct` / `num_idct`, `num_rk4`,
-  `calc_bspline` and `calc_catmull_rom`. (The `ganita_mat_*` least-squares path
+  `HVec3_x`, `num_fft` / `num_ifft`, `num_dct` / `num_idct`, `calc_bspline` and
+  `f64_fmod`. (The `ganita_mat_*` least-squares path
   `dsp_spectral` leans on is *not* hisab's — `ganita` is a stdlib leaf in
   `[deps].stdlib`; `lib/hisab.cyr` defines no `ganita_mat_*`.)
 - **goonj** — `[deps.goonj]` in `cyrius.cyml`, git+tag, `modules =
@@ -383,8 +395,8 @@ Consequences for the port review:
 
 Per-module parity tracked in [`port-audit.md`](port-audit.md). Summary:
 
-**41 / 41 modules ported — PORT COMPLETE** · **2418 assertions green across 40
-suites**, covering **all 443 public fns** (0 untested; 12 `_`-prefixed internal
+**41 / 41 modules ported — PORT COMPLETE** · **2861 assertions green across 40
+suites**, covering **all 450 public fns** (0 untested; 12 `_`-prefixed internal
 helpers are exercised through their public callers) · `dist/naad.cyr` bundle assembled and collision-audited to zero across
 all **759** top-level symbols — `fn`, `var`, `const` and `struct` alike, against
 hisab, goonj, sakshi, abaco and the whole pinned stdlib. The audit was fn-scoped
@@ -441,14 +453,20 @@ including the naad/goonj error-code overlap.
 numbers are host- and boot-dependent** — the harness measures the timer floor
 per run and subtracts it per sample, and that floor moves with the clocksource.
 Re-run rather than comparing against a transcribed figure. Most recent local
-run (hpet clocksource, floor ≈ 1.33–1.35 µs per clock read):
+run (hpet clocksource, floor ≈ 1.2–1.4 µs per clock read):
 
 | Path | Per call |
 |------|----------|
-| `osc_next_sample` (sine) | 53 ns |
+| `osc_next_sample` (sine) | 51 ns |
 | `filter_svf` lowpass | 24 ns |
+| `filter_biquad` lowpass | 22 ns |
 | `envelope_adsr` `next_value` | 12 ns |
-| `noise` pink (Voss-McCartney) | 96 ns |
+| `noise` pink (Voss-McCartney) | 72 ns |
+| `unison` (5 voices) | 173 ns |
+| `subtractive` voice | 97 ns |
+| `additive` (8 partials) | 425 ns |
+| `reverb` | 632 ns |
+| `moog` ladder | 1.9 µs |
 
 ## Method
 
@@ -467,8 +485,8 @@ below are genuinely open; the scheduled view lives in
 **Known limit, measured at 2.3.1:**
 
 - **An IR below goonj's clamp still costs memory, and running out of it ends the process.**
-  About 165 B per Hz of rate for room and convolution, about 27 B per Hz for binaural: a
-  16 MHz room builds in 2.5 GiB, and a 32 MHz one fails under a 4 GiB limit. No lower bound
+  About 160 B per Hz of rate for room and convolution, about 18 B per Hz for binaural: a
+  16 MHz room builds in 2.4 GiB, and a 32 MHz one fails under a 4 GiB limit. No lower bound
   than the clamp is set, by decision: it would refuse rates that work on a larger machine.
 
 **Deliberately deferred by 2.1.2:**

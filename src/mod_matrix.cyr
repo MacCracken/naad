@@ -5,13 +5,15 @@
 # integer `var` constants whose value IS the array index -- Rust's private
 # `index()` maps each variant to 0..7 in declaration order, so the constant
 # doubles as the slot index used by set_source / compute / get_destination.
-# `Vec<ModRouting>` -> a stdlib `vec` holding ModRouting struct pointers.
+# `Vec<ModRouting>` -> a stdlib `vec` of pointers to the matrix's own ModRouting
+# slots, which hold copies: the oracle's ModRouting is `Copy`.
 # The fixed `[f32; 8]` source/destination arrays -> stdlib `vec`s of 8 f64
 # slots. Methods become free `mod_matrix_*` functions on the struct pointer;
 # `bool` returns become integer 1/0 (`add_routing` full-check, `enabled`).
 #
 # Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE,
-# f64_clamp/neg). No `include` lines in the module itself.
+# f64_clamp/neg) and error.cyr (naad_vec_zeros, NAAD_ERR_*). No `include` lines
+# in the module itself.
 
 # ================================================================
 # Slot counts (was pub const NUM_SOURCES / NUM_DESTINATIONS / MAX_ROUTINGS).
@@ -74,51 +76,73 @@ fn mod_matrix_routing_new(source, destination, depth) {
     return r;
 }
 
+# Copy one routing's fields into another.
+fn _mod_routing_copy(dst, src) {
+    ModRouting_set_source(dst, ModRouting_source(src));
+    ModRouting_set_destination(dst, ModRouting_destination(src));
+    ModRouting_set_depth(dst, ModRouting_depth(src));
+    ModRouting_set_enabled(dst, ModRouting_enabled(src));
+    return 0;
+}
+
 # ================================================================
 # ModMatrix -- up to 16 routing slots plus per-frame source/dest scratch.
-#   routings           : vec of ModRouting pointers
+#   routings           : vec of the active slots, in routing order
 #   source_values      : vec of 8 f64 source inputs for the current frame
 #   destination_values : vec of 8 f64 accumulated destination amounts
+#   slots              : vec of MOD_MATRIX_MAX_ROUTINGS ModRouting structs. The
+#                        allocator never frees, so they are made once and
+#                        add/remove/clear only move fields between them.
 # ================================================================
 #derive(accessors)
-struct ModMatrix { routings; source_values; destination_values; }
+struct ModMatrix { routings; source_values; destination_values; slots; }
 
 # Create an empty modulation matrix (all source/dest slots zeroed).
 #must_use
 fn mod_matrix_new() {
     var m = alloc(sizeof(ModMatrix));
     ModMatrix_set_routings(m, vec_new());
-    var src = vec_new();
-    var dst = vec_new();
+    ModMatrix_set_source_values(m, naad_vec_zeros(MOD_MATRIX_NUM_SOURCES));
+    ModMatrix_set_destination_values(m, naad_vec_zeros(MOD_MATRIX_NUM_DESTINATIONS));
+    var slots = vec_new();
     var i = 0;
-    while (i < MOD_MATRIX_NUM_SOURCES) {
-        vec_push(src, 0);
+    while (i < MOD_MATRIX_MAX_ROUTINGS) {
+        vec_push(slots, alloc(sizeof(ModRouting)));
         i = i + 1;
     }
-    i = 0;
-    while (i < MOD_MATRIX_NUM_DESTINATIONS) {
-        vec_push(dst, 0);
-        i = i + 1;
-    }
-    ModMatrix_set_source_values(m, src);
-    ModMatrix_set_destination_values(m, dst);
+    ModMatrix_set_slots(m, slots);
     return m;
 }
 
-# Add a routing. Returns 0 (false) if the matrix is full, else 1 (true).
+# Add a routing. Returns 1 (true), or 0 (false) if the matrix is full or `routing`
+# is a failed mod_matrix_routing_new (the oracle's ModRouting::new cannot fail, so
+# an error code must stop here, not at the dereference in compute). The fields are
+# copied into a slot: `routing` stays the caller's, as a `Copy` value does, and may
+# be added twice or to another matrix without the entries sharing state.
 fn mod_matrix_add_routing(m, routing) {
+    if (routing <= 0) { return 0; }
     var routings = ModMatrix_routings(m);
-    if (vec_len(routings) >= MOD_MATRIX_MAX_ROUTINGS) { return 0; }
-    vec_push(routings, routing);
+    var n = vec_len(routings);
+    if (n >= MOD_MATRIX_MAX_ROUTINGS) { return 0; }
+    var slot = vec_get(ModMatrix_slots(m), n);
+    _mod_routing_copy(slot, routing);
+    vec_push(routings, slot);
     return 1;
 }
 
-# Remove a routing by index (no-op if out of range).
+# Remove a routing by index (no-op if out of range). Later routings move down one
+# place, as Vec::remove moves its elements; slot `i` always holds routing `i`.
 fn mod_matrix_remove_routing(m, index) {
     var routings = ModMatrix_routings(m);
-    if (index < vec_len(routings)) {
-        vec_remove(routings, index);
+    var n = vec_len(routings);
+    if (index < 0) { return 0; }
+    if (index >= n) { return 0; }
+    var i = index;
+    while (i < n - 1) {
+        _mod_routing_copy(vec_get(routings, i), vec_get(routings, i + 1));
+        i = i + 1;
     }
+    vec_truncate(routings, n - 1);
     return 0;
 }
 
@@ -142,6 +166,9 @@ fn mod_matrix_set_source(m, source, value) {
 # Compute all destination modulation amounts from the current sources.
 # Call once per frame after every set_source. Zeroes the dest scratch,
 # then sums src_val * depth into each destination over enabled routings.
+# A routing whose source or destination id is out of range is skipped:
+# ModRouting_set_source / _set_destination are the port of the oracle's `pub`
+# enum fields, so an id is checked here, where it indexes the 8-slot scratch.
 fn mod_matrix_compute(m) {
     var dst = ModMatrix_destination_values(m);
     var i = 0;
@@ -158,9 +185,11 @@ fn mod_matrix_compute(m) {
         if (ModRouting_enabled(routing) == 1) {
             var s = ModRouting_source(routing);
             var d = ModRouting_destination(routing);
-            var src_val = vec_get(src, s);
-            var mod_amount = f64_mul(src_val, ModRouting_depth(routing));
-            vec_set(dst, d, f64_add(vec_get(dst, d), mod_amount));
+            if (s >= 0 && s < MOD_MATRIX_NUM_SOURCES && d >= 0 && d < MOD_MATRIX_NUM_DESTINATIONS) {
+                var src_val = vec_get(src, s);
+                var mod_amount = f64_mul(src_val, ModRouting_depth(routing));
+                vec_set(dst, d, f64_add(vec_get(dst, d), mod_amount));
+            }
         }
         r = r + 1;
     }
@@ -185,13 +214,16 @@ fn mod_matrix_num_routings(m) {
     return vec_len(ModMatrix_routings(m));
 }
 
-# The vec of all routings (ModRouting pointers).
+# A fresh vec of the routings (ModRouting pointers). The list itself stays private
+# to the matrix, as Rust's read-only slice is, because the slots depend on it. Edit a
+# routing through mod_matrix_routing_mut.
 #must_use
 fn mod_matrix_routings(m) {
-    return ModMatrix_routings(m);
+    return naad_vec_copy(ModMatrix_routings(m));
 }
 
-# Pointer to a routing by index, or 0 (None) if out of range.
+# Pointer to the stored routing at `index`, or 0 (None) if out of range. Edits
+# through it reach compute; it stays at `index` while routings around it move.
 #must_use
 fn mod_matrix_routing_mut(m, index) {
     var routings = ModMatrix_routings(m);

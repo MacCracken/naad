@@ -89,9 +89,8 @@ envelope_catmull_rom_trigger(ab_cr);
 var ab_b5 = alloc_used();
 ab_i = 0;
 while (ab_i < AB_N) { ab_sink = envelope_catmull_rom_next_value(ab_cr); ab_i = ab_i + 1; }
-# calc_bspline's sibling calc_catmull_rom returns a fresh HVec3 (24 B) from
-# lib/hisab.cyr, which naad may not patch. The four LIFTS are what B3 recovered.
-assert(alloc_used() - ab_b5 < AB_N * 40, "envelope_catmull_rom_next_value reuses its HVec3 lifts");
+# The curve is evaluated in scalars, so nothing is left behind per sample.
+assert(alloc_used() - ab_b5 < 1024, "envelope_catmull_rom_next_value allocates nothing per sample");
 
 # B2 -- was ~464 B/sample (~22 MB/s at 48 kHz).
 test_group("alloc budget: smooth morph wavetable (B2)");
@@ -107,11 +106,8 @@ wavetable_morph_set_morph(ab_m, AB_C0_5);
 var ab_b6 = alloc_used();
 ab_i = 0;
 while (ab_i < AB_N) { ab_sink = wavetable_morph_next_sample_smooth(ab_m); ab_i = ab_i + 1; }
-# HONEST CEILING: ~120 B/sample of this path lives inside lib/hisab.cyr's
-# calc_bspline (its own scratch + result HVec3) and naad may not patch lib/.
-# This is NOT a zero-alloc path and must not be described as one. The budget
-# pins what naad controls; pre-fix the delta was ~4.6 MB.
-assert(alloc_used() - ab_b6 < AB_N * 160, "wavetable_morph_next_sample_smooth reuses its own scratch");
+# _bspline_eval_1d_into runs de Boor in scratch sized at construction.
+assert(alloc_used() - ab_b6 < 1024, "wavetable_morph_next_sample_smooth allocates nothing per sample");
 
 # B1 -- was three alloc(fft_len * 16) per BLOCK (~147 MB/s at 48 kHz).
 test_group("alloc budget: convolution process_block (B1)");
@@ -189,6 +185,49 @@ ab_i = 0;
 while (ab_i < AB_N) { ab_sink = naad_binaural_process_sample_into(ab_bp, AB_C0_5, ab_bs); ab_i = ab_i + 1; }
 assert(alloc_used() - ab_b12 < 1024, "naad_binaural_process_sample_into allocates nothing per sample");
 assert(naad_is_finite(BinauralStereo_left(ab_bs)), "binaural left output is finite");
+
+# ================================================================
+# 2.3.2 -- forms a streaming caller has no way around. Each of these left a
+# struct or a scratch vec behind per sample or per block.
+# ================================================================
+test_group("alloc budget: state-variable filter into form");
+var ab_svf = filter_svf_new(f64_from(1000), AB_ONE, f64_from(44100));
+var ab_svf_out = alloc(sizeof(SvfOutput));
+var ab_b13 = alloc_used();
+ab_i = 0;
+while (ab_i < AB_N) { filter_svf_process_sample_into(ab_svf, AB_C0_5, ab_svf_out); ab_i = ab_i + 1; }
+assert(alloc_used() - ab_b13 < 1024, "filter_svf_process_sample_into allocates nothing per sample");
+
+test_group("alloc budget: reverb_process_buffer");
+var ab_rv = reverb_new(AB_C0_5, AB_C0_5, 0, AB_C0_5, f64_from(44100));
+var ab_rv_in = naad_vec_zeros(64);
+var ab_rv_l = naad_vec_zeros(64);
+var ab_rv_r = naad_vec_zeros(64);
+var ab_b14 = alloc_used();
+ab_i = 0;
+while (ab_i < 1000) { reverb_process_buffer(ab_rv, ab_rv_in, ab_rv_l, ab_rv_r); ab_i = ab_i + 1; }
+assert(alloc_used() - ab_b14 < 1024, "reverb_process_buffer allocates nothing per block");
+
+test_group("alloc budget: naad_directivity_gain");
+var ab_dir = hvec3_unit_x();
+var ab_front = hvec3_unit_y();
+var ab_b15 = alloc_used();
+ab_i = 0;
+while (ab_i < AB_N) {
+    ab_sink = naad_directivity_gain(NAAD_DIR_CARDIOID, ab_dir, ab_front);
+    ab_i = ab_i + 1;
+}
+assert(alloc_used() - ab_b15 < 1024, "naad_directivity_gain allocates nothing per call");
+
+test_group("alloc budget: formant vowel changes");
+var ab_fs = formant_synth_new(VOWEL_A, f64_from(44100));
+var ab_b16 = alloc_used();
+ab_i = 0;
+while (ab_i < 1000) {
+    formant_synth_morph(ab_fs, VOWEL_A, VOWEL_E, AB_C0_5);
+    ab_i = ab_i + 1;
+}
+assert(alloc_used() - ab_b16 < 1024, "formant_synth_morph allocates nothing per call");
 
 var rc = assert_summary();
 syscall(60, rc);

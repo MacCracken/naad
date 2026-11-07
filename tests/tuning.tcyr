@@ -92,20 +92,19 @@ var res = tuning_table_custom("bad", bad, f64_from(440));
 assert(naad_is_err(res) == 1, "custom rejects negative ratio");
 
 # ================================================================
-# 2.2.0 -- tuning_note_name domain guard. The oracle takes `note: u8`
-# (rust-old/src/tuning.rs:189), so 0..255 is its whole domain and it needs no
-# guard; the port widened the parameter to a signed i64 and formatted a nonsense
-# octave for values Rust could never have received. A negative note additionally
-# fell through every equality test in tuning_note_name_str and silently
-# returned "B".
+# tuning_note_name's domain is the oracle's: `note: u8` at
+# rust-old/src/tuning.rs:189, so 0..255, wider than MIDI's 0..127. Outside it the
+# signed parameter would format a nonsense octave.
 # ================================================================
-test_group("note_name rejects notes outside the MIDI range");
-assert_streq(tuning_note_name(128), "", "note 128 is out of range");
-assert_streq(tuning_note_name(0 - 1), "", "a negative note is out of range");
-assert_streq(tuning_note_name(1000000), "", "a far out-of-range note is rejected");
-# Controls: the whole valid MIDI range still names correctly, including both ends.
+test_group("note_name covers exactly the oracle's u8 domain");
 assert_streq(tuning_note_name(0), "C-1", "note 0 = C-1");
 assert_streq(tuning_note_name(127), "G9", "note 127 = G9");
+assert_streq(tuning_note_name(128), "G#9", "note 128 = G#9, as Rust names it");
+assert_streq(tuning_note_name(200), "G#15", "note 200 = G#15, as Rust names it");
+assert_streq(tuning_note_name(255), "D#20", "note 255 = D#20, the top of u8");
+assert_streq(tuning_note_name(256), "", "note 256 is outside u8");
+assert_streq(tuning_note_name(0 - 1), "", "a negative note is outside u8");
+assert_streq(tuning_note_name(1000000), "", "a far out-of-range note is rejected");
 assert_streq(tuning_note_name(69), "A4", "control: A4 unchanged");
 
 test_group("note_name_str range");
@@ -165,6 +164,89 @@ while (mn < 128) {
     mn = mn + 1;
 }
 assert(mono_ok, "etf is strictly increasing over MIDI 0..127");
+
+# ================================================================
+test_group("freq_to_midi rounds a tie away from zero");
+# The rule itself, on exact inputs. Rust's `round` sends every .5 away from
+# zero; the even results are the ones a ties-to-even rounder gets wrong.
+fn half_up(n) { return f64_add(f64_from(n), F64_HALF); }
+assert_eq(_tuning_round(half_up(60)), f64_from(61), "60.5 -> 61");
+assert_eq(_tuning_round(half_up(61)), f64_from(62), "61.5 -> 62");
+assert_eq(_tuning_round(half_up(0)), f64_from(1), "0.5 -> 1");
+assert_eq(_tuning_round(half_up(2)), f64_from(3), "2.5 -> 3");
+assert_eq(_tuning_round(f64_neg(half_up(0))), f64_neg(f64_from(1)), "-0.5 -> -1");
+assert_eq(_tuning_round(f64_neg(half_up(2))), f64_neg(f64_from(3)), "-2.5 -> -3");
+# One ulp under a tie stays down, which `floor(x + 0.5)` gets wrong at 0.5.
+assert_eq(_tuning_round(F64_HALF - 1), 0, "largest double below 0.5 -> 0");
+assert_eq(_tuning_round(half_up(60) - 1), f64_from(60), "one ulp below 60.5 -> 60");
+assert_eq(_tuning_round(f64_from(60)), f64_from(60), "an integer is unchanged");
+assert_eq(_tuning_round(0x8000000000000000), 0x8000000000000000, "-0.0 keeps its sign");
+assert_eq(naad_is_finite(_tuning_round(0x7FF8000000000000)), 0, "NaN stays NaN");
+assert_eq(_tuning_round(0x7FF0000000000000), 0x7FF0000000000000, "+inf stays +inf");
+
+# End to end. Each even note k is searched for a frequency whose fractional MIDI
+# value is exactly k + 0.5 under this target's own ln, so the test does not pin
+# x87 bits. Both frequencies named below are ties on x86-64.
+fn midi_of(freq) {
+    var lg = f64_div(f64_ln(f64_div(freq, f64_from(440))), F64_LN2);
+    return f64_add(f64_from(69), f64_mul(f64_from(12), lg));
+}
+# A frequency within 32 ulps of k + 0.5's that lands exactly on it, or 0 if none.
+fn tie_freq_for(k) {
+    var target = f64_add(f64_from(k), F64_HALF);
+    var f0 = f64_mul(f64_from(440), f64_pow(F64_TWO, f64_div(f64_sub(target, f64_from(69)), f64_from(12))));
+    var d = 0 - 32;
+    while (d <= 32) {
+        if (f64_eq(midi_of(f0 + d), target) == 1) { return f0 + d; }
+        d = d + 1;
+    }
+    return 0;
+}
+var tie_ties = 0;
+var tie_bad = 0;
+var tie_k = 0;
+while (tie_k < 127) {
+    var tie_f = tie_freq_for(tie_k);
+    if (tie_f != 0) {
+        tie_ties = tie_ties + 1;
+        if (tuning_freq_to_midi(tie_f) != tie_k + 1) { tie_bad = tie_bad + 1; }
+    }
+    tie_k = tie_k + 2;
+}
+assert(tie_ties >= 32, "enough even-note ties were found to mean something");
+assert_eq(tie_bad, 0, "every even-note tie rounds up to the next note");
+assert_eq(tuning_freq_to_midi(0x407AB795B9C289E4), 69, "427.4740541075864 Hz (68.5) -> 69");
+assert_eq(tuning_freq_to_midi(0x4070D4AB21026360), 61, "269.2917795270241 Hz (60.5) -> 61");
+
+# ================================================================
+test_group("custom table owns its ratios");
+# `[f32; 12]` is passed by value, so a Rust table cannot see later writes to the
+# caller's array. Sharing the vec here would also bypass the validation.
+var own_r = vec_new();
+var own_i = 0;
+while (own_i < 12) { vec_push(own_r, F64_ONE); own_i = own_i + 1; }
+var own_t1 = tuning_table_custom("one", own_r, f64_from(440));
+var own_before = tuning_note_to_freq(own_t1, 70);
+assert_eq(own_before, f64_from(440), "ratio 1.0 at degree 10 gives 440 Hz");
+vec_set(own_r, 10, F64_TWO);
+var own_t2 = tuning_table_custom("two", own_r, f64_from(440));
+assert_eq(tuning_note_to_freq(own_t1, 70), own_before, "a later table from the same vec leaves the first alone");
+assert_eq(tuning_note_to_freq(own_t2, 70), f64_from(880), "the later table sees its own ratios");
+vec_set(own_r, 10, f64_neg(F64_ONE));
+assert_eq(tuning_note_to_freq(own_t2, 70), f64_from(880), "a value validation rejects cannot be written in later");
+assert_eq(vec_len(TuningTable_ratios(own_t1)), 12, "the copy keeps all 12 ratios");
+
+# ================================================================
+test_group("custom table owns its name");
+var dtn = alloc(8);
+store8(dtn, 'A');
+store8(dtn + 1, 0);
+var dtr = vec_new();
+var dti = 0;
+while (dti < 12) { vec_push(dtr, F64_ONE); dti = dti + 1; }
+var dtt = tuning_table_custom(dtn, dtr, f64_from(440));
+store8(dtn, 'B');
+assert_eq(load8(TuningTable_name(dtt)), 'A', "a later write to the caller's buffer does not reach the table");
 
 var rc = assert_summary();
 syscall(60, rc);

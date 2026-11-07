@@ -145,8 +145,10 @@ committed to — nothing here is speculative, and no milestone is invented.
 
 ### Allocation-free hot paths
 
-- [ ] **An allocation-free four-output SVF core.** **Filed 2026-08-31 by nidhi**,
-      which measured it.
+- [x] **An allocation-free four-output SVF core.** **Filed 2026-08-31 by nidhi**,
+      which measured it. Shipped in 2.3.2 as `filter_svf_process_sample_into(self,
+      input, out)`, writing all four outputs into a caller-owned `SvfOutput`, bit-identical
+      to the allocating form. nidhi and garjan still allocate until they move to it.
 
       `filter_svf_process_sample` (`src/filter.cyr:386`) ends with
       `alloc(sizeof(SvfOutput))` — **32 bytes per call**, measured over 44,100

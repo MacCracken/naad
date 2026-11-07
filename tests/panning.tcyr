@@ -50,5 +50,76 @@ var sb = panning_stereo_balance(F64_ONE, F64_ONE, f64_neg(F64_ONE));
 assert(f64_lt(f64_abs(f64_sub(PanPair_left(sb), F64_ONE)), NAAD_EPSILON), "balance L ~ 1");
 assert(f64_lt(f64_abs(PanPair_right(sb)), NAAD_EPSILON), "balance R ~ 0");
 
+# ================================================================
+test_group("the _into forms write the caller's struct and allocate nothing");
+# alloc frees nothing, so these are the forms a per-sample caller needs.
+var d8_g = alloc(sizeof(PanGains));
+var d8_p = alloc(sizeof(PanPair));
+panning_pan_gains_into(f64_neg(F64_ONE), PAN_LAW_EQUAL_POWER, d8_g);
+assert(f64_lt(f64_abs(f64_sub(PanGains_left(d8_g), F64_ONE)), C0_01), "gains_into full left: L ~ 1");
+assert(f64_lt(f64_abs(PanGains_right(d8_g)), C0_01), "gains_into full left: R ~ 0");
+panning_pan_gains_into(0, PAN_LAW_LINEAR, d8_g);
+assert_eq(PanGains_left(d8_g), F64_HALF, "gains_into linear center: L = 0.5");
+assert_eq(PanGains_right(d8_g), F64_HALF, "gains_into linear center: R = 0.5");
+panning_pan_gains_into(F64_ONE, PAN_LAW_LINEAR, d8_g);
+assert_eq(PanGains_left(d8_g), 0, "gains_into linear full right: L = 0");
+assert_eq(PanGains_right(d8_g), F64_ONE, "gains_into linear full right: R = 1");
+panning_stereo_balance_into(F64_ONE, F64_ONE, f64_neg(F64_ONE), d8_p);
+assert_eq(PanPair_left(d8_p), F64_ONE, "balance_into -1: left untouched");
+assert_eq(PanPair_right(d8_p), 0, "balance_into -1: right silenced");
+panning_stereo_balance_into(F64_ONE, F64_ONE, F64_HALF, d8_p);
+assert_eq(PanPair_left(d8_p), F64_HALF, "balance_into 0.5: left halved");
+assert_eq(PanPair_right(d8_p), F64_ONE, "balance_into 0.5: right untouched");
+
+var d8_law = 0;
+while (d8_law < 2) {
+    var d8_w = panning_pan_gains(C0_01, d8_law);
+    panning_pan_gains_into(C0_01, d8_law, d8_g);
+    assert_eq(PanGains_left(d8_g), PanGains_left(d8_w), "gains and gains_into agree on L");
+    assert_eq(PanGains_right(d8_g), PanGains_right(d8_w), "gains and gains_into agree on R");
+    d8_law = d8_law + 1;
+}
+var d8_b = panning_stereo_balance(C0_01, F64_ONE, F64_HALF);
+panning_stereo_balance_into(C0_01, F64_ONE, F64_HALF, d8_p);
+assert_eq(PanPair_left(d8_p), PanPair_left(d8_b), "balance and balance_into agree on L");
+assert_eq(PanPair_right(d8_p), PanPair_right(d8_b), "balance and balance_into agree on R");
+
+var d8_used = alloc_used();
+var d8_i = 0;
+while (d8_i < 1000) {
+    panning_pan_gains_into(C0_01, PAN_LAW_EQUAL_POWER, d8_g);
+    panning_stereo_balance_into(F64_ONE, F64_ONE, C0_01, d8_p);
+    panning_pan_mono_into(F64_ONE, C0_01, PAN_LAW_EQUAL_POWER, d8_p);
+    d8_i = d8_i + 1;
+}
+assert_eq(alloc_used() - d8_used, 0, "1000 calls of each _into form allocate nothing");
+
+# ================================================================
+test_group("pan_buffer applies one set of gains to the whole buffer");
+var pb_in = vec_new(); var pb_l = vec_new(); var pb_r = vec_new();
+var pb_i = 0;
+while (pb_i < 8) {
+    vec_push(pb_in, f64_mul(f64_from(pb_i), C0_01));
+    vec_push(pb_l, 0); vec_push(pb_r, 0);
+    pb_i = pb_i + 1;
+}
+var pb_used = alloc_used();
+panning_pan_buffer(pb_in, C0_01, PAN_LAW_EQUAL_POWER, pb_l, pb_r);
+assert_eq(alloc_used() - pb_used, sizeof(PanGains), "one small block for the whole buffer");
+pb_i = 0;
+var pb_ok = 1;
+while (pb_i < 8) {
+    panning_pan_mono_into(vec_get(pb_in, pb_i), C0_01, PAN_LAW_EQUAL_POWER, d8_p);
+    if (vec_get(pb_l, pb_i) != PanPair_left(d8_p)) { pb_ok = 0; }
+    if (vec_get(pb_r, pb_i) != PanPair_right(d8_p)) { pb_ok = 0; }
+    pb_i = pb_i + 1;
+}
+assert_eq(pb_ok, 1, "each sample matches pan_mono bit for bit");
+# With left aliasing input, right must still come from the original sample.
+var pb_a = vec_new(); var pb_b = vec_new();
+vec_push(pb_a, F64_ONE); vec_push(pb_b, 0);
+panning_pan_buffer(pb_a, F64_ONE, PAN_LAW_LINEAR, pb_a, pb_b);
+assert_eq(vec_get(pb_b, 0), F64_ONE, "right reads the sample before left overwrites it");
+
 var rc = assert_summary();
 syscall(60, rc);

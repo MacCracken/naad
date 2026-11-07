@@ -7,6 +7,11 @@
 # `PanPair` struct (left, right); `pan_gains` returns a `PanGains` struct.
 # Requires (from the build/test unit): stdlib alloc + math (F64_ONE/HALF/
 # PI_2, f64_add/sub/mul/clamp/neg, f64_sin/cos, f64_lt). No `include` lines.
+#
+# alloc is a bump allocator with no individual free, so a function returning a
+# fresh struct costs 16 permanent bytes per call. Each such form here has an
+# `_into` sibling that writes a caller-owned struct, for per-sample use. Rust
+# returns these by value and needs no such split.
 
 # ================================================================
 # PanLaw -- panning law used for stereo positioning (was `enum PanLaw`).
@@ -30,23 +35,32 @@ struct PanGains { left; right; }
 struct PanPair { left; right; }
 
 # ================================================================
-# panning_pan_gains -- stereo gains for a pan position. `pan` ranges from
-# -1.0 (full left) to +1.0 (full right), 0.0 = center. Ports pan_gains.
+# panning_pan_gains_into -- stereo gains for a pan position, written to `out`.
+# `pan` ranges from -1.0 (full left) to +1.0 (full right), 0.0 = center. Returns
+# 0. Ports pan_gains.
 # ================================================================
-#must_use
-fn panning_pan_gains(pan, law) {
+fn panning_pan_gains_into(pan, law, out) {
     var p = f64_clamp(pan, f64_neg(F64_ONE), F64_ONE);
     # Map -1..+1 to 0..1.
     var t = f64_mul(f64_add(p, F64_ONE), F64_HALF);
-    var g = alloc(sizeof(PanGains));
     if (law == PAN_LAW_EQUAL_POWER) {
         var angle = f64_mul(t, F64_PI_2);
-        PanGains_set_left(g, f64_cos(angle));
-        PanGains_set_right(g, f64_sin(angle));
+        PanGains_set_left(out, f64_cos(angle));
+        PanGains_set_right(out, f64_sin(angle));
     } else {
-        PanGains_set_left(g, f64_sub(F64_ONE, t));
-        PanGains_set_right(g, t);
+        PanGains_set_left(out, f64_sub(F64_ONE, t));
+        PanGains_set_right(out, t);
     }
+    return 0;
+}
+
+# ================================================================
+# panning_pan_gains -- panning_pan_gains_into, in a fresh PanGains.
+# ================================================================
+#must_use
+fn panning_pan_gains(pan, law) {
+    var g = alloc(sizeof(PanGains));
+    panning_pan_gains_into(pan, law, g);
     return g;
 }
 
@@ -62,62 +76,49 @@ fn panning_pan_mono(sample, pan, law) {
 }
 
 # ================================================================
-# panning_pan_mono_into -- the allocation-free core. Writes into a caller-owned
-# PanPair and returns 0. `lib/alloc.cyr` is a bump allocator with no individual
-# free, so the one-shot form above costs 16 permanently-resident bytes per call;
-# a caller in a per-sample loop should hoist one PanPair and use this. Same
-# split as reverb_process_core / reverb_process_sample.
+# panning_pan_mono_into -- the allocation-free core: writes (left, right) into a
+# caller-owned PanPair and returns 0. PanPair and PanGains are both
+# { left; right; }, so `out` holds the gains until the sample scales them.
 # ================================================================
 fn panning_pan_mono_into(sample, pan, law, out) {
-    # Gains computed into locals (no intermediate PanGains alloc — this is a
-    # per-sample path and Cyrius has no free). Numerically identical to
-    # panning_pan_gains.
-    var p = f64_clamp(pan, f64_neg(F64_ONE), F64_ONE);
-    var t = f64_mul(f64_add(p, F64_ONE), F64_HALF);
-    var gl = 0;
-    var gr = 0;
-    if (law == PAN_LAW_EQUAL_POWER) {
-        var angle = f64_mul(t, F64_PI_2);
-        gl = f64_cos(angle);
-        gr = f64_sin(angle);
-    } else {
-        gl = f64_sub(F64_ONE, t);
-        gr = t;
-    }
-    PanPair_set_left(out, f64_mul(sample, gl));
-    PanPair_set_right(out, f64_mul(sample, gr));
+    panning_pan_gains_into(pan, law, out);
+    PanPair_set_left(out, f64_mul(sample, PanPair_left(out)));
+    PanPair_set_right(out, f64_mul(sample, PanPair_right(out)));
     return 0;
 }
 
 # ================================================================
 # panning_pan_buffer -- pan a whole mono `input` vec into `left`/`right` vecs
-# with ONE PanPair allocation for the entire buffer. Writes min(len) samples;
-# extra capacity in the outputs is left untouched. Returns 0.
+# with ONE PanGains allocation for the entire buffer. pan and law are fixed for
+# the call, so the gains are computed once. Each output takes as many samples as
+# both it and `input` hold; the rest of it is left untouched. Returns 0.
 # ================================================================
 fn panning_pan_buffer(input, pan, law, left, right) {
     var n = vec_len(input);
     var ll = vec_len(left);
     var rl = vec_len(right);
-    var res = alloc(sizeof(PanPair));
+    var g = alloc(sizeof(PanGains));
+    panning_pan_gains_into(pan, law, g);
+    var gl = PanGains_left(g);
+    var gr = PanGains_right(g);
     var i = 0;
     while (i < n) {
-        panning_pan_mono_into(vec_get(input, i), pan, law, res);
-        if (i < ll) { vec_set(left, i, PanPair_left(res)); }
-        if (i < rl) { vec_set(right, i, PanPair_right(res)); }
+        # Read once: `left` or `right` may be `input` itself.
+        var sample = vec_get(input, i);
+        if (i < ll) { vec_set(left, i, f64_mul(sample, gl)); }
+        if (i < rl) { vec_set(right, i, f64_mul(sample, gr)); }
         i = i + 1;
     }
     return 0;
 }
 
 # ================================================================
-# panning_stereo_balance -- attenuate one channel to shift the image.
-# `balance` ranges from -1.0 (left only) to +1.0 (right only). Returns the
-# adjusted (left, right) as a PanPair. Ports stereo_balance.
+# panning_stereo_balance_into -- attenuate one channel to shift the image.
+# `balance` ranges from -1.0 (left only) to +1.0 (right only). Writes the
+# adjusted (left, right) into `out` and returns 0. Ports stereo_balance.
 # ================================================================
-#must_use
-fn panning_stereo_balance(left, right, balance) {
+fn panning_stereo_balance_into(left, right, balance, out) {
     var b = f64_clamp(balance, f64_neg(F64_ONE), F64_ONE);
-    var out = alloc(sizeof(PanPair));
     if (f64_lt(b, 0) == 1) {
         # Attenuate right.
         PanPair_set_left(out, left);
@@ -127,5 +128,15 @@ fn panning_stereo_balance(left, right, balance) {
         PanPair_set_left(out, f64_mul(left, f64_sub(F64_ONE, b)));
         PanPair_set_right(out, right);
     }
+    return 0;
+}
+
+# ================================================================
+# panning_stereo_balance -- panning_stereo_balance_into, in a fresh PanPair.
+# ================================================================
+#must_use
+fn panning_stereo_balance(left, right, balance) {
+    var out = alloc(sizeof(PanPair));
+    panning_stereo_balance_into(left, right, balance, out);
     return out;
 }

@@ -5,6 +5,168 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.2] - P(-1) sweep: audit, hardening, optimization and refactor
+
+**Audio on valid input does not move**: 94,731 values across 103 streams are
+byte-identical to 2.3.1, and the three exceptions are named under *Fixed*. Measured
+against the compiled Rust oracle, all 47 generators agree on valid input. 45 defects are
+fixed, 5 are recorded as accepted, and **the 2,418-assertion suite caught none of them**.
+Suite: **40 suites / 2,861 assertions**.
+
+### How it was audited
+
+- **Differential against the Rust oracle.** Built from a scratch copy, with a matching
+  driver on each side: 1,335 cases over 47 generators, each numeric parameter across 8
+  hostile values, plus a bad sample injected into the input. No disagreement on valid
+  input. The rest is f32 range, or naad returning an error where Rust panics or hangs.
+- **Line by line against `rust-old/`**, five independent audits by module cluster, each
+  reproducing a defect before listing it: 50 findings.
+- **Fault injection.** The Nth allocation refused in 47 pipelines, singly and for good.
+- **All-zero sweep.** Every public fn called with 0 for every argument.
+- **Independent review of the merged diff**, by a reader who saw none of the work. It
+  found 8 more, including ten caches that the sweep's own optimizations left stale
+  behind `#derive` setters. Those findings reshaped the performance work below.
+- **Every fix has a test shown to fail without it.** On the merged tree, 23 sampled
+  guards across every cluster were reverted again independently. That caught one of
+  this release's own tests being unable to fail, which is fixed.
+
+### Fixed — wrong on valid use
+
+- **A caller could reach state naad had taken over** ([ADR-0005](docs/adr/0005-copy-at-the-ownership-boundary.md)).
+  Rust moves or copies what it keeps, and the port kept the pointer. Reusing a vec
+  rewrote a wavetable, adding a routing twice aliased its slots, and later writes
+  bypassed validation in tuning tables and envelopes. `wavetable_from_samples`,
+  `wavetable_morph_new`, `mod_matrix_add_routing`, `tuning_table_custom`,
+  `naad_convolution_from_ir` and `rebuild_from_ir`, `envelope_catmull_rom_new`,
+  `envelope_multistage_new`, `granular_set_source` and `formant_synth_apply_params` now
+  copy. `mod_matrix_routings`, `wavetable_samples` and `wavetable_morph_tables` return
+  snapshots.
+- **`tuning_freq_to_midi` rounded exact ties to even.** Rust rounds away from zero, and 63
+  of 125 ties differed: 427.4740541075864 Hz gave 68, not 69. *Output changes.*
+- **`tuning_note_name` stopped at 127.** The oracle's domain is `u8`, so 128..255 are
+  named now, where they returned "". *Output changes.*
+- **`fit_polynomial` returned None past about 2^26 samples**, because Q was one block.
+  It is allocated by column now, as Rust does.
+- **`naad_convolution_process_block` corrupted its history when `input` was `output`.**
+- **Grains longer than `u32::MAX` samples** no longer outlast Rust's. *Output changes,
+  only past 27 hours at 44.1 kHz.*
+
+### Fixed — crashes, hangs and memory corruption
+
+- **`wavetable_morph_new`: pushing to the tables vec overran scratch.** Memory corruption.
+- **Refused errors stored as pointers**: `mod_matrix_add_routing`, `wavetable_osc_new` and
+  `wavetable_morph_new` kept a negative code and faulted later.
+- **`mod_matrix_compute`** aborted on an id set through the public fields.
+- **`naad_fdn_matrix_new` sized its delay lines with no test at all**, and the 2.2.5 guards
+  in `physical_ks_new` and `physical_wg_new` tested the period before adding 2. A hole in
+  [ADR-0004](docs/adr/0004-bound-delay-lengths-before-the-cast.md), now closed.
+- **Counts with no ceiling**: `delay_line_new`, `comb_filter_new`, `allpass_delay_new`, the
+  chorus and phaser counts, `vocoder_new` and `wavetable_from_harmonics` refuse past
+  `VEC_CAP_MAX`.
+- **`granular_next_sample` hung at a grain rate of about 1e12 or more.** So does Rust. The
+  spawn loop stops once the pool is full, and output is unchanged wherever Rust finishes.
+- **`fft_magnitudes` and `power_spectrum`** faulted past `ALLOC_MAX`, and now return empty.
+- **`naad_room_reverb_new`** dereferenced a null material name.
+
+### Fixed — hostile input
+
+- **Enums erased by i64**: distortion type, unison waveform, sub-oscillator octave, voice
+  modes, vowel, FM algorithm, grain window and the hi-hat flag are validated, as filter and
+  oscillator already were. Notes outside 0..255 are refused.
+- **`as u32` saturation** restored on the noise-gate hold and grain duration.
+- `<= 0` for `== 0` in the STFT, onset, chroma and vocoder counts, and a NaN that won the
+  second position of an `f64_max` in the de-esser.
+- A negative sample rate no longer builds a silent room or convolution reverb.
+- `naad_convolution_process_block` holds a NaN to the outputs it reaches, instead of
+  spreading it across the block through the FFT.
+- `granular_rem_euclid` is exact at any magnitude, through hisab's `f64_fmod`.
+- `wavetable_morph_next_sample_smooth` keeps a non-finite spline value, as Rust does.
+  `osc_core`'s negative-phase wrap matches Rust's `%`.
+
+### Fixed — per-sample and per-block leaks
+
+On a bump allocator these are permanent.
+
+| Path | Before | After |
+|---|---:|---:|
+| `stft_magnitudes` | 98,117 B/frame, 8 MB/s | 8,909 B/frame |
+| `envelope_catmull_rom_next_value` | 24 B/sample, faulted when memory ran out | 0 |
+| `wavetable_morph_next_sample_smooth` | 120 B/sample | 0 |
+| `naad_directivity_gain` | 16 B/call | 0 |
+| `reverb_process_buffer`, ambisonics and binaural buffers | per block | 0 |
+| `formant_synth_set_vowel`, `formant_synth_morph` | 224 B, 672 B | 0 |
+
+New allocation-free forms: `filter_svf_process_sample_into`, which closes nidhi's
+2026-08-31 filing, `panning_pan_gains_into`, `panning_stereo_balance_into` and
+`unison_stereo_step`.
+
+### Changed
+
+- **New failure returns.** These can now return a negative code where they could not:
+  `effects_distortion_new`, `delay_line_new`, `comb_filter_new`, `allpass_delay_new`,
+  `reverb_damped_comb_new`, `reverb_allpass_new`, `voice_manager_new`,
+  `formant_vowel_formants`, `formant_synth_new`, `drum_hihat_new`, `unison_new`,
+  `subosc_new`, `fm_engine_set_algorithm` and `granular_set_window`. Check them.
+- **`mod_matrix_routings` is a snapshot**, not a live view. The borrow rules make a live
+  view impossible in Rust, so the old test was pinning something Rust cannot do.
+- **`wavetable_samples` and `wavetable_morph_tables` allocate per call.** Read once.
+- **Top-level names removed**, each with no use in any sibling repo: `DETECTOR_HARD_KNEE`,
+  `DETECTOR_SOFT_KNEE`, `DSP_C1_5`, `DSP_C2_5`, `EQ_C62_5`, `FM_C0_01`, `FM_C0_1`, `FM_C0_3`,
+  `NOISE_U32_MASK`, `SPEC_C008`, `SPEC_C042`, `SUB_C0_01`, `SUB_C0_1`, `SUB_C0_3`.
+- New `naad_vec_zeros` and `naad_vec_copy`, and `voice_age`. Zero-fill loops use the first,
+  which also halves construction memory: `reverb_new` at 1 GHz goes from 5.1 to 2.1 GiB,
+  and no longer runs out where Rust does not.
+
+### Performance
+
+Bit-identical throughout. The first four rows, additive and pink noise were measured
+interleaved against 2.3.1 on a quiet machine. The others are as measured by the change
+that made them, on a busier one.
+
+| Path | 2.3.1 | 2.3.2 | |
+|---|---:|---:|---:|
+| `panning_pan_buffer` | 103.7 ns/sample | 16.4 | 6.3x |
+| `subtractive_next_sample` | 288 ns | 77 | 3.8x |
+| Ring convolution, 48,000 taps (room, convolution) | 516 µs/sample | 150 | 3.4x |
+| Unison stereo, 8 voices | 936 ns | 364 | 2.6x |
+| `_bspline_eval_1d_into` | 594 ns | 138 | 4.3x |
+| `additive_next_sample` | 494 ns | 403 | 1.2x |
+| `noise_next_sample` (pink) | 95 ns | 72 | 1.3x |
+| `filter_biquad_process_buffer` | 28.6 ns | 22.1 | 1.3x |
+| `naad_convolution_process_block`, 512 samples on 48,000 taps | 69.2 ms | 46.7 | 1.5x |
+
+Most per-sample paths are flat: median 0.996 across the 47 generators. **Six caches from
+the first draft were taken back out**, for FM, snare, hi-hat, additive, unison and phaser.
+Each saved 6% or less, and each went stale behind a public setter. `dist.fold` is 8%
+slower, the cost of validating the distortion type.
+
+### Refactor
+
+One ring-convolution helper replaces three copies, and one room-and-IR path replaces the
+duplicates across room, convolution, analysis and coupled. `formant` shares one bank
+build, `filter`'s SVF shares one core, and stale comments went through every module.
+`tests/hotpath.bcyr` covers ten paths, up from four.
+
+### Not fixed
+
+Recorded in [ADR-0006](docs/adr/0006-refused-allocation-stops-at-the-null-page.md) and
+[ADR-0007](docs/adr/0007-hostile-input-gaps-we-accept.md).
+
+- **A refused allocation stays fail-stop.** Two audits proposed checks at every
+  constructor. Measured instead: 638 refusal points gave no silent wrong answer and no
+  hang, and all 926 faults from them and the all-zero sweep landed in the null page, at
+  offset 96 at most.
+- **`#derive` setters stay public**, and can bypass what a real setter derives.
+- Wavetable phase past 2^63, voice age past 2^63 ticks, an unknown id to
+  `granular_window_value`, FFTs past 2^27 points, and samples near f64::MAX in the FFT path.
+
+### Verified
+
+Differential, value sweep, 344 hostile wrapper cases, all-zero and fault sweeps, all on the
+final tree. `cyrius audit`, `cyrius fuzz` (1,572 checks), `cyrius deny`,
+`cyrius distlib --check`, `cyrius deps --locked` and the symbol-collision gate are clean.
+Not run: CI, aarch64, and the six downstream repos.
+
 ## [2.3.1] - Newest cyrius, hisab and goonj
 
 Toolchain and dependency release. `cyrius` 6.7.9 -> **6.7.18**, `hisab` 3.4.0 -> **3.4.1**,

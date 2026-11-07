@@ -184,5 +184,32 @@ var tg_b = naad_directivity_to_goonj(NAAD_DIR_CARDIOID);
 assert_neq(tg_a, tg_b, "to_goonj allocates a fresh pattern per call");
 assert_eq(DirectivityPattern_kind(tg_a), DirectivityPattern_kind(tg_b), "...with the same kind");
 
+# ================================================================
+# A moving source calls gain per sample, and alloc never frees, so it must not
+# allocate. Each kind must still give what goonj's own constructor gives.
+test_group("gain_allocates_nothing_and_matches_goonj");
+var ga_dir = hvec3_new(f64_cos(F64_ONE), f64_sin(F64_ONE), 0);
+var ga_front = hvec3_unit_x();
+var ga_sink = 0;
+var ga_i = 0;
+var ga_before = alloc_used();
+while (ga_i < 1000) {
+    ga_sink = naad_directivity_gain(NAAD_DIR_CARDIOID, ga_dir, ga_front);
+    ga_sink = naad_directivity_gain(NAAD_DIR_FIGURE8, ga_dir, ga_front);
+    ga_sink = naad_directivity_gain(99, ga_dir, ga_front);
+    ga_i = ga_i + 1;
+}
+assert_eq(alloc_used() - ga_before, 0, "gain allocates nothing");
+assert_eq(naad_directivity_gain(NAAD_DIR_OMNIDIRECTIONAL, ga_dir, ga_front),
+  directivity_gain(directivity_omnidirectional(), ga_dir, ga_front), "omni == goonj");
+assert_eq(naad_directivity_gain(NAAD_DIR_CARDIOID, ga_dir, ga_front),
+  directivity_gain(directivity_cardioid(), ga_dir, ga_front), "cardioid == goonj");
+assert_eq(naad_directivity_gain(NAAD_DIR_SUBCARDIOID, ga_dir, ga_front),
+  directivity_gain(directivity_subcardioid(), ga_dir, ga_front), "subcardioid == goonj");
+assert_eq(naad_directivity_gain(NAAD_DIR_SUPERCARDIOID, ga_dir, ga_front),
+  directivity_gain(directivity_supercardioid(), ga_dir, ga_front), "supercardioid == goonj");
+assert_eq(naad_directivity_gain(NAAD_DIR_FIGURE8, ga_dir, ga_front),
+  directivity_gain(directivity_figure8(), ga_dir, ga_front), "figure-8 == goonj");
+
 var rc = assert_summary();
 syscall(60, rc);

@@ -8,8 +8,8 @@
 # stdlib vec of 16 f64. serde round-trip test dropped.
 #
 # Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE/TWO,
-# f64_add/sub/mul/div/neg/clamp/from) and dsp_util (xorshift32_signed_f32).
-# The module file itself has no `include` lines.
+# f64_add/sub/mul/div/neg/clamp/from), error.cyr (naad_vec_zeros) and dsp_util
+# (xorshift32_signed_f32, U32_MASK). The module file itself has no `include` lines.
 
 # ================================================================
 # NoiseType (enum) -> integer constants.
@@ -21,12 +21,10 @@ var NOISE_BROWN = 2;
 # Number of octaves for Voss-McCartney pink noise (Rust PINK_OCTAVES).
 var NOISE_PINK_OCTAVES = 16;
 
-# u32 wrap mask for the pink counter (matches wrapping_add/wrapping_sub).
-var NOISE_U32_MASK = 0xFFFFFFFF;
-
-# Non-integer float literals (IEEE-754 bit patterns).
+# Float literals (IEEE-754 bit patterns).
 var NOISE_C0_02  = 0x3F947AE147AE147B;   # 0.02  (brown integration step)
 var NOISE_C0_999 = 0x3FEFF7CED916872B;   # 0.999 (brown leaky integrator)
+var NOISE_PINK_SCALE = 0x4031000000000000;   # 17.0 (the octaves + the white term)
 
 # ================================================================
 # NoiseGenerator -- stateful generator for white / pink / brown noise.
@@ -52,16 +50,11 @@ fn noise_new(noise_type, seed) {
     if (state == 0) { state = 1; }
     store64(rng, state);
 
-    var pink_octaves = vec_new();
-    var i = 0;
-    while (i < NOISE_PINK_OCTAVES) {
-        vec_push(pink_octaves, 0);
-        i = i + 1;
-    }
+    var pink_octaves = naad_vec_zeros(NOISE_PINK_OCTAVES);
 
     var pink_running_sum = 0;
     if (noise_type == NOISE_PINK) {
-        i = 0;
+        var i = 0;
         while (i < NOISE_PINK_OCTAVES) {
             var val = xorshift32_signed_f32(rng);
             vec_set(pink_octaves, i, val);
@@ -100,11 +93,15 @@ fn noise_white(self) {
 # noise_pink -- Voss-McCartney pink noise. Each counter increment flips a
 # set of trailing bits; every flipped bit i re-rolls octave i. A final white
 # component is added and the whole sum is normalized by (octaves + 1).
+#
+# An increment flips the lowest set bit and every bit below it, so changed_bits
+# is an unbroken run of low ones: the loop can stop at the end of the run instead
+# of testing all 16 bits, half of samples needing just one.
 # ================================================================
 fn noise_pink(self) {
-    var counter = (NoiseGenerator_pink_counter(self) + 1) & NOISE_U32_MASK;
+    var counter = (NoiseGenerator_pink_counter(self) + 1) & U32_MASK;
     NoiseGenerator_set_pink_counter(self, counter);
-    var prev = (counter - 1) & NOISE_U32_MASK;
+    var prev = (counter - 1) & U32_MASK;
     var changed_bits = counter ^ prev;
 
     var rng = NoiseGenerator_rng(self);
@@ -112,19 +109,17 @@ fn noise_pink(self) {
     var running_sum = NoiseGenerator_pink_running_sum(self);
 
     var i = 0;
-    while (i < NOISE_PINK_OCTAVES) {
-        if ((changed_bits & (1 << i)) != 0) {
-            running_sum = f64_sub(running_sum, vec_get(octaves, i));
-            var new_val = xorshift32_signed_f32(rng);
-            vec_set(octaves, i, new_val);
-            running_sum = f64_add(running_sum, new_val);
-        }
+    while (i < NOISE_PINK_OCTAVES && (changed_bits >> i) != 0) {
+        running_sum = f64_sub(running_sum, vec_get(octaves, i));
+        var new_val = xorshift32_signed_f32(rng);
+        vec_set(octaves, i, new_val);
+        running_sum = f64_add(running_sum, new_val);
         i = i + 1;
     }
     NoiseGenerator_set_pink_running_sum(self, running_sum);
 
     var white = xorshift32_signed_f32(rng);
-    return f64_div(f64_add(running_sum, white), f64_from(NOISE_PINK_OCTAVES + 1));
+    return f64_div(f64_add(running_sum, white), NOISE_PINK_SCALE);
 }
 
 # ================================================================

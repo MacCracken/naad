@@ -17,7 +17,8 @@
 #
 # Requires (from the build/test unit): stdlib math (F64_ONE/F64_HALF/F64_PI,
 # f64_clamp/f64_max/f64_cos/f64_abs), hisab (hvec3_dot via goonj), and goonj
-# (directivity_* constructors + directivity_gain). No `include` lines.
+# (DirectivityPattern accessors, PAT_* kinds + directivity_gain). No `include`
+# lines.
 
 # ================================================================
 # SourceDirectivity variants (was `enum SourceDirectivity`).
@@ -38,28 +39,41 @@ var NAAD_DIR_0_37    = 0x3fd7ae147ae147ae;   # 0.37  supercardioid DC term
 var NAAD_DIR_0_63    = 0x3fe428f5c28f5c29;   # 0.63  supercardioid cos coeff
 
 # ================================================================
+# _naad_directivity_fill -- write the goonj DirectivityPattern for a kind into
+# `p` and return `p`. Mirrors SourceDirectivity::to_goonj; the Omnidirectional
+# (and any future) variant is the default.
+# ================================================================
+fn _naad_directivity_fill(p, kind) {
+    var pattern_kind = PAT_OMNI;
+    if (kind == NAAD_DIR_CARDIOID) { pattern_kind = PAT_CARDIOID; }
+    if (kind == NAAD_DIR_SUBCARDIOID) { pattern_kind = PAT_SUBCARDIOID; }
+    if (kind == NAAD_DIR_SUPERCARDIOID) { pattern_kind = PAT_SUPERCARDIOID; }
+    if (kind == NAAD_DIR_FIGURE8) { pattern_kind = PAT_FIGURE8; }
+    DirectivityPattern_set_kind(p, pattern_kind);
+    DirectivityPattern_set_balloon(p, 0);
+    return p;
+}
+
+# ================================================================
 # to_goonj -- map a SourceDirectivity kind to a freshly built goonj
-# DirectivityPattern pointer. Mirrors SourceDirectivity::to_goonj; the
-# Omnidirectional (and any future) variant is the default.
+# DirectivityPattern pointer. Allocates; naad_directivity_gain does not.
 # ================================================================
 #must_use
 fn naad_directivity_to_goonj(kind) {
-    if (kind == NAAD_DIR_CARDIOID) { return directivity_cardioid(); }
-    if (kind == NAAD_DIR_SUBCARDIOID) { return directivity_subcardioid(); }
-    if (kind == NAAD_DIR_SUPERCARDIOID) { return directivity_supercardioid(); }
-    if (kind == NAAD_DIR_FIGURE8) { return directivity_figure8(); }
-    return directivity_omnidirectional();
+    return _naad_directivity_fill(alloc(sizeof(DirectivityPattern)), kind);
 }
 
 # ================================================================
 # gain -- linear directivity gain for a direction relative to the source's
 # front axis. `direction` and `front` are HVec3 pointers (unit vectors);
 # 1.0 is the on-axis reference. Ports SourceDirectivity::gain, delegating to
-# goonj's directivity_gain.
+# goonj's directivity_gain. The pattern lives on the stack: a moving source
+# calls this per sample, and alloc never frees.
 # ================================================================
 #must_use
 fn naad_directivity_gain(kind, direction, front) {
-    return directivity_gain(naad_directivity_to_goonj(kind), direction, front);
+    var pattern[sizeof(DirectivityPattern)];
+    return directivity_gain(_naad_directivity_fill(&pattern, kind), direction, front);
 }
 
 # ================================================================

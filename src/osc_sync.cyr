@@ -41,16 +41,15 @@ fn hardsync_next_sample(self) {
     var master = HardSync_master(self);
     var slave = HardSync_slave(self);
 
+    # Only the master's phase advance matters; its sample is discarded, as in Rust's
+    # `let _ = master.next_sample()`.
     var before = osc_phase(master);
-    var advanced = osc_next_sample(master);
+    var discarded = osc_next_sample(master);
     var after = osc_phase(master);
 
     # Detect master cycle wrap (phase decreased = wrapped past 1.0).
     if (f64_lt(after, before) == 1) { osc_reset_phase(slave); }
 
-    # `advanced` is the master's sample; discarded, only its side effect
-    # (phase advance) matters -- mirrors Rust `let _ = master.next_sample()`.
-    advanced = advanced;
     return osc_next_sample(slave);
 }
 

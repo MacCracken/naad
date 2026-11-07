@@ -763,5 +763,154 @@ assert_eq(vec_get(un_ar, 0), UnisonStereo_right(un_pair), "advance_stereo right 
 assert(f64_gt(f64_abs(f64_sub(vec_get(un_al, 0), vec_get(un_ar, 0))), NAAD_EPSILON),
   "spread = 1 -> the two channels differ within a single sample");
 
+# ================================================================
+# core.rs wraps with `(t + 0.5) % 1.0`, which keeps the dividend's sign, while
+# set_phase uses rem_euclid, which does not. Values taken from the Rust oracle.
+test_group("core: negative phase wraps as Rust's %");
+var np_sq = osc_new(WAVEFORM_SQUARE, f64_from(1500), f64_from(48000));
+var np_a = osc_advance_phase_sine(np_sq, f64_div(f64_from(0 - 3), f64_from(4)));
+assert_eq(f64_to(osc_next_sample(np_sq)), 0 - 7455, "square at phase -0.75 matches rust-old");
+var np_pl = osc_new(WAVEFORM_PULSE, f64_from(1500), f64_from(48000));
+var np_b = osc_advance_phase_sine(np_pl, f64_div(f64_from(0 - 3), f64_from(4)));
+assert_eq(f64_to(osc_next_sample(np_pl)), 0 - 7455, "pulse at phase -0.75 matches rust-old");
+var np_tr = osc_new(WAVEFORM_TRIANGLE, f64_from(1500), f64_from(48000));
+var np_c = osc_advance_phase_sine(np_tr, f64_div(f64_from(0 - 3), f64_from(4)));
+var np_d = osc_next_sample(np_tr);
+assert_eq(f64_to(f64_mul(Oscillator_triangle_sum(np_tr), f64_from(1000))), 0 - 931875,
+  "the triangle integrator takes the same blep: -7455 * dt * 4");
+assert_eq(osc_phase(np_sq), f64_add(f64_div(f64_from(0 - 3), f64_from(4)), f64_div(f64_from(1), f64_from(32))),
+  "the phase itself stays negative");
+var np_t = f64_div(f64_from(0 - 3), f64_from(4));
+var np_dt = f64_div(F64_ONE, f64_from(32));
+assert_eq(f64_to(osc_stateless_waveform_sample(WAVEFORM_SQUARE, np_t, np_dt)), 0 - 7455, "stateless square matches");
+assert_eq(f64_to(osc_stateless_waveform_sample(WAVEFORM_PULSE, np_t, np_dt)), 0 - 7455, "stateless pulse matches");
+var np_set = osc_new(WAVEFORM_SINE, f64_from(440), f64_from(44100));
+osc_set_phase(np_set, f64_div(f64_from(0 - 1), f64_from(4)));
+assert_eq(osc_phase(np_set), f64_div(f64_from(3), f64_from(4)), "set_phase stays rem_euclid: -0.25 -> 0.75");
+
+# ================================================================
+# The oracle's Waveform and SubOctave enums cannot hold a bad id.
+test_group("unison and sub reject an unknown enum value");
+assert_eq(unison_new(8, f64_from(440), 2, 0, f64_from(44100)), NAAD_ERR_INVALID_PARAMETER, "waveform past the last id");
+assert_eq(unison_new(0 - 1, f64_from(440), 2, 0, f64_from(44100)), NAAD_ERR_INVALID_PARAMETER, "negative waveform");
+assert_gt(unison_new(WAVEFORM_BROWN_NOISE, f64_from(440), 2, 0, f64_from(44100)), 0,
+  "the last valid waveform is accepted");
+assert_eq(subosc_new(WAVEFORM_SINE, f64_from(440), 2, f64_from(44100)), NAAD_ERR_INVALID_PARAMETER,
+  "octave past Down2");
+assert_eq(subosc_new(WAVEFORM_SINE, f64_from(440), 0 - 1, f64_from(44100)), NAAD_ERR_INVALID_PARAMETER,
+  "negative octave");
+var eo_s = subosc_new(WAVEFORM_SINE, f64_from(440), SUBOCT_DOWN1, f64_from(44100));
+assert_eq(subosc_set_octave(eo_s, 2), NAAD_ERR_INVALID_PARAMETER, "set_octave past Down2");
+assert_eq(subosc_set_octave(eo_s, 0 - 1), NAAD_ERR_INVALID_PARAMETER, "set_octave negative");
+assert_eq(subosc_octave(eo_s), SUBOCT_DOWN1, "a refused set_octave changes nothing");
+
+# ================================================================
+# Phase increments and pan gains are cached. Each must follow every setter that
+# feeds it, so the next sample is compared with the oracle's per-sample expression
+# evaluated directly from the oscillator's current state.
+test_group("unison: cached values follow their setters");
+var un_exp_l = 0;
+var un_exp_r = 0;
+var un_exp_m = 0;
+var un_exp_ph = 0;
+fn _un_expect(u) {
+    if (UnisonOscillator_ratios_dirty(u) == 1) { unison_recompute_ratios(u); }
+    var nv = unison_num_voices(u);
+    var w = f64_mul(UnisonOscillator_stereo_spread(u), F64_HALF);
+    var l = 0;
+    var r = 0;
+    var m = 0;
+    var i = 0;
+    while (i < nv) {
+        var freq = f64_mul(unison_frequency(u), vec_get(UnisonOscillator_detune_ratios(u), i));
+        var dt = f64_div(freq, UnisonOscillator_sample_rate(u));
+        var sample = osc_stateless_waveform_sample(UnisonOscillator_waveform(u),
+          vec_get(UnisonOscillator_phases(u), i), dt);
+        m = f64_add(m, sample);
+        if (i == nv - 1) {
+            un_exp_ph = f64_add(vec_get(UnisonOscillator_phases(u), i), dt);
+            if (f64_ge(un_exp_ph, F64_ONE) == 1) { un_exp_ph = f64_sub(un_exp_ph, F64_ONE); }
+        }
+        if (nv > 1) {
+            var pan = f64_div(f64_from(i), f64_from(nv - 1));
+            var pan_scaled = f64_add(F64_HALF, f64_mul(f64_mul(f64_sub(pan, F64_HALF), w), F64_TWO));
+            var angle = f64_mul(pan_scaled, F64_PI_2);
+            l = f64_add(l, f64_mul(sample, f64_cos(angle)));
+            r = f64_add(r, f64_mul(sample, f64_sin(angle)));
+        } else {
+            l = f64_add(l, f64_mul(sample, F64_FRAC_1_SQRT2));
+            r = f64_add(r, f64_mul(sample, F64_FRAC_1_SQRT2));
+        }
+        i = i + 1;
+    }
+    var inv = f64_div(F64_ONE, f64_from(nv));
+    un_exp_l = f64_mul(l, inv);
+    un_exp_r = f64_mul(r, inv);
+    un_exp_m = f64_div(m, f64_from(nv));
+    return 0;
+}
+fn _un_check_stereo(u, name) {
+    _un_expect(u);
+    var p = unison_next_sample_stereo(u);
+    assert_eq(UnisonStereo_left(p), un_exp_l, name);
+    assert_eq(UnisonStereo_right(p), un_exp_r, name);
+    assert_eq(vec_get(UnisonOscillator_phases(u), unison_num_voices(u) - 1), un_exp_ph, name);
+    return 0;
+}
+fn _un_check_mono(u, name) {
+    _un_expect(u);
+    assert_eq(unison_next_sample(u), un_exp_m, name);
+    assert_eq(vec_get(UnisonOscillator_phases(u), unison_num_voices(u) - 1), un_exp_ph, name);
+    return 0;
+}
+var uc = unison_new(WAVEFORM_SAW, f64_from(440), 4, f64_from(10), f64_from(44100));
+_un_check_stereo(uc, "first stereo sample");
+unison_set_stereo_spread(uc, F64_ONE);
+_un_check_stereo(uc, "set_stereo_spread reaches the gains");
+unison_set_num_voices(uc, 7);
+_un_check_stereo(uc, "set_num_voices reaches the gains");
+unison_set_num_voices(uc, 1);
+_un_check_stereo(uc, "one voice sits in the centre");
+unison_set_num_voices(uc, 2);
+_un_check_stereo(uc, "leaving one voice restores the panned gains");
+unison_set_frequency(uc, f64_from(1000));
+_un_check_stereo(uc, "set_frequency reaches the stereo increments");
+unison_set_frequency(uc, f64_from(2000));
+_un_check_mono(uc, "set_frequency reaches the mono increments");
+unison_set_detune_cents(uc, f64_from(100));
+_un_check_mono(uc, "set_detune_cents reaches the increments");
+unison_set_num_voices(uc, 8);
+unison_set_frequency(uc, f64_from(3000));
+_un_check_mono(uc, "set_frequency while the ratios are dirty");
+
+# ================================================================
+test_group("unison: derived setters reach the next sample");
+var duf = unison_new(WAVEFORM_SAW, f64_from(220), 5, f64_from(12), f64_from(44100));
+var dug = unison_new(WAVEFORM_SAW, f64_from(330), 5, f64_from(12), f64_from(44100));
+UnisonOscillator_set_frequency(duf, f64_from(330));
+var dui = 0;
+var dubad = 0;
+while (dui < 200) {
+    if (unison_next_sample(duf) != unison_next_sample(dug)) { dubad = dubad + 1; }
+    dui = dui + 1;
+}
+assert_eq(dubad, 0, "UnisonOscillator_set_frequency");
+
+var dus = unison_new(WAVEFORM_SAW, f64_from(220), 4, f64_from(12), f64_from(44100));
+var dut = unison_new(WAVEFORM_SAW, f64_from(220), 4, f64_from(12), f64_from(44100));
+unison_stereo_step(dus);
+unison_stereo_step(dut);
+UnisonOscillator_set_stereo_spread(dus, F64_HALF);
+unison_set_stereo_spread(dut, F64_HALF);
+dui = 0;
+dubad = 0;
+while (dui < 200) {
+    unison_stereo_step(dus);
+    unison_stereo_step(dut);
+    if (UnisonOscillator_out_left(dus) != UnisonOscillator_out_left(dut)) { dubad = dubad + 1; }
+    dui = dui + 1;
+}
+assert_eq(dubad, 0, "UnisonOscillator_set_stereo_spread re-pans the voices");
+
 var rc = assert_summary();
 syscall(60, rc);

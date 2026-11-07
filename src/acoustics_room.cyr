@@ -22,7 +22,8 @@
 # (acoustic_room_shoebox, ir_config_new, generate_ir,
 # multiband_ir_to_broadband, ImpulseResponse_samples), and the naad L0
 # modules error.cyr (NAAD_ERR_COMPUTATION, naad_is_err) + acoustics.cyr
-# (naad_acoustics_material_by_name). This file has no `include` lines.
+# (naad_acoustics_material_by_name, _naad_ring_new, _naad_ring_convolve). This
+# file has no `include` lines.
 
 # ================================================================
 # RoomReverbConfig -- configuration for a room simulation reverb.
@@ -78,14 +79,56 @@ struct RoomReverb {
 }
 
 # ================================================================
-# naad_room_ir_overflows -- 1 if this config's impulse response reaches goonj's
-# MAX_IR_SAMPLES. The room IR is 1.0 s long, so that is its sample rate. goonj
-# clamps there and returns a shorter IR than was asked for, after spending far
-# more memory than the clamp suggests: about 165 B per Hz of rate. ADR-0004.
+# naad_room_ir_overflows -- 1 if this config's rate cannot give the IR it asks
+# for. The room IR is 1.0 s long, so its length is the sample rate. At goonj's
+# MAX_IR_SAMPLES goonj clamps and returns a shorter IR than was asked for, after
+# spending far more memory than the clamp suggests: 160 to 210 B per Hz of rate,
+# depending on where the rate falls in goonj's vec doubling. ADR-0004. A negative
+# rate cannot exist in Rust's u32, and goonj would answer it with an empty IR,
+# which passes input through dry as if the reverb worked. A rate of 0 is not
+# refused: Rust takes it and gets that empty IR.
 # ================================================================
 #must_use
 fn naad_room_ir_overflows(config) {
-    return RoomReverbConfig_sample_rate(config) >= MAX_IR_SAMPLES;
+    var rate = RoomReverbConfig_sample_rate(config);
+    if (rate < 0) { return 1; }
+    return rate >= MAX_IR_SAMPLES;
+}
+
+# ================================================================
+# _naad_room_build -- the goonj shoebox room for a config, or a negative
+# NAAD_ERR_COMPUTATION if the wall material name is unknown or a dimension is not
+# positive. Every acoustics module that takes a RoomReverbConfig starts here.
+# ================================================================
+#must_use
+fn _naad_room_build(config) {
+    var material = naad_acoustics_material_by_name(RoomReverbConfig_wall_material_name(config));
+    if (material == 0) { return NAAD_ERR_COMPUTATION; }
+
+    if (f64_le(RoomReverbConfig_length(config), 0) == 1) { return NAAD_ERR_COMPUTATION; }
+    if (f64_le(RoomReverbConfig_width(config), 0) == 1) { return NAAD_ERR_COMPUTATION; }
+    if (f64_le(RoomReverbConfig_height(config), 0) == 1) { return NAAD_ERR_COMPUTATION; }
+
+    return acoustic_room_shoebox(RoomReverbConfig_length(config),
+      RoomReverbConfig_width(config), RoomReverbConfig_height(config), material);
+}
+
+# ================================================================
+# _naad_room_ir -- the broadband impulse response for a config, as a vec nothing
+# else holds, or a negative NAAD_ERR_COMPUTATION for anything _naad_room_build or
+# naad_room_ir_overflows refuses. The generation parameters are fixed, mirroring
+# the Rust IrConfig literal: order 3, 2000 diffuse rays, 30 bounces, 1.0 s, seed 42.
+# ================================================================
+#must_use
+fn _naad_room_ir(config) {
+    var room = _naad_room_build(config);
+    if (naad_is_err(room) == 1) { return room; }
+    if (naad_room_ir_overflows(config) == 1) { return NAAD_ERR_COMPUTATION; }
+
+    var ir_config = ir_config_new(RoomReverbConfig_sample_rate(config), 3, 2000, 30, F64_ONE, 42);
+    var multiband = generate_ir(RoomReverbConfig_source_position(config),
+      RoomReverbConfig_listener_position(config), room, ir_config);
+    return ImpulseResponse_samples(multiband_ir_to_broadband(multiband));
 }
 
 # ================================================================
@@ -94,49 +137,19 @@ fn naad_room_ir_overflows(config) {
 # image-source + diffuse-rain, and stores it for sample-by-sample
 # convolution. Returns the struct pointer on success, or a negative
 # NAAD_ERR_COMPUTATION if the wall material name is unknown, the room
-# dimensions are not positive, or the sample rate reaches MAX_IR_SAMPLES.
-# Below that the IR still costs about 165 B per Hz of rate, and running out of
-# that memory ends the process. Ports RoomReverb::new.
+# dimensions are not positive, or the sample rate is negative or reaches
+# MAX_IR_SAMPLES. Below that the IR still costs 160 to 210 B per Hz of rate, and
+# running out of that memory ends the process. Ports RoomReverb::new.
 # ================================================================
 #must_use
 fn naad_room_reverb_new(config) {
-    var material = naad_acoustics_material_by_name(RoomReverbConfig_wall_material_name(config));
-    if (material == 0) { return NAAD_ERR_COMPUTATION; }
-
-    if (f64_le(RoomReverbConfig_length(config), 0) == 1) { return NAAD_ERR_COMPUTATION; }
-    if (f64_le(RoomReverbConfig_width(config), 0) == 1) { return NAAD_ERR_COMPUTATION; }
-    if (f64_le(RoomReverbConfig_height(config), 0) == 1) { return NAAD_ERR_COMPUTATION; }
-    if (naad_room_ir_overflows(config) == 1) { return NAAD_ERR_COMPUTATION; }
-
-    var room = acoustic_room_shoebox(RoomReverbConfig_length(config),
-      RoomReverbConfig_width(config), RoomReverbConfig_height(config), material);
-
-    var source = RoomReverbConfig_source_position(config);
-    var listener = RoomReverbConfig_listener_position(config);
-
-    # Fixed generation parameters (mirrors the Rust IrConfig literal):
-    # order 3, 2000 diffuse rays, 30 bounces, 1.0 s, seed 42.
-    var ir_config = ir_config_new(RoomReverbConfig_sample_rate(config), 3, 2000, 30, F64_ONE, 42);
-
-    var multiband = generate_ir(source, listener, room, ir_config);
-    var broadband = multiband_ir_to_broadband(multiband);
-    var ir = ImpulseResponse_samples(broadband);
-
-    var ir_len = vec_len(ir);
-    var buf_len = ir_len;
-    if (buf_len < 1) { buf_len = 1; }
-
-    var input_buffer = vec_new();
-    var i = 0;
-    while (i < buf_len) {
-        vec_push(input_buffer, 0);
-        i = i + 1;
-    }
+    var ir = _naad_room_ir(config);
+    if (naad_is_err(ir) == 1) { return ir; }
 
     var self = alloc(sizeof(RoomReverb));
     RoomReverb_set_config(self, config);
     RoomReverb_set_impulse_response(self, ir);
-    RoomReverb_set_input_buffer(self, input_buffer);
+    RoomReverb_set_input_buffer(self, _naad_ring_new(vec_len(ir)));
     RoomReverb_set_current_position(self, 0);
     return self;
 }
@@ -158,14 +171,7 @@ fn naad_room_reverb_process_sample(self, input) {
     vec_set(buf, pos, input);
 
     # Direct convolution: output = sum(input_buffer[pos - k] * ir[k]).
-    var output = 0;
-    var k = 0;
-    while (k < ir_len) {
-        var idx_raw = pos + ir_len - k;
-        var idx = idx_raw % ir_len;
-        output = f64_add(output, f64_mul(vec_get(buf, idx), vec_get(ir, k)));
-        k = k + 1;
-    }
+    var output = _naad_ring_convolve(buf, pos, ir);
 
     var nextp = pos + 1;
     var np = nextp % ir_len;

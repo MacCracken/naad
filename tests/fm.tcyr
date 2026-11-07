@@ -1,10 +1,7 @@
 # fm.tcyr -- parity tests for src/fm.cyr.
 # Ported from the non-serde #[test] blocks in rust-old/src/synth/fm.rs
 # (test_serde_roundtrip dropped -- no serde). f32 tolerances widened to f64.
-# lib/hisab.cyr is included first because envelope.cyr (a transitive dep)
-# leans on calc_catmull_rom/hvec3_new/HVec3_x.
 
-include "lib/hisab.cyr"
 include "src/error.cyr"
 include "src/dsp_util.cyr"
 include "src/envelope.cyr"
@@ -809,6 +806,49 @@ var rz = 0;
 while (rz < 256) { vec_push(r_zero, 0); rz = rz + 1; }
 assert(f64_gt(fm_sum_abs_diff(r_s2, r_zero, 256), C0_1) == 1, "serial2 render is not all zeros");
 assert(f64_gt(fm_sum_abs_diff(r_k4, r_zero, 256), C0_1) == 1, "stack4 render is not all zeros");
+
+# ================================================================
+test_group("set_algorithm refuses a value outside the enum");
+var fma = fm_engine_new(2, f64_from(44100));
+assert_eq(fm_engine_set_algorithm(fma, FM_ALGO_SERIAL4), 0, "a valid algorithm returns 0");
+assert_eq(FmSynthEngine_algorithm(fma), FM_ALGO_SERIAL4, "a valid algorithm is stored");
+assert_eq(fm_engine_set_algorithm(fma, FM_ALGO_CUSTOM), 0, "the last enum value is valid");
+assert_eq(fm_engine_set_algorithm(fma, FM_ALGO_CUSTOM + 1), NAAD_ERR_INVALID_PARAMETER, "one past the enum is refused");
+assert_eq(fm_engine_set_algorithm(fma, 0 - 1), NAAD_ERR_INVALID_PARAMETER, "a negative algorithm is refused");
+assert_eq(FmSynthEngine_algorithm(fma), FM_ALGO_CUSTOM, "a refused algorithm leaves the old one in place");
+
+# ================================================================
+test_group("the cached phase increment follows set_frequency");
+var fmi_sr = f64_from(44100);
+var fmi_a = fm_operator_new(f64_from(330), fmi_sr);
+var fmi_b = fm_operator_new(f64_from(440), fmi_sr);
+fm_operator_set_frequency(fmi_b, f64_from(330));
+fm_operator_gate_on(fmi_a);
+fm_operator_gate_on(fmi_b);
+var fmi_same = 1;
+var fmi_i = 0;
+while (fmi_i < 2000) {
+    if (fm_operator_next_sample(fmi_a, 0) != fm_operator_next_sample(fmi_b, 0)) { fmi_same = 0; }
+    fmi_i = fmi_i + 1;
+}
+assert_eq(fmi_same, 1, "retuned operator is bit-identical to one built at that frequency");
+
+# ================================================================
+test_group("the derived frequency setter takes effect");
+# #derive setters are public, and consumers use them, so nothing here may cache a
+# value that one of them can change.
+var dfa = fm_operator_new(f64_from(440), f64_from(44100));
+var dfb = fm_operator_new(f64_from(880), f64_from(44100));
+fm_operator_gate_on(dfa);
+fm_operator_gate_on(dfb);
+FmOperator_set_frequency(dfa, f64_from(880));
+var dfi = 0;
+var dfbad = 0;
+while (dfi < 200) {
+    if (fm_operator_next_sample(dfa, 0) != fm_operator_next_sample(dfb, 0)) { dfbad = dfbad + 1; }
+    dfi = dfi + 1;
+}
+assert_eq(dfbad, 0, "FmOperator_set_frequency reaches the next sample");
 
 var rc = assert_summary();
 syscall(60, rc);

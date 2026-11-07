@@ -7,8 +7,8 @@
 # `comb_*`, `allpass_*` functions taking the struct pointer.
 #
 # Requires (from the build/test unit): stdlib alloc/vec (alloc_init, vec_*),
-# math/ganita (F64_ONE, f64_*), and error.cyr (flush_denormal). The module
-# file itself has no `include` lines.
+# math/ganita (F64_ONE, f64_*), and error.cyr (flush_denormal, naad_is_err,
+# naad_vec_zeros, NAAD_ERR_*). The module file itself has no `include` lines.
 
 # ================================================================
 # Float literals (IEEE-754 bit patterns) used by the constructors.
@@ -18,17 +18,16 @@ var DELAY_STABLE_LO = 0xBFEFF7CED916872B;   # -0.999 (feedback/coeff clamp lo)
 
 # ================================================================
 # DelayLine -- circular buffer delay line with fractional read.
-#   buffer            : vec<f32> ring buffer
+#   buffer            : vec of f64 ring buffer
 #   write_pos         : current write cursor (usize)
 #   max_delay_samples : buffer length in samples (usize, >= 1)
 # ================================================================
 #derive(accessors)
 struct DelayLine { buffer; write_pos; max_delay_samples; }
 
-# 1 if an f64 sample count cannot be a delay-line length: `vec_push` ends the
-# process past VEC_CAP_MAX entries. Test this BEFORE f64_to at every length cast.
-# Since cyrius 6.6.8 f64_to saturates, so +Inf and anything past 2^63 reach the
-# cast as INT64_MAX, and a floor such as `if (n < 1)` no longer catches them.
+# 1 if an f64 sample count cannot be a delay-line length. Test this BEFORE f64_to
+# at every length cast: f64_to saturates, so +Inf and anything past 2^63 reach the
+# cast as INT64_MAX, where a floor such as `if (n < 1)` cannot catch them.
 # NaN answers 0 on purpose: it casts to 0, floors to 1, and Rust's `as usize`
 # agrees. ADR-0004.
 #must_use
@@ -36,19 +35,16 @@ fn delay_len_overflows(samples) {
     return f64_ge(samples, f64_from(VEC_CAP_MAX));
 }
 
-# Create a delay line with the given maximum delay in samples (min 1).
+# Create a delay line with the given maximum delay in samples (min 1). Returns
+# the pointer, or NAAD_ERR_BUFFER_OVERFLOW past VEC_CAP_MAX. Every caller's length
+# passes through here, so this is the one test no caller can skip.
 #must_use
 fn delay_line_new(max_delay_samples) {
     var size = max_delay_samples;
     if (size < 1) { size = 1; }
-    var buffer = vec_new();
-    var i = 0;
-    while (i < size) {
-        vec_push(buffer, 0);
-        i = i + 1;
-    }
+    if (size > VEC_CAP_MAX) { return NAAD_ERR_BUFFER_OVERFLOW; }
     var dl = alloc(sizeof(DelayLine));
-    DelayLine_set_buffer(dl, buffer);
+    DelayLine_set_buffer(dl, naad_vec_zeros(size));
     DelayLine_set_write_pos(dl, 0);
     DelayLine_set_max_delay_samples(dl, size);
     return dl;
@@ -78,9 +74,10 @@ fn delay_line_read(dl, delay) {
     var delay_floor = f64_floor(delay_clamped);
     var frac = f64_sub(delay_clamped, delay_floor);
 
-    # (write_pos - delay_floor - 1).rem_euclid(max); max >= 1 so emulate with %.
-    var idx = wp - f64_to(delay_floor) - 1;
-    var read_pos_0 = idx % max;
+    # (write_pos - delay_floor - 1).rem_euclid(max). Both operands lie in
+    # [0, max - 1], so the difference is in [-max, max - 2] and one add stands in
+    # for the integer division. NaN casts to 0, inside that range.
+    var read_pos_0 = wp - f64_to(delay_floor) - 1;
     if (read_pos_0 < 0) { read_pos_0 = read_pos_0 + max; }
     var read_pos_1 = read_pos_0 - 1;
     if (read_pos_0 == 0) { read_pos_1 = max - 1; }
@@ -106,16 +103,19 @@ fn delay_line_clear(dl) {
 # CombFilter -- feedback comb: y[n] = x[n] + feedback * y[n - delay].
 #   delay_line    : DelayLine pointer
 #   feedback      : feedback coefficient, clamped to [-0.999, 0.999]
-#   delay_samples : delay time in samples (f32)
+#   delay_samples : delay time in samples, as f64
 # ================================================================
 #derive(accessors)
 struct CombFilter { delay_line; feedback; delay_samples; }
 
-# Create a comb filter; `feedback` clamped to (-1, 1) for stability.
+# Create a comb filter; `feedback` clamped to (-1, 1) for stability. Returns the
+# pointer, or NAAD_ERR_BUFFER_OVERFLOW for a length delay_line_new refuses.
 #must_use
 fn comb_filter_new(delay_samples, feedback) {
+    var dl = delay_line_new(delay_samples);
+    if (naad_is_err(dl) == 1) { return dl; }
     var cf = alloc(sizeof(CombFilter));
-    CombFilter_set_delay_line(cf, delay_line_new(delay_samples));
+    CombFilter_set_delay_line(cf, dl);
     CombFilter_set_feedback(cf, f64_clamp(feedback, DELAY_STABLE_LO, DELAY_STABLE_HI));
     CombFilter_set_delay_samples(cf, f64_from(delay_samples));
     return cf;
@@ -137,16 +137,19 @@ fn comb_filter_process_sample(cf, input) {
 # The buffer stores x[n] + g * y[n], halving memory vs a dual-buffer design.
 #   delay_line    : DelayLine pointer
 #   coefficient   : allpass coefficient, clamped to [-0.999, 0.999]
-#   delay_samples : delay time in samples (f32)
+#   delay_samples : delay time in samples, as f64
 # ================================================================
 #derive(accessors)
 struct AllpassDelay { delay_line; coefficient; delay_samples; }
 
-# Create an allpass delay; `coefficient` clamped to (-1, 1) for stability.
+# Create an allpass delay; `coefficient` clamped to (-1, 1) for stability. Returns
+# the pointer, or NAAD_ERR_BUFFER_OVERFLOW for a length delay_line_new refuses.
 #must_use
 fn allpass_delay_new(delay_samples, coefficient) {
+    var dl = delay_line_new(delay_samples);
+    if (naad_is_err(dl) == 1) { return dl; }
     var ap = alloc(sizeof(AllpassDelay));
-    AllpassDelay_set_delay_line(ap, delay_line_new(delay_samples));
+    AllpassDelay_set_delay_line(ap, dl);
     AllpassDelay_set_coefficient(ap, f64_clamp(coefficient, DELAY_STABLE_LO, DELAY_STABLE_HI));
     AllpassDelay_set_delay_samples(ap, f64_from(delay_samples));
     return ap;

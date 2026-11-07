@@ -29,10 +29,9 @@
 # Requires (from the build/test unit): stdlib alloc/vec + math/ganita (F64_TWO,
 # f64_add/sub/mul/div/neg/exp, f64_from/to, f64_lt/le/ge), the goonj bundle
 # (impulse_response_new, clarity_c50/c80, definition_d50, sti_estimate,
-# acoustic_room_shoebox, suggest_absorption_placement, AbsorptionSuggestion_*),
-# and the naad L0 modules error.cyr (NAAD_ERR_COMPUTATION, NAAD_EPSILON) +
-# acoustics.cyr (naad_acoustics_material_by_name) + acoustics_room.cyr
-# (RoomReverbConfig accessors). This file has no `include` lines.
+# suggest_absorption_placement, AbsorptionSuggestion_*), and the naad L0 modules
+# error.cyr (NAAD_ERR_COMPUTATION, NAAD_EPSILON) + acoustics_room.cyr
+# (RoomReverbConfig accessors, _naad_room_build). This file has no `include` lines.
 
 # 0.001 -- energy-decay threshold ratio for the RT60 estimate (-30 dB point).
 var NAAD_RT60_THRESHOLD = 0x3F50624DD2F1A9FC;
@@ -176,15 +175,8 @@ fn naad_analysis_wall_absorption_advice_new(wall_index, rt60_sensitivity, curren
 # ================================================================
 #must_use
 fn naad_analysis_suggest_absorption(config, target_rt60) {
-    var material = naad_acoustics_material_by_name(RoomReverbConfig_wall_material_name(config));
-    if (material == 0) { return NAAD_ERR_COMPUTATION; }
-
-    if (f64_le(RoomReverbConfig_length(config), 0) == 1) { return NAAD_ERR_COMPUTATION; }
-    if (f64_le(RoomReverbConfig_width(config), 0) == 1) { return NAAD_ERR_COMPUTATION; }
-    if (f64_le(RoomReverbConfig_height(config), 0) == 1) { return NAAD_ERR_COMPUTATION; }
-
-    var room = acoustic_room_shoebox(RoomReverbConfig_length(config),
-      RoomReverbConfig_width(config), RoomReverbConfig_height(config), material);
+    var room = _naad_room_build(config);
+    if (naad_is_err(room) == 1) { return room; }
     var suggestions = suggest_absorption_placement(room, target_rt60);
 
     var advice = vec_new();

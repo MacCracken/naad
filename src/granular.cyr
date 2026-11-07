@@ -8,8 +8,9 @@
 # functions taking the engine pointer. serde derives/tests are dropped.
 #
 # Requires (from the build/test unit): stdlib alloc/vec + math/ganita
-# (F64_* constants, f64_*), and dsp_util.cyr (hermite_interpolate,
-# xorshift32_unit_f32). The module file itself has no `include` lines.
+# (F64_* constants, f64_*), hisab (f64_fmod), error.cyr (naad_is_finite,
+# naad_vec_copy, NAAD_ERR_*), and dsp_util.cyr (hermite_interpolate,
+# xorshift32_unit_f32, U32_MASK). The module file itself has no `include` lines.
 
 # ================================================================
 # GrainWindow enum -> integer constants. Window applied to each grain.
@@ -59,7 +60,8 @@ fn granular_window_value(win, t) {
         }
         return F64_ONE;
     }
-    # Rectangular.
+    # Rectangular. A value outside the enum lands here too: this returns a sample,
+    # so it has no error channel, and granular_set_window refuses such values.
     return F64_ONE;
 }
 
@@ -163,9 +165,10 @@ fn granular_new(sample_rate) {
 # Parameter setters. Ports set_source/set_grain_rate/.../set_window.
 # ================================================================
 
-# Load a source audio buffer (vec<f64>); resets the read position.
+# Load a source audio buffer (vec<f64>); resets the read position. Rust takes the
+# Vec by value, so the engine keeps its own copy.
 fn granular_set_source(e, buffer) {
-    GranularEngine_set_source(e, buffer);
+    GranularEngine_set_source(e, naad_vec_copy(buffer));
     GranularEngine_set_time_position(e, 0);
     return 0;
 }
@@ -206,38 +209,36 @@ fn granular_set_spray(e, ms) {
     return 0;
 }
 
-# Window function for new grains.
+# Window function for new grains. Returns 0, or NAAD_ERR_INVALID_PARAMETER with the
+# window unchanged if `win` is not a GRAIN_WINDOW_* constant.
 fn granular_set_window(e, win) {
+    if (win < GRAIN_WINDOW_HANN) { return NAAD_ERR_INVALID_PARAMETER; }
+    if (win > GRAIN_WINDOW_RECTANGULAR) { return NAAD_ERR_INVALID_PARAMETER; }
     GranularEngine_set_window(e, win);
     return 0;
 }
 
 # ================================================================
-# granular_rem_euclid -- Rust f32::rem_euclid for a positive divisor b.
-# r = a - trunc(a/b)*b; if r < 0 then r += |b|. Result in [0, b).
-# ================================================================
-#must_use
+# granular_rem_euclid -- Rust f32::rem_euclid. r = a % b, exact at any magnitude
+# (a quotient-and-multiply form loses the remainder once |a| reaches 2^53); if
+# r < 0 then r += |b|.
+#
 # DIVERGENCE, inert and deliberate: for a negative EXACT multiple this returns
 # +0.0 where Rust's f32::rem_euclid returns -0.0. Rust computes r = a % b, which
 # is -0.0 for e.g. -3 % 3, and `-0.0 < 0.0` is false so it returns -0.0
-# unchanged; the trunc-and-correct form below produces +0.0 from the same input.
-# Not corrected because it cannot be observed: the result feeds f64_floor then
+# unchanged; adding +0.0 here makes that zero positive and changes nothing else.
+# Not matched because it cannot be observed: the result feeds f64_floor then
 # f64_to (both zeros convert to 0) and a `frac = pos - floor(pos)` that is +0.0
 # either way. Recorded so the sign is a known, tested contract rather than an
 # accident -- tests/granular.tcyr pins +0.0.
+# ================================================================
+#must_use
 fn granular_rem_euclid(a, b) {
-    var q = f64_div(a, b);
-    var tq = 0;
-    if (f64_lt(q, 0) == 1) {
-        tq = f64_ceil(q);
-    } else {
-        tq = f64_floor(q);
-    }
-    var r = f64_sub(a, f64_mul(tq, b));
+    var r = f64_fmod(a, b);
     if (f64_lt(r, 0) == 1) {
         r = f64_add(r, f64_abs(b));
     }
-    return r;
+    return f64_add(r, 0);
 }
 
 # ================================================================
@@ -251,11 +252,15 @@ fn granular_next_rng_f32(e) {
 
 # ================================================================
 # granular_spawn_grain -- spawn a new grain in the next free slot.
-# Ports spawn_grain. Drops the grain if the pool is full.
+# Ports spawn_grain. Drops the grain if the pool is full. Returns 1 if a grain
+# was spawned, 0 if it was dropped.
 # ================================================================
 fn granular_spawn_grain(e) {
     var dur_f = f64_mul(f64_div(GranularEngine_grain_duration_ms(e), f64_from(1000)), GranularEngine_sample_rate(e));
+    # duration_samples is a u32 in Rust, and `as u32` saturates at both ends.
     var duration_samples = f64_to(dur_f);
+    if (duration_samples < 0) { duration_samples = 0; }
+    if (duration_samples > U32_MASK) { duration_samples = U32_MASK; }
 
     var grains = GranularEngine_grains(e);
     var ng = vec_len(grains);
@@ -292,7 +297,7 @@ fn granular_spawn_grain(e) {
     Grain_set_current_sample(g, 0);
     Grain_set_amplitude(g, F64_ONE);
     Grain_set_active(g, 1);
-    return 0;
+    return 1;
 }
 
 # ================================================================
@@ -312,8 +317,19 @@ fn granular_next_sample(e) {
     var acc = GranularEngine_spawn_accumulator(e);
     acc = f64_add(acc, f64_div(GranularEngine_grain_rate(e), GranularEngine_sample_rate(e)));
     while (f64_ge(acc, F64_ONE) == 1) {
+        if (granular_spawn_grain(e) == 0) {
+            # No grain retires inside this loop, so a full pool drops every spawn
+            # still owed this sample. What they would leave behind is the fraction
+            # of acc, which is what makes the loop finite: at 2^53 and above acc - 1
+            # is acc again, and neither that nor +Inf has a fraction to keep.
+            if (naad_is_finite(acc) == 1) {
+                acc = f64_sub(acc, f64_floor(acc));
+            } else {
+                acc = 0;
+            }
+            break;
+        }
         acc = f64_sub(acc, F64_ONE);
-        granular_spawn_grain(e);
     }
     GranularEngine_set_spawn_accumulator(e, acc);
 
@@ -341,9 +357,9 @@ fn granular_next_sample(e) {
             read_pos = granular_rem_euclid(read_pos, src_len_f);
             var floor_pos = f64_floor(read_pos);
             # Rust's `as usize` takes a negative value to 0; f64_to keeps it
-            # negative. Saturate at the cast. Note INT64_MIN % src_len is 0 only
-            # when src_len is a power of two, which is why the suite once missed
-            # this. +overflow is INT64_MAX and `% src_len` keeps it in range.
+            # negative. Saturate at the cast. A power-of-two src_len cannot show this,
+            # since INT64_MIN % src_len is 0 there, so tests need another length.
+            # +overflow is INT64_MAX and `% src_len` keeps it in range.
             var floor_i = f64_to(floor_pos);
             if (floor_i < 0) { floor_i = 0; }
             var idx1 = floor_i % src_len;

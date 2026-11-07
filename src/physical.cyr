@@ -14,7 +14,10 @@
 # We therefore hand-roll the identical classic 4th-order Runge-Kutta step over
 # the 4-vector (same k1..k4 / (1,2,2,1)/6 weights hisab's Rust rk4 uses),
 # calling physical_moog_deriv for the derivative — a faithful reimplementation,
-# not an approximation. One deliberate, port-wide difference: the oracle stores
+# not an approximation. hisab's rk4_step also carries a Neumaier compensation
+# term across steps; it is left out because this model takes one step per call,
+# where that term only restores the sum it was taken from.
+# One deliberate, port-wide difference: the oracle stores
 # each ladder state as `flush_denormal(new_state[i] as f32) as f64` (re-quantized
 # to f32 every sample, a Rust-native artifact); consistent with naad's f32->f64
 # widening policy this port keeps the state at f64 (a precision refinement, not
@@ -61,7 +64,10 @@ fn physical_ks_new(frequency, decay, brightness, sample_rate) {
 
     var delay_samples = f64_div(sample_rate, frequency);
     if (delay_len_overflows(delay_samples) == 1) { return NAAD_ERR_BUFFER_OVERFLOW; }
+    # The f64 test above makes the cast safe; this one covers the two extra slots,
+    # which a period just under the cap would carry past what vec_push can hold.
     var max_delay = f64_to(f64_ceil(delay_samples)) + 2;
+    if (max_delay > VEC_CAP_MAX) { return NAAD_ERR_BUFFER_OVERFLOW; }
     var dl = delay_line_new(max_delay);
 
     # Feedback derived from decay: higher decay = closer to 1.0 (~0.9..0.999).
@@ -186,7 +192,9 @@ fn physical_wg_new(frequency, damping, sample_rate) {
     # Each delay line is half the period (wave travels in both directions).
     var half_period = f64_div(f64_div(sample_rate, frequency), F64_TWO);
     if (delay_len_overflows(half_period) == 1) { return NAAD_ERR_BUFFER_OVERFLOW; }
+    # As in physical_ks_new: the f64 test guards the cast, this one the two extra slots.
     var max_delay = f64_to(f64_ceil(half_period)) + 2;
+    if (max_delay > VEC_CAP_MAX) { return NAAD_ERR_BUFFER_OVERFLOW; }
 
     var self = alloc(sizeof(Waveguide));
     Waveguide_set_forward_delay(self, delay_line_new(max_delay));
@@ -283,11 +291,7 @@ fn physical_moog_new(cutoff_hz, resonance, sample_rate) {
     e = validate_frequency(cutoff_hz, sample_rate);
     if (naad_is_err(e) == 1) { return e; }
 
-    var state = vec_new();
-    vec_push(state, 0);
-    vec_push(state, 0);
-    vec_push(state, 0);
-    vec_push(state, 0);
+    var state = naad_vec_zeros(4);
 
     var self = alloc(sizeof(MoogLadder));
     MoogLadder_set_cutoff_hz(self, cutoff_hz);

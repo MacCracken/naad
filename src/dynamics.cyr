@@ -15,18 +15,11 @@
 # (naad_amplitude_to_db, db_to_amplitude_lut) and error.cyr (flush_denormal,
 # naad_is_finite). No `include` lines -- the entry orders the modules.
 
-# ================================================================
-# Detector-knee dispatch tags (documentation constants; the compressor
-# selects between them by inspecting knee_db each sample, exactly as the
-# oracle branches on `self.knee_db <= 0.0`).
-# ================================================================
-var DETECTOR_HARD_KNEE = 0;
-var DETECTOR_SOFT_KNEE = 1;
-
 # Non-integer IEEE-754 literals used by the constructors.
 var DYN_C0_001  = 0x3f50624dd2f1a9fc;   # 0.001  (noise-gate min attack)
 var DYN_C0_0001 = 0x3f1a36e2eb1c432d;   # 0.0001 (limiter attack time)
 var DYN_F32_MAX = 0x47efffffe0000000;   # f32::MAX = 3.4028235e38 (limiter ratio)
+var DYN_U32_MAX = 0xFFFFFFFF;           # u32::MAX (noise-gate hold ceiling)
 
 # ================================================================
 # LevelDetector -- smoothed abs-value envelope with split attack/release
@@ -267,12 +260,17 @@ struct NoiseGate {
 #must_use
 fn dynamics_noise_gate_new(threshold_db, attack, hold, release, sample_rate) {
     var attack_time = f64_max(attack, DYN_C0_001);
+    # The oracle's `as u32` saturates at both ends and sends NaN to 0. f64_to
+    # handles NaN but keeps a negative and runs on to INT64_MAX.
+    var hold_samples = f64_to(f64_mul(hold, sample_rate));
+    if (hold_samples < 0) { hold_samples = 0; }
+    if (hold_samples > DYN_U32_MAX) { hold_samples = DYN_U32_MAX; }
     var self = alloc(sizeof(NoiseGate));
     NoiseGate_set_threshold_db(self, threshold_db);
     NoiseGate_set_detector(self, dynamics_level_detector_new(attack, release, sample_rate));
     NoiseGate_set_gate_gain(self, 0);
     NoiseGate_set_hold_counter(self, 0);
-    NoiseGate_set_hold_samples(self, f64_to(f64_mul(hold, sample_rate)));
+    NoiseGate_set_hold_samples(self, hold_samples);
     NoiseGate_set_attack_coeff(self,
       f64_sub(F64_ONE, f64_exp(f64_div(f64_neg(F64_ONE), f64_mul(attack_time, sample_rate)))));
     var rc = F64_ONE;

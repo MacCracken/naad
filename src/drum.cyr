@@ -12,7 +12,7 @@
 # Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE/TWO/
 # HALF/TAU, f64_add/sub/mul/div/neg/clamp/from/sin/floor), error.cyr
 # (validate_sample_rate, flush_denormal, naad_is_err, NAAD_ERR_*), and filter.cyr
-# (filter_biquad_new, filter_biquad_process_sample, FILTER_*). No `include`.
+# (filter_biquad_new, filter_biquad_process_sample, NAAD_FILTER_*). No `include`.
 
 # ================================================================
 # Non-integer float literals (IEEE-754 bit patterns).
@@ -331,13 +331,15 @@ var DRUM_HIHAT_OSCILLATORS = 6;
 
 # ================================================================
 # drum_hihat_new -- create a hi-hat. Mirrors HiHat::new. `open` (1/0) selects
-# a longer decay. Returns the struct pointer on success, or a negative NAAD_ERR_*
-# on invalid sample_rate or an invalid filter (propagated from the biquads).
+# a longer decay; it is a Rust bool, so anything else is refused rather than
+# read as closed. Returns the struct pointer on success, or a negative NAAD_ERR_*
+# on invalid sample_rate, open, or filter (propagated from the biquads).
 # ================================================================
 #must_use
 fn drum_hihat_new(open, sample_rate) {
     var e = validate_sample_rate(sample_rate);
     if (naad_is_err(e) == 1) { return e; }
+    if (open != 0 && open != 1) { return NAAD_ERR_INVALID_PARAMETER; }
 
     var decay_ms = f64_from(30);
     if (open == 1) { decay_ms = f64_from(200); }
@@ -353,20 +355,13 @@ fn drum_hihat_new(open, sample_rate) {
     vec_push(frequencies, DRUM_F540_5);
     vec_push(frequencies, DRUM_F800_6);
 
-    var phases = vec_new();
-    var i = 0;
-    while (i < DRUM_HIHAT_OSCILLATORS) {
-        vec_push(phases, 0);
-        i = i + 1;
-    }
-
     var highpass = filter_biquad_new(NAAD_FILTER_HIGHPASS, sample_rate, f64_from(6000), DRUM_C0_707);
     if (naad_is_err(highpass) == 1) { return highpass; }
     var bandpass = filter_biquad_new(NAAD_FILTER_BANDPASS, sample_rate, f64_from(10000), F64_ONE);
     if (naad_is_err(bandpass) == 1) { return bandpass; }
 
     var self = alloc(sizeof(HiHat));
-    HiHat_set_phases(self, phases);
+    HiHat_set_phases(self, naad_vec_zeros(DRUM_HIHAT_OSCILLATORS));
     HiHat_set_frequencies(self, frequencies);
     HiHat_set_amp(self, 0);
     HiHat_set_decay(self, decay);
@@ -397,21 +392,28 @@ fn drum_hihat_trigger(self) {
 fn drum_hihat_next_sample(self) {
     if (HiHat_active(self) == 0) { return 0; }
 
+    # Direct reads, bounded by both vecs: they are reachable through their accessors.
     var phases = HiHat_phases(self);
     var frequencies = HiHat_frequencies(self);
+    var count = DRUM_HIHAT_OSCILLATORS;
+    if (vec_len(phases) < count) { count = vec_len(phases); }
+    if (vec_len(frequencies) < count) { count = vec_len(frequencies); }
+    var phase_data = load64(phases);
+    var freq_data = load64(frequencies);
     var sample_rate = HiHat_sample_rate(self);
 
     # Sum of detuned square oscillators for metallic tone.
     var metallic = 0;
     var i = 0;
-    while (i < DRUM_HIHAT_OSCILLATORS) {
-        var ph = vec_get(phases, i);
+    while (i < count) {
+        var slot = phase_data + i * 8;
+        var ph = load64(slot);
         var sq = F64_ONE;
         if (f64_lt(ph, F64_HALF) == 0) { sq = f64_neg(F64_ONE); }
         metallic = f64_add(metallic, sq);
-        ph = f64_add(ph, f64_div(vec_get(frequencies, i), sample_rate));
+        ph = f64_add(ph, f64_div(load64(freq_data + i * 8), sample_rate));
         ph = f64_sub(ph, f64_floor(ph));
-        vec_set(phases, i, ph);
+        store64(slot, ph);
         i = i + 1;
     }
     metallic = f64_div(metallic, f64_from(DRUM_HIHAT_OSCILLATORS));

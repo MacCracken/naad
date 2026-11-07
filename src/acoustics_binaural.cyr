@@ -16,7 +16,8 @@
 # (acoustic_room_shoebox, acoustic_material_concrete, ir_config_new,
 # hrtf_pair_new, hrtf_dataset_from_pairs, generate_binaural_ir, BinauralIr_*,
 # math constants F64_ONE/HALF/ONE_HALF/PI/PI_2, f64_*), src/error.cyr
-# (NAAD_ERR_COMPUTATION). No `include` lines.
+# (NAAD_ERR_COMPUTATION), src/acoustics.cyr (_naad_ring_new, _naad_ring_convolve).
+# No `include` lines.
 
 # ================================================================
 # Float literals (IEEE-754 bit patterns).
@@ -111,7 +112,7 @@ fn naad_binaural_ir_overflows(sample_rate) {
 # Builds a 6x4x3 concrete shoebox, a minimal HRTF dataset, and generates the
 # stereo IR via goonj. Returns the struct pointer on success or NAAD_ERR_COMPUTATION
 # when sample_rate is not positive or the IR would reach MAX_IR_SAMPLES. Below
-# that it still costs about 27 B per Hz of rate, and running out of that memory
+# that it still costs 15 to 21 B per Hz of rate, and running out of that memory
 # ends the process. Ports BinauralProcessor::new. (Oracle types sample_rate `u32`;
 # the signed Cyrius port must reject negatives explicitly.)
 # ================================================================
@@ -133,22 +134,12 @@ fn naad_binaural_new(azimuth, elevation, sample_rate) {
     var right_ir = BinauralIr_right(binaural);
     var ir_len = vec_len(left_ir);
     if (vec_len(right_ir) > ir_len) { ir_len = vec_len(right_ir); }
-    if (ir_len < 1) { ir_len = 1; }
-
-    var left_buffer = vec_new();
-    var right_buffer = vec_new();
-    var i = 0;
-    while (i < ir_len) {
-        vec_push(left_buffer, 0);
-        vec_push(right_buffer, 0);
-        i = i + 1;
-    }
 
     var self = alloc(sizeof(BinauralProcessor));
     BinauralProcessor_set_left_ir(self, left_ir);
     BinauralProcessor_set_right_ir(self, right_ir);
-    BinauralProcessor_set_left_buffer(self, left_buffer);
-    BinauralProcessor_set_right_buffer(self, right_buffer);
+    BinauralProcessor_set_left_buffer(self, _naad_ring_new(ir_len));
+    BinauralProcessor_set_right_buffer(self, _naad_ring_new(ir_len));
     BinauralProcessor_set_position(self, 0);
     BinauralProcessor_set_sample_rate(self, sample_rate);
     BinauralProcessor_set_azimuth(self, azimuth);
@@ -200,23 +191,8 @@ fn naad_binaural_process_sample_into(self, input, res) {
     vec_set(left_buffer, position, input);
     vec_set(right_buffer, position, input);
 
-    var left_out = 0;
-    var k = 0;
-    while (k < left_len) {
-        var lidx = position + buf_len - k;
-        lidx = lidx % buf_len;
-        left_out = f64_add(left_out, f64_mul(vec_get(left_buffer, lidx), vec_get(left_ir, k)));
-        k = k + 1;
-    }
-
-    var right_out = 0;
-    k = 0;
-    while (k < right_len) {
-        var ridx = position + buf_len - k;
-        ridx = ridx % buf_len;
-        right_out = f64_add(right_out, f64_mul(vec_get(right_buffer, ridx), vec_get(right_ir, k)));
-        k = k + 1;
-    }
+    var left_out = _naad_ring_convolve(left_buffer, position, left_ir);
+    var right_out = _naad_ring_convolve(right_buffer, position, right_ir);
 
     var next = position + 1;
     next = next % buf_len;
@@ -229,20 +205,20 @@ fn naad_binaural_process_sample_into(self, input, res) {
 
 # ================================================================
 # naad_binaural_process_buffer -- spatialise a whole mono `input` vec into
-# `left`/`right` vecs with ONE BinauralStereo allocation for the entire buffer.
-# Writes min(len) samples; extra capacity in the outputs is left untouched.
-# Returns 0.
+# `left`/`right` vecs. Writes min(len) samples; extra capacity in the outputs is
+# left untouched. Returns 0. The working pair lives on the stack: this runs per
+# block, and alloc never frees.
 # ================================================================
 fn naad_binaural_process_buffer(self, input, left, right) {
     var n = vec_len(input);
     var ll = vec_len(left);
     var rl = vec_len(right);
-    var res = alloc(sizeof(BinauralStereo));
+    var res[sizeof(BinauralStereo)];
     var i = 0;
     while (i < n) {
-        naad_binaural_process_sample_into(self, vec_get(input, i), res);
-        if (i < ll) { vec_set(left, i, BinauralStereo_left(res)); }
-        if (i < rl) { vec_set(right, i, BinauralStereo_right(res)); }
+        naad_binaural_process_sample_into(self, vec_get(input, i), &res);
+        if (i < ll) { vec_set(left, i, BinauralStereo_left(&res)); }
+        if (i < rl) { vec_set(right, i, BinauralStereo_right(&res)); }
         i = i + 1;
     }
     return 0;

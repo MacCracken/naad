@@ -10,7 +10,8 @@
 #
 # Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE/TWO/
 # HALF/TAU, f64_clamp), hisab (num_dct/num_idct), and error.cyr (naad_is_finite,
-# NAAD_ERR_*). No `include` lines here -- the test entry orders the deps.
+# validate_sample_rate, naad_vec_zeros, NAAD_ERR_*). No `include` lines here --
+# the test entry orders the deps.
 
 # Maximum number of partials supported.
 var ADDITIVE_MAX_PARTIALS = 64;
@@ -56,8 +57,8 @@ struct AdditiveSynth { fundamental; partials; phases; sample_rate; }
 # ================================================================
 #must_use
 fn additive_new(fundamental, num_partials, sample_rate) {
-    if (f64_le(sample_rate, 0) == 1) { return NAAD_ERR_INVALID_SAMPLE_RATE; }
-    if (naad_is_finite(sample_rate) == 0) { return NAAD_ERR_INVALID_SAMPLE_RATE; }
+    var e = validate_sample_rate(sample_rate);
+    if (naad_is_err(e) == 1) { return e; }
     if (f64_le(fundamental, 0) == 1) { return NAAD_ERR_INVALID_FREQUENCY; }
     if (naad_is_finite(fundamental) == 0) { return NAAD_ERR_INVALID_FREQUENCY; }
 
@@ -67,7 +68,6 @@ fn additive_new(fundamental, num_partials, sample_rate) {
     var nyquist = f64_mul(sample_rate, F64_HALF);
 
     var partials = vec_new();
-    var phases = vec_new();
     var i = 0;
     while (i < count) {
         var ratio = f64_from(i + 1);
@@ -76,14 +76,13 @@ fn additive_new(fundamental, num_partials, sample_rate) {
             amp = f64_div(F64_ONE, ratio);
         }
         vec_push(partials, additive_partial_new(ratio, amp, 0));
-        vec_push(phases, 0);
         i = i + 1;
     }
 
     var self = alloc(sizeof(AdditiveSynth));
     AdditiveSynth_set_fundamental(self, fundamental);
     AdditiveSynth_set_partials(self, partials);
-    AdditiveSynth_set_phases(self, phases);
+    AdditiveSynth_set_phases(self, naad_vec_zeros(count));
     AdditiveSynth_set_sample_rate(self, sample_rate);
     return self;
 }
@@ -147,7 +146,9 @@ fn additive_fundamental(self) {
 }
 
 # ================================================================
-# additive_next_sample -- generate the next output sample.
+# additive_next_sample -- generate the next output sample. Reads both vecs through
+# their data pointers, with `n` bounded by both lengths, because either can be
+# reached through its accessor: a partial with no phase slot does not sound.
 # ================================================================
 #must_use
 fn additive_next_sample(self) {
@@ -156,19 +157,22 @@ fn additive_next_sample(self) {
     var fundamental = AdditiveSynth_fundamental(self);
     var sample_rate = AdditiveSynth_sample_rate(self);
     var n = vec_len(partials);
+    if (vec_len(phases) < n) { n = vec_len(phases); }
+    var partial_data = load64(partials);
+    var phase_data = load64(phases);
     var sum = 0;
     var i = 0;
     while (i < n) {
-        var p = vec_get(partials, i);
+        var p = load64(partial_data + i * 8);
         var amp = Partial_amplitude(p);
         if (f64_le(amp, 0) == 0) {
-            var phase = vec_get(phases, i);
+            var slot = phase_data + i * 8;
+            var phase = load64(slot);
             sum = f64_add(sum, f64_mul(f64_sin(f64_mul(phase, F64_TAU)), amp));
 
             var freq = f64_mul(fundamental, Partial_frequency_ratio(p));
-            var inc = f64_div(freq, sample_rate);
-            var new_phase = f64_add(phase, inc);
-            vec_set(phases, i, f64_sub(new_phase, f64_floor(new_phase)));
+            var new_phase = f64_add(phase, f64_div(freq, sample_rate));
+            store64(slot, f64_sub(new_phase, f64_floor(new_phase)));
         }
         i = i + 1;
     }

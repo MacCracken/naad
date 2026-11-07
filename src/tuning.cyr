@@ -11,9 +11,9 @@
 # `tuning_*` functions taking the struct pointer.
 #
 # Requires (from the build/test unit): stdlib alloc/vec, math/ganita
-# (F64_ONE/TWO/LN2, f64_pow/ln/round/clamp/...), string/fmt (strlen,
+# (F64_ONE/TWO/LN2, f64_pow/ln/floor/clamp/...), string/fmt (strlen,
 # memcpy, fmt_int_buf for note_name), and error.cyr (NAAD_ERR_INVALID_PARAMETER,
-# naad_is_finite). The module file itself has no `include` lines.
+# naad_is_finite, naad_vec_copy). The module file itself has no `include` lines.
 
 # ================================================================
 # TuningSystem -> integer constants (predefined tuning systems).
@@ -51,6 +51,20 @@ fn tuning_midi_to_freq(note) {
 }
 
 # ================================================================
+# _tuning_round -- round half away from zero, Rust's `round`. The stdlib's
+# f64_round is ties-to-even, which puts every note + 0.5 with an even note one
+# semitone below the oracle. a - floor(a) is exact, so the tie test needs no
+# x + 0.5, which would itself round up at the largest double below 0.5.
+# ================================================================
+#must_use
+fn _tuning_round(x) {
+    var a = f64_abs(x);
+    var r = f64_floor(a);
+    if (f64_ge(f64_sub(a, r), F64_HALF) == 1) { r = f64_add(r, F64_ONE); }
+    return r | (x & 0x8000000000000000);
+}
+
+# ================================================================
 # freq_to_midi -- frequency in Hz to nearest MIDI note (0-127).
 # note = 69 + 12 * log2(freq / 440); rounded and clamped to [0, 127].
 # ================================================================
@@ -60,7 +74,7 @@ fn tuning_freq_to_midi(freq) {
     var ratio = f64_div(freq, f64_from(440));
     var log2 = f64_div(f64_ln(ratio), F64_LN2);
     var note = f64_add(f64_from(69), f64_mul(f64_from(12), log2));
-    var clamped = f64_clamp(f64_round(note), 0, f64_from(127));
+    var clamped = f64_clamp(_tuning_round(note), 0, f64_from(127));
     return f64_to(clamped);
 }
 
@@ -149,8 +163,13 @@ fn tuning_table_custom(name, ratios, a4_hz) {
         i = i + 1;
     }
     var t = alloc(sizeof(TuningTable));
-    TuningTable_set_name(t, name);
-    TuningTable_set_ratios(t, ratios);
+    # Rust takes both by value (ADR-0005): the table keeps what was validated,
+    # whatever the caller does to its name or its vec afterwards.
+    var name_len = strlen(name);
+    var own_name = alloc(name_len + 1);
+    memcpy(own_name, name, name_len + 1);
+    TuningTable_set_name(t, own_name);
+    TuningTable_set_ratios(t, naad_vec_copy(ratios));
     TuningTable_set_a4_hz(t, a4_hz);
     return t;
 }
@@ -181,21 +200,17 @@ fn tuning_note_to_freq(self, note) {
 # ================================================================
 # tuning_note_name -- MIDI note number to a name string ("A4", "C#5").
 # octave = note / 12 - 1; name index = note % 12. Returns a freshly
-# allocated null-terminated cstring, or the empty string "" for a note outside
-# the MIDI range.
+# allocated null-terminated cstring, or "" for a note outside 0..255.
 #
-# The oracle takes `note: u8` (rust-old/src/tuning.rs:189), so 0..255 is its
-# whole domain and it needs no guard. The port widened the parameter to a signed
-# i64; this restores the oracle's domain explicitly rather than formatting a
-# nonsense octave for a value Rust could never have received. 2.1.3 widened the
-# buffer from 16 to 32 bytes to survive the widened domain -- that stays as
-# defence in depth, but with this guard `nl <= 2 + ol <= 3 + NUL` is the real
-# bound.
+# The oracle takes `note: u8` (rust-old/src/tuning.rs:189), so it names every
+# value up to 255 ("D#20"), past MIDI's 127. The parameter here is a signed i64,
+# so the guard states that domain instead of formatting a nonsense octave. The
+# longest result is 4 characters plus the NUL, well inside the 32-byte buffer.
 # ================================================================
 #must_use
 fn tuning_note_name(note) {
     if (note < 0) { return ""; }
-    if (note > 127) { return ""; }
+    if (note > 255) { return ""; }
     var name = tuning_note_name_str(note % 12);
     var octave = (note / 12) - 1;
     var buf = alloc(32);

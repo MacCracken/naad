@@ -7,6 +7,7 @@
 include "lib/hisab.cyr"
 include "lib/goonj.cyr"
 include "src/error.cyr"
+include "src/acoustics.cyr"
 include "src/acoustics_binaural.cyr"
 
 var C1E_6 = 0x3eb0c6f7a0b5ed8d;   # 1e-6 (stereo-difference threshold)
@@ -346,6 +347,18 @@ var pm_empty = vec_new();
 vec_push(pm_empty, BIN_SENTINEL);
 naad_binaural_process_buffer(pm_proc, vec_new(), pm_empty, pm_empty);
 assert_eq(vec_get(pm_empty, 0), BIN_SENTINEL, "empty input writes nothing");
+
+# ================================================================
+# process_buffer runs per block, and alloc never frees, so it must not allocate.
+test_group("process_buffer_allocates_nothing");
+var na_proc = naad_binaural_new(F64_PI_2, 0, 8000);
+var na_i = 0;
+var na_before = alloc_used();
+while (na_i < 200) {
+    naad_binaural_process_buffer(na_proc, pb_in, pb_left, pb_right);
+    na_i = na_i + 1;
+}
+assert_eq(alloc_used() - na_before, 0, "process_buffer allocates nothing per block");
 
 var rc = assert_summary();
 syscall(60, rc);

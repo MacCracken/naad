@@ -294,5 +294,54 @@ var l3 = voice_manager_note_on(vml, 80, C0_5);
 assert_eq(l3, 1, "LOWEST note_on steals voice 1 (note 48)");
 assert_eq(Voice_note(vec_get(voice_manager_voices(vml), 1)), 80, "the lowest voice now plays 80");
 
+# ================================================================
+# The oracle's PolyMode, StealMode and u8 note cannot hold a bad value; here each
+# is an i64 and is checked where it enters.
+test_group("modes are validated");
+assert_eq(voice_manager_new(2, 3, STEAL_MODE_OLDEST), NAAD_ERR_INVALID_PARAMETER, "poly_mode past the last constant");
+assert_eq(voice_manager_new(2, 0 - 1, STEAL_MODE_OLDEST), NAAD_ERR_INVALID_PARAMETER, "negative poly_mode");
+assert_eq(voice_manager_new(2, POLY_MODE_POLY, 4), NAAD_ERR_INVALID_PARAMETER, "steal_mode past the last constant");
+assert_eq(voice_manager_new(2, POLY_MODE_POLY, 0 - 1), NAAD_ERR_INVALID_PARAMETER, "negative steal_mode");
+assert_gt(voice_manager_new(2, POLY_MODE_LEGATO, STEAL_MODE_NONE), 0, "the last valid constants are accepted");
+
+# The fields are `pub` in the oracle, so the accessor is a real path to them.
+var um_v = voice_manager_new(1, POLY_MODE_POLY, STEAL_MODE_LOWEST);
+var um_a = voice_manager_note_on(um_v, 60, C0_5);
+VoiceManager_set_steal_mode(um_v, 88);
+assert_eq(voice_manager_note_on(um_v, 50, C0_5), NAAD_VOICE_NONE, "an unknown steal_mode steals nothing");
+assert_eq(Voice_note(vec_get(voice_manager_voices(um_v), 0)), 60, "the voice keeps its note");
+assert_eq(voice_manager_active_count(um_v), 1, "the refused note changed nothing");
+var up_v = voice_manager_new(2, POLY_MODE_POLY, STEAL_MODE_OLDEST);
+VoiceManager_set_poly_mode(up_v, 77);
+assert_eq(voice_manager_note_on(up_v, 50, C0_5), NAAD_VOICE_NONE, "an unknown poly_mode allocates nothing");
+assert_eq(voice_manager_active_count(up_v), 0, "a free voice stays free");
+
+test_group("note range");
+var nr_v = voice_manager_new(2, POLY_MODE_POLY, STEAL_MODE_LOWEST);
+assert_eq(voice_manager_note_on(nr_v, 256, C0_5), NAAD_VOICE_NONE, "note 256 is refused");
+assert_eq(voice_manager_note_on(nr_v, 0 - 1, C0_5), NAAD_VOICE_NONE, "note -1 is refused");
+assert_eq(voice_manager_active_count(nr_v), 0, "a refused note changes no voice");
+assert_eq(voice_manager_note_on(nr_v, 255, C0_5), 0, "note 255 is the u8 maximum");
+assert_eq(voice_manager_note_on(nr_v, 0, C0_5), 1, "note 0 is the u8 minimum");
+assert_eq(voice_manager_note_off(nr_v, 255), 0, "note_off accepts 255");
+assert_eq(voice_manager_note_off(nr_v, 0), 1, "note_off accepts 0");
+var nm_v = voice_manager_new(2, POLY_MODE_MONO, STEAL_MODE_OLDEST);
+assert_eq(voice_manager_note_on(nm_v, 300, C0_5), NAAD_VOICE_NONE, "mono refuses note 300 too");
+assert_eq(voice_manager_active_count(nm_v), 0, "mono voice 0 stays silent");
+var no_v = voice_manager_new(1, POLY_MODE_POLY, STEAL_MODE_OLDEST);
+var no_a = voice_manager_note_on(no_v, 60, C0_5);
+Voice_set_note(vec_get(voice_manager_voices(no_v), 0), 300);
+assert_eq(voice_manager_note_off(no_v, 300), NAAD_VOICE_NONE, "note_off refuses a note outside the u8 range");
+assert_eq(voice_manager_active_count(no_v), 1, "the refused note_off changed nothing");
+
+test_group("age");
+var ag_v = voice_manager_new(1, POLY_MODE_POLY, STEAL_MODE_OLDEST);
+var ag_a = voice_manager_note_on(ag_v, 60, C0_5);
+var ag_voice = vec_get(voice_manager_voices(ag_v), 0);
+assert_eq(voice_age(ag_voice), 0, "a new voice has age 0");
+voice_manager_tick(ag_v);
+voice_manager_tick(ag_v);
+assert_eq(voice_age(ag_voice), 2, "age counts ticks");
+
 var rc = assert_summary();
 syscall(60, rc);

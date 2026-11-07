@@ -1,18 +1,11 @@
 # hotpath.bcyr -- per-sample hot-path benchmarks for naad.
 # Run: cyrius bench tests/hotpath.bcyr
-# Covers the inner-loop functions dhvani/svara call per audio sample:
-# oscillator, state-variable filter, ADSR envelope, pink-noise generator.
+# Covers the inner-loop functions dhvani/svara call per audio sample, and the
+# costliest paths the 2.3.2 sweep measured against the Rust oracle.
 
 include "lib/hisab.cyr"
-include "src/error.cyr"
-include "src/dsp_util.cyr"
-include "src/noise.cyr"
-include "src/filter.cyr"
-include "src/envelope.cyr"
-include "src/osc_core.cyr"
-include "src/osc_unison.cyr"
-include "src/osc_sub.cyr"
-include "src/osc_sync.cyr"
+include "lib/goonj.cyr"
+include "dist/naad.cyr"
 
 # bench — helper used by hotpath.bcyr.
 fn bench(name, fp, n) {
@@ -28,6 +21,13 @@ var _svf = 0;
 var _env = 0;
 var _noise = 0;
 var _half = 0;
+var _moog = 0;
+var _reverb = 0;
+var _reverb_out = 0;
+var _sub = 0;
+var _additive = 0;
+var _biquad = 0;
+var _unison = 0;
 
 # b osc next sample — helper used by hotpath.bcyr.
 fn b_osc_next_sample() {
@@ -49,6 +49,36 @@ fn b_noise_pink() {
     return noise_next_sample(_noise);
 }
 
+# b moog — helper used by hotpath.bcyr.
+fn b_moog() {
+    return physical_moog_process_sample(_moog, _half);
+}
+
+# b reverb — helper used by hotpath.bcyr.
+fn b_reverb() {
+    return reverb_process_core(_reverb, _half, _reverb_out);
+}
+
+# b subtractive — helper used by hotpath.bcyr.
+fn b_subtractive() {
+    return subtractive_next_sample(_sub);
+}
+
+# b additive — helper used by hotpath.bcyr.
+fn b_additive() {
+    return additive_next_sample(_additive);
+}
+
+# b biquad — helper used by hotpath.bcyr.
+fn b_biquad() {
+    return filter_biquad_process_sample(_biquad, _half);
+}
+
+# b unison — helper used by hotpath.bcyr.
+fn b_unison() {
+    return unison_next_sample(_unison);
+}
+
 # Bench entry point — runs every benchmark in this file.
 fn main() {
     alloc_init();
@@ -60,10 +90,25 @@ fn main() {
     envelope_adsr_gate_on(_env);
     _noise = noise_new(NOISE_PINK, 42);
 
+    _moog = physical_moog_new(f64_from(900), F64_HALF, f64_from(44100));
+    _reverb = reverb_new(F64_HALF, F64_HALF, f64_from(10), F64_HALF, f64_from(44100));
+    _reverb_out = alloc(sizeof(ReverbStereo));
+    _sub = subtractive_new(WAVEFORM_SAW, f64_from(220), f64_from(1200), F64_HALF, f64_from(44100));
+    subtractive_note_on(_sub);
+    _additive = additive_new(f64_from(220), 8, f64_from(44100));
+    _biquad = filter_biquad_new(NAAD_FILTER_LOWPASS, f64_from(44100), f64_from(1000), F64_ONE);
+    _unison = unison_new(WAVEFORM_SAW, f64_from(220), 5, f64_from(12), f64_from(44100));
+
     bench("osc_next_sample (sine)", &b_osc_next_sample, 200000);
     bench("filter_svf lowpass", &b_svf_lowpass, 200000);
     bench("envelope_adsr next_value", &b_env_next_value, 200000);
     bench("noise pink (Voss-McCartney)", &b_noise_pink, 200000);
+    bench("filter_biquad lowpass", &b_biquad, 200000);
+    bench("unison (5 voices)", &b_unison, 100000);
+    bench("subtractive voice", &b_subtractive, 100000);
+    bench("additive (8 partials)", &b_additive, 100000);
+    bench("reverb", &b_reverb, 100000);
+    bench("moog ladder", &b_moog, 50000);
 
     return 0;
 }

@@ -145,5 +145,110 @@ assert_eq(allpass_delay_coefficient(ap_s), C0_25, "coefficient setter round-trip
 var ap_s_out = allpass_delay_process_sample(ap_s, F64_ONE);
 assert_eq(ap_s_out, f64_neg(C0_25), "the reported coefficient is the one the process path uses");
 
+# ================================================================
+test_group("lengths past VEC_CAP_MAX are refused");
+# A length is an integer here, so no f64 guard stands in front of these. Each
+# constructor answers with an error rather than ending the process in vec_push.
+var over = VEC_CAP_MAX + 1;
+assert_eq(delay_line_new(over), NAAD_ERR_BUFFER_OVERFLOW, "delay_line_new refuses one past the cap");
+assert_eq(comb_filter_new(over, C0_5), NAAD_ERR_BUFFER_OVERFLOW, "comb_filter_new passes the refusal on");
+assert_eq(allpass_delay_new(over, C0_5), NAAD_ERR_BUFFER_OVERFLOW, "allpass_delay_new passes the refusal on");
+var huge = 0x7FFFFFFFFFFFFFFF;
+assert_eq(delay_line_new(huge), NAAD_ERR_BUFFER_OVERFLOW, "delay_line_new refuses INT64_MAX");
+# The floor is unchanged: a negative length is still a one-slot line.
+assert_eq(DelayLine_max_delay_samples(delay_line_new(0 - 5)), 1, "a negative length floors to one slot");
+var neg_cf = comb_filter_new(0 - 5, C0_5);
+assert_eq(DelayLine_max_delay_samples(CombFilter_delay_line(neg_cf)), 1, "a negative comb floors to one slot");
+
+# ================================================================
+test_group("a delay line is sized once");
+# Growing by push would leave every smaller buffer behind on a bump allocator,
+# about twice the storage. 1000 slots is 8000 bytes; the header, the vec's
+# initial 128-byte buffer and the DelayLine struct stay well under 1000 more.
+var size_used = alloc_used();
+var sized = delay_line_new(1000);
+assert(alloc_used() - size_used < 9000, "a 1000-slot line takes one buffer's worth of heap");
+assert_eq(vec_len(DelayLine_buffer(sized)), 1000, "the buffer has the requested length");
+assert_eq(vec_get(DelayLine_buffer(sized), 999), 0, "the last slot starts at +0.0");
+delay_line_write(sized, F64_ONE);
+assert_eq(delay_line_read(sized, 0), F64_ONE, "a sized line reads back what it stored");
+
+# ================================================================
+test_group("read position covers the whole ring");
+# Every cursor position against every delay, for each small length. The expected
+# slot comes from the euclidean remainder the read's single add stands in for.
+var ring_lens = vec_new();
+vec_push(ring_lens, 1);
+vec_push(ring_lens, 2);
+vec_push(ring_lens, 3);
+vec_push(ring_lens, 7);
+vec_push(ring_lens, 16);
+var ring_ok = 1;
+var ring_l = 0;
+while (ring_l < vec_len(ring_lens)) {
+    var ring_len = vec_get(ring_lens, ring_l);
+    var ring = delay_line_new(ring_len);
+    var ring_slot = 0;
+    while (ring_slot < ring_len) {
+        vec_set(DelayLine_buffer(ring), ring_slot, f64_from(ring_slot + 1));
+        ring_slot = ring_slot + 1;
+    }
+    var ring_wp = 0;
+    while (ring_wp < ring_len) {
+        DelayLine_set_write_pos(ring, ring_wp);
+        var ring_d = 0;
+        while (ring_d < ring_len + 3) {
+            var ring_used = ring_d;
+            if (ring_used > ring_len - 1) { ring_used = ring_len - 1; }
+            var ring_want = ((ring_wp - ring_used - 1) % ring_len + ring_len) % ring_len;
+            var ring_got = delay_line_read(ring, f64_from(ring_d));
+            var ring_exp = vec_get(DelayLine_buffer(ring), ring_want);
+            if (ring_got != ring_exp) { ring_ok = 0; }
+            ring_d = ring_d + 1;
+        }
+        ring_wp = ring_wp + 1;
+    }
+    ring_l = ring_l + 1;
+}
+assert_eq(ring_ok, 1, "every cursor and delay lands on the euclidean slot");
+
+# ================================================================
+test_group("non-finite delays");
+var nf_dl = delay_line_new(8);
+var nf_i = 0;
+while (nf_i < 8) {
+    delay_line_write(nf_dl, f64_from(nf_i + 1));
+    nf_i = nf_i + 1;
+}
+# +Inf clamps to the oldest slot, -Inf to the newest. NaN stays NaN, as Rust's
+# clamp leaves it, and casts to a whole delay of 0 without leaving the ring.
+assert_eq(delay_line_read(nf_dl, NAAD_POS_INF), F64_ONE, "+Inf reads the oldest sample");
+assert_eq(delay_line_read(nf_dl, NAAD_NEG_INF), f64_from(8), "-Inf reads the newest sample");
+assert_eq(naad_is_finite(delay_line_read(nf_dl, 0x7FF8000000000000)), 0, "NaN delay reads NaN");
+
+# ================================================================
+test_group("delay setters take effect on the next sample");
+# CombFilter.delay_samples is a public field in the oracle. Moving it mid-stream
+# must behave exactly as a read at the new delay.
+var set_cf = comb_filter_new(8, 0);
+var set_i = 0;
+while (set_i < 8) {
+    var set_out = comb_filter_process_sample(set_cf, f64_from(set_i + 1));
+    set_i = set_i + 1;
+}
+CombFilter_set_delay_samples(set_cf, 0x4009000000000000);    # 3.125
+var set_want = delay_line_read(CombFilter_delay_line(set_cf), 0x4009000000000000);
+CombFilter_set_feedback(set_cf, F64_ONE);
+assert_eq(comb_filter_process_sample(set_cf, 0), set_want, "comb reads at the delay its setter just stored");
+var set_ap = allpass_delay_new(8, 0);
+set_i = 0;
+while (set_i < 8) {
+    var set_ap_out = allpass_delay_process_sample(set_ap, f64_from(set_i + 1));
+    set_i = set_i + 1;
+}
+AllpassDelay_set_delay_samples(set_ap, f64_from(2));
+var set_ap_want = delay_line_read(AllpassDelay_delay_line(set_ap), f64_from(2));
+assert_eq(allpass_delay_process_sample(set_ap, 0), set_ap_want, "allpass reads at the delay its setter just stored");
+
 var rc = assert_summary();
 syscall(60, rc);

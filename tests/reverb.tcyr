@@ -310,5 +310,46 @@ reverb_process_buffer(pbs, sempty, sl3, sr12);
 assert_eq(vec_get(sl3, 0), F64_ONE, "an empty input leaves the outputs untouched");
 assert_eq(vec_get(sr12, 8), C100_0, "an empty input writes nothing at all");
 
+# ================================================================
+test_group("refused lengths come back as errors");
+var rv_over = VEC_CAP_MAX + 1;
+assert_eq(reverb_damped_comb_new(rv_over, C0_7, C0_3), NAAD_ERR_BUFFER_OVERFLOW, "damped comb passes the refusal on");
+assert_eq(reverb_allpass_new(rv_over, F64_HALF), NAAD_ERR_BUFFER_OVERFLOW, "reverb allpass passes the refusal on");
+
+# ================================================================
+test_group("reverb_process_buffer keeps nothing");
+# It runs once per block, so one byte per call is an unbounded leak here.
+var kb_rev = reverb_new(C0_8, C0_3, f64_from(10), F64_ONE, f64_from(SR));
+var kb_in = vec_new();
+var kb_l = vec_new();
+var kb_r = vec_new();
+var kb_i = 0;
+while (kb_i < 32) {
+    vec_push(kb_in, F64_HALF);
+    vec_push(kb_l, 0);
+    vec_push(kb_r, 0);
+    kb_i = kb_i + 1;
+}
+var kb_used = alloc_used();
+kb_i = 0;
+while (kb_i < 100) {
+    reverb_process_buffer(kb_rev, kb_in, kb_l, kb_r);
+    kb_i = kb_i + 1;
+}
+assert_eq(alloc_used() - kb_used, 0, "100 blocks take no heap");
+# The stack scratch carries the same result the per-sample form returns.
+var kb_a = reverb_new(C0_8, C0_3, f64_from(10), C0_7, f64_from(SR));
+var kb_b = reverb_new(C0_8, C0_3, f64_from(10), C0_7, f64_from(SR));
+reverb_process_buffer(kb_a, kb_in, kb_l, kb_r);
+kb_i = 0;
+var kb_same = 1;
+while (kb_i < 32) {
+    var kb_s = reverb_process_sample(kb_b, F64_HALF);
+    if (vec_get(kb_l, kb_i) != ReverbStereo_left(kb_s)) { kb_same = 0; }
+    if (vec_get(kb_r, kb_i) != ReverbStereo_right(kb_s)) { kb_same = 0; }
+    kb_i = kb_i + 1;
+}
+assert_eq(kb_same, 1, "buffer and per-sample output agree to the bit");
+
 var rc = assert_summary();
 syscall(60, rc);

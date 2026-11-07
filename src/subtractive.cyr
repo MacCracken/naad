@@ -15,19 +15,18 @@
 # (F64_ONE/TWO/HALF, f64_clamp/max/pow), error.cyr (naad_is_err, NAAD_ERR_NONE),
 # osc_core.cyr (osc_new/osc_next_sample/osc_set_frequency, WAVEFORM_*),
 # filter.cyr (filter_svf_new/filter_svf_set_params/filter_svf_q/
-# filter_svf_process_sample_lowpass), and envelope.cyr
-# (envelope_adsr_with_sample_rate/gate_on/gate_off/next_value/is_active).
+# filter_svf_process_sample_lowpass), and envelope.cyr (ENV_C0_*,
+# envelope_adsr_with_sample_rate/gate_on/gate_off/next_value/is_active).
 # No `include` lines -- the test entry orders the deps.
 
 # ================================================================
 # Non-integer float literals (IEEE-754 bit patterns).
 # ================================================================
-var SUB_C0_1   = 0x3FB999999999999A;   # 0.1  (min resonance / amp decay)
+var SUB_RESONANCE_FLOOR = 0x3FB999999999999A;   # 0.1
 var SUB_C0_7   = 0x3FE6666666666666;   # 0.7  (amp sustain)
-var SUB_C0_3   = 0x3FD3333333333333;   # 0.3  (amp release)
-var SUB_C0_01  = 0x3F847AE147AE147B;   # 0.01 (attack for both envelopes)
 var SUB_C0_2   = 0x3FC999999999999A;   # 0.2  (filter-env decay)
 var SUB_C0_49  = 0x3FDF5C28F5C28F5C;   # 0.49 (Nyquist headroom factor)
+var SUB_NO_MOD = 0x7FF8000000000000;   # NaN  (no filter_mod evaluated yet)
 
 # ================================================================
 # SubtractiveSynth -- one subtractive voice.
@@ -41,6 +40,8 @@ var SUB_C0_49  = 0x3FDF5C28F5C28F5C;   # 0.49 (Nyquist headroom factor)
 #   base_cutoff          : base filter cutoff (Hz)
 #   sample_rate          : Hz
 #   prev_modulated_cutoff: last applied cutoff (skips redundant recompute)
+#   last_mod, last_base, last_rate, last_prev: every input of the last cutoff
+#                          evaluation (see _subtractive_apply_cutoff)
 # ================================================================
 #derive(accessors)
 struct SubtractiveSynth {
@@ -54,6 +55,10 @@ struct SubtractiveSynth {
     base_cutoff;
     sample_rate;
     prev_modulated_cutoff;
+    last_mod;
+    last_base;
+    last_rate;
+    last_prev;
 }
 
 # ================================================================
@@ -67,12 +72,12 @@ struct SubtractiveSynth {
 fn subtractive_new(waveform, frequency, cutoff, resonance, sample_rate) {
     var osc1 = osc_new(waveform, frequency, sample_rate);
     if (naad_is_err(osc1) == 1) { return osc1; }
-    var res = f64_max(resonance, SUB_C0_1);
+    var res = f64_max(resonance, SUB_RESONANCE_FLOOR);
     var filter = filter_svf_new(cutoff, res, sample_rate);
     if (naad_is_err(filter) == 1) { return filter; }
-    var amp_env = envelope_adsr_with_sample_rate(SUB_C0_01, SUB_C0_1, SUB_C0_7, SUB_C0_3, sample_rate);
+    var amp_env = envelope_adsr_with_sample_rate(ENV_C0_01, ENV_C0_1, SUB_C0_7, ENV_C0_3, sample_rate);
     if (naad_is_err(amp_env) == 1) { return amp_env; }
-    var filter_env = envelope_adsr_with_sample_rate(SUB_C0_01, SUB_C0_2, F64_HALF, F64_HALF, sample_rate);
+    var filter_env = envelope_adsr_with_sample_rate(ENV_C0_01, SUB_C0_2, F64_HALF, F64_HALF, sample_rate);
     if (naad_is_err(filter_env) == 1) { return filter_env; }
 
     var self = alloc(sizeof(SubtractiveSynth));
@@ -86,6 +91,12 @@ fn subtractive_new(waveform, frequency, cutoff, resonance, sample_rate) {
     SubtractiveSynth_set_base_cutoff(self, cutoff);
     SubtractiveSynth_set_sample_rate(self, sample_rate);
     SubtractiveSynth_set_prev_modulated_cutoff(self, cutoff);
+    # NaN never matches a computed filter_mod unless that one is NaN too, and a
+    # NaN cutoff changes nothing, so the first sample needs no extra flag.
+    SubtractiveSynth_set_last_mod(self, SUB_NO_MOD);
+    SubtractiveSynth_set_last_base(self, cutoff);
+    SubtractiveSynth_set_last_rate(self, sample_rate);
+    SubtractiveSynth_set_last_prev(self, cutoff);
     return self;
 }
 
@@ -163,9 +174,35 @@ fn subtractive_set_cutoff(self, cutoff) {
 }
 
 # ================================================================
+# _subtractive_apply_cutoff -- evaluate the modulated cutoff and retune the filter
+# if it moved more than 0.5 Hz (the oracle's guard), recording the inputs so
+# subtractive_next_sample can skip this while they stay the same.
+# ================================================================
+fn _subtractive_apply_cutoff(self, filter_mod, base) {
+    var modulated_cutoff = f64_mul(base, f64_pow(F64_TWO, filter_mod));
+    var rate = SubtractiveSynth_sample_rate(self);
+    var clamped = f64_clamp(modulated_cutoff, f64_from(20), f64_mul(rate, SUB_C0_49));
+    var diff = f64_abs(f64_sub(clamped, SubtractiveSynth_prev_modulated_cutoff(self)));
+    if (f64_gt(diff, F64_HALF) == 1) {
+        var filter = SubtractiveSynth_filter(self);
+        filter_svf_set_params(filter, clamped, filter_svf_q(filter));
+        SubtractiveSynth_set_prev_modulated_cutoff(self, clamped);
+        diff = 0;
+    }
+    SubtractiveSynth_set_last_mod(self, filter_mod);
+    SubtractiveSynth_set_last_base(self, base);
+    SubtractiveSynth_set_last_rate(self, rate);
+    SubtractiveSynth_set_last_prev(self, SubtractiveSynth_prev_modulated_cutoff(self));
+    return 0;
+}
+
+# ================================================================
 # subtractive_next_sample -- oscillator mix -> envelope-modulated filter ->
 # amplitude envelope. Filter coefficients are only recomputed when the
-# modulated cutoff moves more than 0.5 Hz (matching the oracle's guard).
+# modulated cutoff moves more than 0.5 Hz (matching the oracle's guard). That
+# evaluation costs an f64_pow, so it runs only when one of its four inputs has
+# changed by a single bit: the same inputs give the same cutoff, and the guard has
+# already had its say about it. Sustain and idle spend nothing here.
 # ================================================================
 #must_use
 fn subtractive_next_sample(self) {
@@ -181,14 +218,11 @@ fn subtractive_next_sample(self) {
     # Filter with envelope modulation (depth in octaves -> 2^mod).
     var filter_mod = f64_mul(envelope_adsr_next_value(SubtractiveSynth_filter_env(self)),
       SubtractiveSynth_filter_env_depth(self));
-    var modulated_cutoff = f64_mul(SubtractiveSynth_base_cutoff(self), f64_pow(F64_TWO, filter_mod));
-    var nyq = f64_mul(SubtractiveSynth_sample_rate(self), SUB_C0_49);
-    var clamped = f64_clamp(modulated_cutoff, f64_from(20), nyq);
-    var diff = f64_abs(f64_sub(clamped, SubtractiveSynth_prev_modulated_cutoff(self)));
-    if (f64_gt(diff, F64_HALF) == 1) {
-        var filter = SubtractiveSynth_filter(self);
-        filter_svf_set_params(filter, clamped, filter_svf_q(filter));
-        SubtractiveSynth_set_prev_modulated_cutoff(self, clamped);
+    var base = SubtractiveSynth_base_cutoff(self);
+    if (filter_mod != SubtractiveSynth_last_mod(self) || base != SubtractiveSynth_last_base(self)
+      || SubtractiveSynth_sample_rate(self) != SubtractiveSynth_last_rate(self)
+      || SubtractiveSynth_prev_modulated_cutoff(self) != SubtractiveSynth_last_prev(self)) {
+        _subtractive_apply_cutoff(self, filter_mod, base);
     }
     var filtered = filter_svf_process_sample_lowpass(SubtractiveSynth_filter(self), osc_out);
 

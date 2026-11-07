@@ -12,15 +12,14 @@
 # Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE/TWO/
 # HALF), builtins (f64_abs/exp/from/sub/mul/div/neg/lt/gt), error.cyr
 # (naad_is_err/flush_denormal/NAAD_ERR_*), dsp_util.cyr (naad_amplitude_to_db/
-# naad_db_to_amplitude) and filter.cyr (filter_biquad_* + FILTER_* constants).
+# naad_db_to_amplitude) and filter.cyr (filter_biquad_* + NAAD_FILTER_* constants).
 # No `include` lines.
 
 # ================================================================
 # Float literals not in the stdlib (IEEE-754 hex bit patterns).
 # ================================================================
 var EQ_C1_4    = 0x3ff6666666666666;   # 1.4    (~1 octave bandwidth Q)
-var EQ_C31_25  = 0x403f400000000000;   # 31.25  (graphic band 0)
-var EQ_C62_5   = 0x404f400000000000;   # 62.5   (graphic band 1)
+var EQ_C31_25  = 0x403f400000000000;   # 31.25  (lowest graphic band)
 var EQ_C0_002  = 0x3f60624dd2f1a9fc;   # 0.002  (~2ms envelope smoothing)
 
 # ================================================================
@@ -153,27 +152,18 @@ fn eq_graphic_new(sample_rate) {
     var eq = eq_parametric_new(sample_rate);
     var active = vec_new();
 
-    var freqs = vec_new();
-    vec_push(freqs, EQ_C31_25);
-    vec_push(freqs, EQ_C62_5);
-    vec_push(freqs, f64_from(125));
-    vec_push(freqs, f64_from(250));
-    vec_push(freqs, f64_from(500));
-    vec_push(freqs, f64_from(1000));
-    vec_push(freqs, f64_from(2000));
-    vec_push(freqs, f64_from(4000));
-    vec_push(freqs, f64_from(8000));
-    vec_push(freqs, f64_from(16000));
-
+    # Each band is an octave above the last. Doubling is exact in binary, so the
+    # loop reaches 16000.0 with the bits of the literal.
     var nyquist = f64_mul(sample_rate, F64_HALF);
+    var freq = EQ_C31_25;
     var i = 0;
     while (i < 10) {
-        var freq = vec_get(freqs, i);
         if (f64_lt(freq, nyquist) == 1) {
             var e = eq_add_band(eq, NAAD_FILTER_PEAK, freq, EQ_C1_4, 0);
             if (naad_is_err(e) == 1) { return e; }
             vec_push(active, freq);
         }
+        freq = f64_mul(freq, F64_TWO);
         i = i + 1;
     }
 
@@ -255,8 +245,11 @@ fn eq_deesser_process_sample(self, input) {
     var env_db = naad_amplitude_to_db(env);
     var threshold = DeEsser_threshold_db(self);
     if (f64_gt(env_db, threshold) == 1) {
-        var overshoot = f64_sub(env_db, threshold);
-        var reduction_db = f64_max(f64_neg(overshoot), DeEsser_max_reduction_db(self));
+        var reduction_db = f64_neg(f64_sub(env_db, threshold));
+        # Rust's f32::max ignores a NaN on either side, and f64_max would hand back
+        # a NaN limit. The limit only applies by winning this comparison.
+        var limit = DeEsser_max_reduction_db(self);
+        if (f64_gt(limit, reduction_db) == 1) { reduction_db = limit; }
         return f64_mul(input, naad_db_to_amplitude(reduction_db));
     }
     return input;

@@ -28,7 +28,7 @@ var NAAD_FILTER_PEAK      = 7;
 # BiquadFilter -- Direct Form II Transposed biquad.
 #   b0,b1,b2,a1,a2 : coefficients (normalized by a0)
 #   z1,z2          : state (delay elements)
-#   filter_type    : FILTER_* constant
+#   filter_type    : NAAD_FILTER_* constant
 #   sample_rate    : Hz
 #   frequency      : cutoff/center Hz
 #   q              : resonance (> 0)
@@ -249,15 +249,32 @@ fn filter_biquad_set_params(self, frequency, q, gain_db) {
 }
 
 # ================================================================
-# filter_biquad_process_buffer -- process a vec of samples in place.
+# filter_biquad_process_buffer -- process a vec of samples in place. The same
+# equations as filter_biquad_process_sample, with the coefficients and state held
+# in locals: accessors are real calls, and the sample form makes nine of them.
 # ================================================================
 fn filter_biquad_process_buffer(self, buffer) {
+    var b0 = BiquadFilter_b0(self);
+    var b1 = BiquadFilter_b1(self);
+    var b2 = BiquadFilter_b2(self);
+    var a1 = BiquadFilter_a1(self);
+    var a2 = BiquadFilter_a2(self);
+    var z1 = BiquadFilter_z1(self);
+    var z2 = BiquadFilter_z2(self);
+
     var n = vec_len(buffer);
     var i = 0;
     while (i < n) {
-        vec_set(buffer, i, filter_biquad_process_sample(self, vec_get(buffer, i)));
+        var input = vec_get(buffer, i);
+        var output = f64_add(f64_mul(b0, input), z1);
+        z1 = flush_denormal(f64_add(f64_sub(f64_mul(b1, input), f64_mul(a1, output)), z2));
+        z2 = flush_denormal(f64_sub(f64_mul(b2, input), f64_mul(a2, output)));
+        vec_set(buffer, i, output);
         i = i + 1;
     }
+
+    BiquadFilter_set_z1(self, z1);
+    BiquadFilter_set_z2(self, z2);
     return 0;
 }
 
@@ -350,13 +367,12 @@ fn filter_svf_set_params(self, frequency, q) {
 }
 
 # ================================================================
-# _filter_svf_compute_lowpass -- value-returning SVF core. Advances the
-# integrator state (denormal-flushed) and returns only the low-pass output,
-# allocating nothing. Shared by the low-pass sample/buffer hot paths so the
-# bump allocator does not grow per sample. Numerics are bit-identical to
-# filter_svf_process_sample's low_pass field.
+# _filter_svf_step -- advance the integrators one sample (denormal-flushed).
+# Returns the low-pass value v2 and writes the band-pass value v1 to `band_slot`,
+# a caller-owned 8-byte slot, so no output path has to allocate. Low-pass callers
+# pass 0 and skip the store.
 # ================================================================
-fn _filter_svf_compute_lowpass(self, input) {
+fn _filter_svf_step(self, input, band_slot) {
     var a1 = StateVariableFilter_a1(self);
     var a2 = StateVariableFilter_a2(self);
     var a3 = StateVariableFilter_a3(self);
@@ -370,63 +386,76 @@ fn _filter_svf_compute_lowpass(self, input) {
     StateVariableFilter_set_ic1eq(self, flush_denormal(f64_sub(f64_mul(F64_TWO, v1), ic1eq)));
     StateVariableFilter_set_ic2eq(self, flush_denormal(f64_sub(f64_mul(F64_TWO, v2), ic2eq)));
 
+    if (band_slot != 0) { store64(band_slot, v1); }
     return v2;
 }
 
 # ================================================================
-# filter_svf_process_sample -- one sample -> all four outputs (SvfOutput
-# pointer). Integrator state is denormal-flushed. This is a one-shot API;
-# the low-pass hot paths use _filter_svf_compute_lowpass to avoid the alloc.
+# filter_svf_process_sample_into -- one sample -> all four outputs, written to
+# the caller's SvfOutput. This is the form for per-sample loops: it allocates
+# nothing. Returns 0.
 # ================================================================
-#must_use
-fn filter_svf_process_sample(self, input) {
-    var a1 = StateVariableFilter_a1(self);
-    var a2 = StateVariableFilter_a2(self);
-    var a3 = StateVariableFilter_a3(self);
-    var k = StateVariableFilter_k(self);
-    var ic1eq = StateVariableFilter_ic1eq(self);
-    var ic2eq = StateVariableFilter_ic2eq(self);
+fn filter_svf_process_sample_into(self, input, out) {
+    var band[8];
+    var low_pass = _filter_svf_step(self, input, &band);
+    var band_pass = load64(&band);
+    var high_pass = f64_sub(f64_sub(input, f64_mul(StateVariableFilter_k(self), band_pass)), low_pass);
 
-    var v3 = f64_sub(input, ic2eq);
-    var v1 = f64_add(f64_mul(a1, ic1eq), f64_mul(a2, v3));
-    var v2 = f64_add(f64_add(ic2eq, f64_mul(a2, ic1eq)), f64_mul(a3, v3));
-
-    StateVariableFilter_set_ic1eq(self, flush_denormal(f64_sub(f64_mul(F64_TWO, v1), ic1eq)));
-    StateVariableFilter_set_ic2eq(self, flush_denormal(f64_sub(f64_mul(F64_TWO, v2), ic2eq)));
-
-    var low_pass = v2;
-    var band_pass = v1;
-    var high_pass = f64_sub(f64_sub(input, f64_mul(k, v1)), v2);
-    var notch = f64_add(low_pass, high_pass);
-
-    var out = alloc(sizeof(SvfOutput));
     SvfOutput_set_low_pass(out, low_pass);
     SvfOutput_set_high_pass(out, high_pass);
     SvfOutput_set_band_pass(out, band_pass);
-    SvfOutput_set_notch(out, notch);
+    SvfOutput_set_notch(out, f64_add(low_pass, high_pass));
+    return 0;
+}
+
+# ================================================================
+# filter_svf_process_sample -- one sample -> a new SvfOutput. Every call
+# allocates the struct and the bump allocator never frees it, so per-sample
+# loops use filter_svf_process_sample_into.
+# ================================================================
+#must_use
+fn filter_svf_process_sample(self, input) {
+    var out = alloc(sizeof(SvfOutput));
+    filter_svf_process_sample_into(self, input, out);
     return out;
 }
 
 # ================================================================
 # filter_svf_process_sample_lowpass -- convenience: low-pass output only.
-# Routes through the value-returning core; allocates nothing.
+# Allocates nothing.
 # ================================================================
 #inline
 #must_use
 fn filter_svf_process_sample_lowpass(self, input) {
-    return _filter_svf_compute_lowpass(self, input);
+    return _filter_svf_step(self, input, 0);
 }
 
 # ================================================================
-# filter_svf_process_buffer_lowpass -- write low-pass output in place.
+# filter_svf_process_buffer_lowpass -- write low-pass output in place. The same
+# equations as _filter_svf_step, with the coefficients and state held in locals
+# to spare the accessor calls per sample.
 # ================================================================
 fn filter_svf_process_buffer_lowpass(self, buffer) {
+    var a1 = StateVariableFilter_a1(self);
+    var a2 = StateVariableFilter_a2(self);
+    var a3 = StateVariableFilter_a3(self);
+    var ic1eq = StateVariableFilter_ic1eq(self);
+    var ic2eq = StateVariableFilter_ic2eq(self);
+
     var n = vec_len(buffer);
     var i = 0;
     while (i < n) {
-        vec_set(buffer, i, filter_svf_process_sample_lowpass(self, vec_get(buffer, i)));
+        var v3 = f64_sub(vec_get(buffer, i), ic2eq);
+        var v1 = f64_add(f64_mul(a1, ic1eq), f64_mul(a2, v3));
+        var v2 = f64_add(f64_add(ic2eq, f64_mul(a2, ic1eq)), f64_mul(a3, v3));
+        ic1eq = flush_denormal(f64_sub(f64_mul(F64_TWO, v1), ic1eq));
+        ic2eq = flush_denormal(f64_sub(f64_mul(F64_TWO, v2), ic2eq));
+        vec_set(buffer, i, v2);
         i = i + 1;
     }
+
+    StateVariableFilter_set_ic1eq(self, ic1eq);
+    StateVariableFilter_set_ic2eq(self, ic2eq);
     return 0;
 }
 

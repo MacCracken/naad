@@ -53,34 +53,80 @@ fn formant_band_new(freq, bw, amp) {
 }
 
 # ================================================================
-# formant_vowel_formants -- the first three formant parameters (freq, bw, amp)
-# for a vowel. Values are standard approximations for an adult male voice.
-# Returns a fresh vec of 3 FormantBand pointers. Ports Vowel::formants().
+# _formant_vowel_valid -- 1 if `vowel` is a VOWEL_* constant, else 0. Rust's enum
+# cannot hold anything else, so every entry point taking a vowel checks here.
+# ================================================================
+#must_use
+fn _formant_vowel_valid(vowel) {
+    if (vowel < VOWEL_A) { return 0; }
+    if (vowel > VOWEL_U) { return 0; }
+    return 1;
+}
+
+# Overwrite an existing band's three fields.
+fn _formant_band_set(b, freq, bw, amp) {
+    FormantBand_set_freq(b, freq);
+    FormantBand_set_bw(b, bw);
+    FormantBand_set_amp(b, amp);
+    return 0;
+}
+
+# A fresh vec of FORMANT_NUM zeroed bands.
+#must_use
+fn _formant_bands_new() {
+    var v = vec_new();
+    var i = 0;
+    while (i < FORMANT_NUM) {
+        vec_push(v, formant_band_new(0, 0, 0));
+        i = i + 1;
+    }
+    return v;
+}
+
+# ================================================================
+# _formant_vowel_fill -- write a valid vowel's three formant parameters (freq, bw,
+# amp) into existing bands. Values are standard approximations for an adult male
+# voice. In place, because vowel changes run on the control path and alloc never
+# frees: Rust's FormantParams is a stack array.
+# ================================================================
+fn _formant_vowel_fill(vowel, bands) {
+    var f1 = vec_get(bands, 0);
+    var f2 = vec_get(bands, 1);
+    var f3 = vec_get(bands, 2);
+    if (vowel == VOWEL_A) {
+        _formant_band_set(f1, f64_from(730), f64_from(90), F64_ONE);
+        _formant_band_set(f2, f64_from(1090), f64_from(110), FORMANT_C0_5);
+        _formant_band_set(f3, f64_from(2440), f64_from(170), FORMANT_C0_25);
+    } elif (vowel == VOWEL_E) {
+        _formant_band_set(f1, f64_from(530), f64_from(60), F64_ONE);
+        _formant_band_set(f2, f64_from(1840), f64_from(100), FORMANT_C0_4);
+        _formant_band_set(f3, f64_from(2480), f64_from(120), FORMANT_C0_2);
+    } elif (vowel == VOWEL_I) {
+        _formant_band_set(f1, f64_from(270), f64_from(60), F64_ONE);
+        _formant_band_set(f2, f64_from(2290), f64_from(90), FORMANT_C0_3);
+        _formant_band_set(f3, f64_from(3010), f64_from(100), FORMANT_C0_15);
+    } elif (vowel == VOWEL_O) {
+        _formant_band_set(f1, f64_from(570), f64_from(80), F64_ONE);
+        _formant_band_set(f2, f64_from(840), f64_from(100), FORMANT_C0_5);
+        _formant_band_set(f3, f64_from(2410), f64_from(120), FORMANT_C0_2);
+    } else {
+        _formant_band_set(f1, f64_from(300), f64_from(70), F64_ONE);
+        _formant_band_set(f2, f64_from(870), f64_from(100), FORMANT_C0_35);
+        _formant_band_set(f3, f64_from(2240), f64_from(120), FORMANT_C0_15);
+    }
+    return 0;
+}
+
+# ================================================================
+# formant_vowel_formants -- a fresh vec of 3 FormantBand pointers holding a vowel's
+# formant parameters, or NAAD_ERR_INVALID_PARAMETER for a value outside the enum.
+# Ports Vowel::formants().
 # ================================================================
 #must_use
 fn formant_vowel_formants(vowel) {
-    var v = vec_new();
-    if (vowel == VOWEL_A) {
-        vec_push(v, formant_band_new(f64_from(730), f64_from(90), F64_ONE));
-        vec_push(v, formant_band_new(f64_from(1090), f64_from(110), FORMANT_C0_5));
-        vec_push(v, formant_band_new(f64_from(2440), f64_from(170), FORMANT_C0_25));
-    } elif (vowel == VOWEL_E) {
-        vec_push(v, formant_band_new(f64_from(530), f64_from(60), F64_ONE));
-        vec_push(v, formant_band_new(f64_from(1840), f64_from(100), FORMANT_C0_4));
-        vec_push(v, formant_band_new(f64_from(2480), f64_from(120), FORMANT_C0_2));
-    } elif (vowel == VOWEL_I) {
-        vec_push(v, formant_band_new(f64_from(270), f64_from(60), F64_ONE));
-        vec_push(v, formant_band_new(f64_from(2290), f64_from(90), FORMANT_C0_3));
-        vec_push(v, formant_band_new(f64_from(3010), f64_from(100), FORMANT_C0_15));
-    } elif (vowel == VOWEL_O) {
-        vec_push(v, formant_band_new(f64_from(570), f64_from(80), F64_ONE));
-        vec_push(v, formant_band_new(f64_from(840), f64_from(100), FORMANT_C0_5));
-        vec_push(v, formant_band_new(f64_from(2410), f64_from(120), FORMANT_C0_2));
-    } else {
-        vec_push(v, formant_band_new(f64_from(300), f64_from(70), F64_ONE));
-        vec_push(v, formant_band_new(f64_from(870), f64_from(100), FORMANT_C0_35));
-        vec_push(v, formant_band_new(f64_from(2240), f64_from(120), FORMANT_C0_15));
-    }
+    if (_formant_vowel_valid(vowel) == 0) { return NAAD_ERR_INVALID_PARAMETER; }
+    var v = _formant_bands_new();
+    _formant_vowel_fill(vowel, v);
     return v;
 }
 
@@ -103,6 +149,37 @@ fn formant_lerp(a, b, t) {
 }
 
 # ================================================================
+# _formant_bank_build -- append one bandpass filter and one amplitude per band to
+# `filters` and `amplitudes`. Returns NAAD_ERR_NONE or the first filter error.
+# ================================================================
+fn _formant_bank_build(bands, sample_rate, filters, amplitudes) {
+    var i = 0;
+    while (i < FORMANT_NUM) {
+        var band = vec_get(bands, i);
+        var freq = FormantBand_freq(band);
+        var f = filter_biquad_new(NAAD_FILTER_BANDPASS, sample_rate, freq, formant_q(freq, FormantBand_bw(band)));
+        if (naad_is_err(f) == 1) { return f; }
+        vec_push(filters, f);
+        vec_push(amplitudes, FormantBand_amp(band));
+        i = i + 1;
+    }
+    return NAAD_ERR_NONE;
+}
+
+# Run one input sample through a parallel bank and sum the bands.
+#must_use
+fn _formant_bank_process(filters, amplitudes, input) {
+    var sum = 0;
+    var i = 0;
+    while (i < FORMANT_NUM) {
+        var s = filter_biquad_process_sample(vec_get(filters, i), input);
+        sum = f64_add(sum, f64_mul(s, vec_get(amplitudes, i)));
+        i = i + 1;
+    }
+    return sum;
+}
+
+# ================================================================
 # FormantFilter -- a parallel bank of 3 bandpass resonators.
 #   filters    : vec of 3 BiquadFilter pointers (one per formant)
 #   amplitudes : vec of 3 per-formant amplitudes
@@ -115,21 +192,13 @@ struct FormantFilter { filters; amplitudes; }
 # count is not exactly 3, or a negative NAAD_ERR_* if any filter params are invalid.
 #must_use
 fn formant_filter_new(formants, sample_rate) {
+    if (formants <= 0) { return NAAD_ERR_INVALID_PARAMETER; }
     if (vec_len(formants) != FORMANT_NUM) { return NAAD_ERR_INVALID_PARAMETER; }
 
     var filters = vec_new();
     var amplitudes = vec_new();
-    var i = 0;
-    while (i < FORMANT_NUM) {
-        var band = vec_get(formants, i);
-        var freq = FormantBand_freq(band);
-        var bw = FormantBand_bw(band);
-        var f = filter_biquad_new(NAAD_FILTER_BANDPASS, sample_rate, freq, formant_q(freq, bw));
-        if (naad_is_err(f) == 1) { return f; }
-        vec_push(filters, f);
-        vec_push(amplitudes, FormantBand_amp(band));
-        i = i + 1;
-    }
+    var e = _formant_bank_build(formants, sample_rate, filters, amplitudes);
+    if (naad_is_err(e) == 1) { return e; }
 
     var self = alloc(sizeof(FormantFilter));
     FormantFilter_set_filters(self, filters);
@@ -140,48 +209,35 @@ fn formant_filter_new(formants, sample_rate) {
 # Process one input sample through all parallel formant bands.
 #must_use
 fn formant_filter_process_sample(self, input) {
-    var filters = FormantFilter_filters(self);
-    var amplitudes = FormantFilter_amplitudes(self);
-    var sum = 0;
-    var i = 0;
-    while (i < FORMANT_NUM) {
-        var s = filter_biquad_process_sample(vec_get(filters, i), input);
-        sum = f64_add(sum, f64_mul(s, vec_get(amplitudes, i)));
-        i = i + 1;
-    }
-    return sum;
+    return _formant_bank_process(FormantFilter_filters(self), FormantFilter_amplitudes(self), input);
 }
 
 # ================================================================
 # FormantSynth -- formant synthesis engine with vowel morphing.
-#   filters        : vec of 3 BiquadFilter pointers
-#   amplitudes     : vec of 3 current formant amplitudes
-#   target_params  : vec of 3 FormantBand (current target parameters)
-#   current_vowel  : VOWEL_* constant
-#   sample_rate    : Hz
+#   filters            : vec of 3 BiquadFilter pointers
+#   amplitudes         : vec of 3 current formant amplitudes
+#   target_params      : vec of 3 FormantBand (current target parameters); the
+#                        synth owns these and overwrites them in place
+#   current_vowel      : VOWEL_* constant
+#   sample_rate        : Hz
+#   morph_a, morph_b   : scratch bands holding a morph's two endpoint vowels
 # ================================================================
 #derive(accessors)
-struct FormantSynth { filters; amplitudes; target_params; current_vowel; sample_rate; }
+struct FormantSynth { filters; amplitudes; target_params; current_vowel; sample_rate; morph_a; morph_b; }
 
 # Create a new formant synth initialised to the given vowel. Returns the struct
-# pointer on success, or a negative NAAD_ERR_* if filter parameters are invalid.
-# Matches Rust new(): q uses raw freq/bw (no bw > 0 guard).
+# pointer on success, or a negative NAAD_ERR_* if the vowel or filter parameters
+# are invalid. Rust's new() divides freq/bw unguarded; every bandwidth in the
+# vowel table is positive, so formant_q gives the same Q.
 #must_use
 fn formant_synth_new(vowel, sample_rate) {
-    var params = formant_vowel_formants(vowel);
+    if (_formant_vowel_valid(vowel) == 0) { return NAAD_ERR_INVALID_PARAMETER; }
+    var params = _formant_bands_new();
+    _formant_vowel_fill(vowel, params);
     var filters = vec_new();
     var amplitudes = vec_new();
-    var i = 0;
-    while (i < FORMANT_NUM) {
-        var band = vec_get(params, i);
-        var freq = FormantBand_freq(band);
-        var bw = FormantBand_bw(band);
-        var f = filter_biquad_new(NAAD_FILTER_BANDPASS, sample_rate, freq, f64_div(freq, bw));
-        if (naad_is_err(f) == 1) { return f; }
-        vec_push(filters, f);
-        vec_push(amplitudes, FormantBand_amp(band));
-        i = i + 1;
-    }
+    var e = _formant_bank_build(params, sample_rate, filters, amplitudes);
+    if (naad_is_err(e) == 1) { return e; }
 
     var self = alloc(sizeof(FormantSynth));
     FormantSynth_set_filters(self, filters);
@@ -189,72 +245,84 @@ fn formant_synth_new(vowel, sample_rate) {
     FormantSynth_set_target_params(self, params);
     FormantSynth_set_current_vowel(self, vowel);
     FormantSynth_set_sample_rate(self, sample_rate);
+    FormantSynth_set_morph_a(self, _formant_bands_new());
+    FormantSynth_set_morph_b(self, _formant_bands_new());
     return self;
 }
 
-# Apply formant parameters (vec of FormantBand) to the filters. Returns
-# NAAD_ERR_NONE on success or a negative NAAD_ERR_* if the filter params are invalid.
-# Ports apply_params(); q uses the bw > 0 guard.
-fn formant_synth_apply_params(self, params) {
-    FormantSynth_set_target_params(self, params);
+# Push target_params into the filters and amplitudes, stopping at the first
+# invalid band. Returns NAAD_ERR_NONE or that band's error. q uses the bw > 0 guard.
+fn _formant_synth_apply_target(self) {
+    var params = FormantSynth_target_params(self);
     var filters = FormantSynth_filters(self);
     var amplitudes = FormantSynth_amplitudes(self);
     var i = 0;
     while (i < FORMANT_NUM) {
         var band = vec_get(params, i);
         var freq = FormantBand_freq(band);
-        var bw = FormantBand_bw(band);
-        var amp = FormantBand_amp(band);
-        var e = filter_biquad_set_params(vec_get(filters, i), freq, formant_q(freq, bw), 0);
+        var e = filter_biquad_set_params(vec_get(filters, i), freq, formant_q(freq, FormantBand_bw(band)), 0);
         if (naad_is_err(e) == 1) { return e; }
-        vec_set(amplitudes, i, amp);
+        vec_set(amplitudes, i, FormantBand_amp(band));
         i = i + 1;
     }
     return NAAD_ERR_NONE;
 }
 
-# Set the target vowel, updating filter parameters. Returns NAAD_ERR_NONE or a
-# negative NAAD_ERR_*. Ports set_vowel().
-fn formant_synth_set_vowel(self, vowel) {
-    FormantSynth_set_current_vowel(self, vowel);
-    var params = formant_vowel_formants(vowel);
-    return formant_synth_apply_params(self, params);
+# Apply formant parameters (vec of FormantBand) to the filters. The values are
+# copied, as Rust's `self.target_params = *params` copies them, so the caller's vec
+# is not retained. Returns NAAD_ERR_NONE on success or a negative NAAD_ERR_* if the
+# filter params are invalid. Ports apply_params().
+fn formant_synth_apply_params(self, params) {
+    if (params <= 0) { return NAAD_ERR_INVALID_PARAMETER; }
+    if (vec_len(params) != FORMANT_NUM) { return NAAD_ERR_INVALID_PARAMETER; }
+    var target = FormantSynth_target_params(self);
+    var i = 0;
+    while (i < FORMANT_NUM) {
+        var band = vec_get(params, i);
+        _formant_band_set(vec_get(target, i), FormantBand_freq(band), FormantBand_bw(band), FormantBand_amp(band));
+        i = i + 1;
+    }
+    return _formant_synth_apply_target(self);
 }
 
-# Morph between two vowels at position t (0.0 = vowel_a, 1.0 = vowel_b).
-# Returns NAAD_ERR_NONE or a negative NAAD_ERR_*. Ports morph().
-fn formant_synth_morph(self, vowel_a, vowel_b, t) {
-    var tc = f64_clamp(t, 0, F64_ONE);
-    var a = formant_vowel_formants(vowel_a);
-    var b = formant_vowel_formants(vowel_b);
+# Set the target vowel, updating filter parameters. Returns NAAD_ERR_NONE or a
+# negative NAAD_ERR_*; an invalid vowel changes nothing. Ports set_vowel().
+fn formant_synth_set_vowel(self, vowel) {
+    if (_formant_vowel_valid(vowel) == 0) { return NAAD_ERR_INVALID_PARAMETER; }
+    FormantSynth_set_current_vowel(self, vowel);
+    _formant_vowel_fill(vowel, FormantSynth_target_params(self));
+    return _formant_synth_apply_target(self);
+}
 
-    var params = vec_new();
+# Morph between two vowels at position t (0.0 = vowel_a, 1.0 = vowel_b). Returns
+# NAAD_ERR_NONE or a negative NAAD_ERR_*; an invalid vowel changes nothing. Ports morph().
+fn formant_synth_morph(self, vowel_a, vowel_b, t) {
+    if (_formant_vowel_valid(vowel_a) == 0) { return NAAD_ERR_INVALID_PARAMETER; }
+    if (_formant_vowel_valid(vowel_b) == 0) { return NAAD_ERR_INVALID_PARAMETER; }
+    var tc = f64_clamp(t, 0, F64_ONE);
+    var a = FormantSynth_morph_a(self);
+    var b = FormantSynth_morph_b(self);
+    var target = FormantSynth_target_params(self);
+    _formant_vowel_fill(vowel_a, a);
+    _formant_vowel_fill(vowel_b, b);
+
     var i = 0;
     while (i < FORMANT_NUM) {
         var ba = vec_get(a, i);
         var bb = vec_get(b, i);
-        var freq = formant_lerp(FormantBand_freq(ba), FormantBand_freq(bb), tc);
-        var bw = formant_lerp(FormantBand_bw(ba), FormantBand_bw(bb), tc);
-        var amp = formant_lerp(FormantBand_amp(ba), FormantBand_amp(bb), tc);
-        vec_push(params, formant_band_new(freq, bw, amp));
+        _formant_band_set(vec_get(target, i),
+          formant_lerp(FormantBand_freq(ba), FormantBand_freq(bb), tc),
+          formant_lerp(FormantBand_bw(ba), FormantBand_bw(bb), tc),
+          formant_lerp(FormantBand_amp(ba), FormantBand_amp(bb), tc));
         i = i + 1;
     }
-    return formant_synth_apply_params(self, params);
+    return _formant_synth_apply_target(self);
 }
 
 # Process one input sample through the parallel formant bank.
 #must_use
 fn formant_synth_process_sample(self, input) {
-    var filters = FormantSynth_filters(self);
-    var amplitudes = FormantSynth_amplitudes(self);
-    var sum = 0;
-    var i = 0;
-    while (i < FORMANT_NUM) {
-        var s = filter_biquad_process_sample(vec_get(filters, i), input);
-        sum = f64_add(sum, f64_mul(s, vec_get(amplitudes, i)));
-        i = i + 1;
-    }
-    return sum;
+    return _formant_bank_process(FormantSynth_filters(self), FormantSynth_amplitudes(self), input);
 }
 
 # Fill a buffer by processing each input sample in place. Ports process_buffer().

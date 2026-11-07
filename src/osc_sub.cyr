@@ -29,13 +29,24 @@ var SUBOSC_C0_1 = 0x3FB999999999999A;   # 0.1
 #derive(accessors)
 struct SubOscillator { osc; octave; base_frequency; level; }
 
+# 1 if `octave` is a SUBOCT_* constant, else 0. The oracle's enum cannot hold
+# anything else; here an unknown value would run as Down1 and be stored as itself.
+#must_use
+fn _subosc_octave_valid(octave) {
+    if (octave == SUBOCT_DOWN1) { return 1; }
+    if (octave == SUBOCT_DOWN2) { return 1; }
+    return 0;
+}
+
 # ================================================================
 # subosc_new -- construct. Divides base_frequency by 2 (Down1) or 4 (Down2),
-# floored at 0.1 Hz. Returns the struct pointer, or a negative NAAD_ERR_* if the
-# underlying Oscillator failed to build.
+# floored at 0.1 Hz. Returns the struct pointer, NAAD_ERR_INVALID_PARAMETER for an
+# unknown octave, or a negative NAAD_ERR_* if the underlying Oscillator failed to
+# build.
 # ================================================================
 #must_use
 fn subosc_new(waveform, base_frequency, octave, sample_rate) {
+    if (_subosc_octave_valid(octave) == 0) { return NAAD_ERR_INVALID_PARAMETER; }
     var divisor = F64_TWO;
     if (octave == SUBOCT_DOWN2) { divisor = f64_from(4); }
     var sub_freq = f64_div(base_frequency, divisor);
@@ -73,9 +84,11 @@ fn subosc_set_base_frequency(self, freq) {
 }
 
 # ================================================================
-# subosc_set_octave -- change octave division. Returns NAAD_ERR_NONE or NAAD_ERR_*.
+# subosc_set_octave -- change octave division. Returns NAAD_ERR_NONE or NAAD_ERR_*;
+# an unknown octave is refused with no state change.
 # ================================================================
 fn subosc_set_octave(self, octave) {
+    if (_subosc_octave_valid(octave) == 0) { return NAAD_ERR_INVALID_PARAMETER; }
     var divisor = F64_TWO;
     if (octave == SUBOCT_DOWN2) { divisor = f64_from(4); }
     var base = SubOscillator_base_frequency(self);

@@ -8,9 +8,14 @@
 # Per-voice waveform generation reuses osc_stateless_waveform_sample from
 # osc_core.cyr, matching the oracle.
 #
+# The pan gains cost a sine and a cosine per voice, so they are held in vecs and
+# recomputed when stereo_spread or num_voices stops matching what they were built
+# from. Both are public fields, so the check is on the values, not a dirty flag.
+# Each gain is the oracle's expression with the same operands.
+#
 # Requires (from the build/test unit): stdlib alloc/vec + math/ganita
 # (F64_ONE/TWO/HALF/PI_2/FRAC_1_SQRT2, f64_pow/sin/cos/clamp/max) and
-# error.cyr (validate_*, naad_is_err, NAAD_ERR_*), dsp_util.cyr
+# error.cyr (validate_*, naad_is_err, naad_vec_zeros, NAAD_ERR_*), dsp_util.cyr
 # (xorshift32_unit_f32), osc_core.cyr (osc_stateless_waveform_sample,
 # WAVEFORM_*). No `include` lines.
 
@@ -31,22 +36,27 @@ struct UnisonStereo { left; right; }
 #   phases        : vec of 8 f64 per-voice phases
 #   detune_ratios : vec of 8 f64 precomputed frequency ratios
 #   ratios_dirty  : 1 if ratios need recomputing, else 0
+#   gains_l/r     : vecs of 8 f64 equal-power pan gains
+#   inv_voices    : 1 / num_voices, the stereo output scale
+#   pan_spread, pan_voices: stereo_spread and num_voices the gains were built from
+#   out_left/right: the last stereo pair unison_stereo_step produced
 # ================================================================
 #derive(accessors)
-# scratch_l / scratch_r: one-slot scratch vecs for unison_next_sample_stereo,
-# allocated once. The oracle returns a stack tuple
-# (rust-old/src/oscillator/unison.rs:148); two vec_new() per sample is
-# 304 B/sample against a never-freeing bump allocator, ~14.6 MB/s at 48 kHz.
 struct UnisonOscillator { waveform; frequency; sample_rate; num_voices; detune_cents;
-    stereo_spread; phases; detune_ratios; ratios_dirty; scratch_l; scratch_r; }
+    stereo_spread; phases; detune_ratios; ratios_dirty; gains_l; gains_r;
+    inv_voices; pan_spread; pan_voices; out_left; out_right; }
 
 # ================================================================
 # unison_new -- construct. Clamps num_voices to 1..8, randomizes initial
 # phases (xorshift32 seeded 12345), primes detune ratios. Returns the struct
-# pointer on success, or a negative NAAD_ERR_* on invalid sample_rate/frequency.
+# pointer on success, or a negative NAAD_ERR_* on an invalid waveform,
+# sample_rate or frequency. The waveform is checked because the oracle's enum
+# cannot hold a bad id, and here one would run silently as a noise waveform.
 # ================================================================
 #must_use
 fn unison_new(waveform, frequency, num_voices, detune_cents, sample_rate) {
+    if (waveform < WAVEFORM_SINE) { return NAAD_ERR_INVALID_PARAMETER; }
+    if (waveform > WAVEFORM_BROWN_NOISE) { return NAAD_ERR_INVALID_PARAMETER; }
     var e = validate_sample_rate(sample_rate);
     if (naad_is_err(e) == 1) { return e; }
     e = validate_frequency(frequency, sample_rate);
@@ -56,15 +66,10 @@ fn unison_new(waveform, frequency, num_voices, detune_cents, sample_rate) {
     if (nv < 1) { nv = 1; }
     if (nv > 8) { nv = 8; }
 
-    var phases = vec_new();
-    var i = 0;
-    while (i < 8) {
-        vec_push(phases, 0);
-        i = i + 1;
-    }
+    var phases = naad_vec_zeros(8);
     var seed = alloc(8);
     store64(seed, 12345);
-    i = 0;
+    var i = 0;
     while (i < nv) {
         vec_set(phases, i, xorshift32_unit_f32(seed));
         i = i + 1;
@@ -87,14 +92,41 @@ fn unison_new(waveform, frequency, num_voices, detune_cents, sample_rate) {
     UnisonOscillator_set_phases(self, phases);
     UnisonOscillator_set_detune_ratios(self, detune_ratios);
     UnisonOscillator_set_ratios_dirty(self, 1);
-    var sl = vec_new();
-    vec_push(sl, 0);
-    var sr = vec_new();
-    vec_push(sr, 0);
-    UnisonOscillator_set_scratch_l(self, sl);
-    UnisonOscillator_set_scratch_r(self, sr);
+    UnisonOscillator_set_gains_l(self, naad_vec_zeros(8));
+    UnisonOscillator_set_gains_r(self, naad_vec_zeros(8));
+    UnisonOscillator_set_pan_voices(self, 0);
+    UnisonOscillator_set_out_left(self, 0);
+    UnisonOscillator_set_out_right(self, 0);
     unison_recompute_ratios(self);
     return self;
+}
+
+# Refresh the equal-power pan gains: voice 0 left, voice N-1 right, narrowed by
+# stereo_spread; a lone voice sits in the centre.
+fn _unison_refresh_pan(self) {
+    var nv = UnisonOscillator_num_voices(self);
+    var gains_l = UnisonOscillator_gains_l(self);
+    var gains_r = UnisonOscillator_gains_r(self);
+    if (nv > 1) {
+        var w = f64_mul(UnisonOscillator_stereo_spread(self), F64_HALF);
+        var denom = f64_from(nv - 1);
+        var i = 0;
+        while (i < nv) {
+            var pan = f64_div(f64_from(i), denom);
+            var pan_scaled = f64_add(F64_HALF, f64_mul(f64_mul(f64_sub(pan, F64_HALF), w), F64_TWO));
+            var angle = f64_mul(pan_scaled, F64_PI_2);
+            vec_set(gains_l, i, f64_cos(angle));
+            vec_set(gains_r, i, f64_sin(angle));
+            i = i + 1;
+        }
+    } else {
+        vec_set(gains_l, 0, F64_FRAC_1_SQRT2);
+        vec_set(gains_r, 0, F64_FRAC_1_SQRT2);
+    }
+    UnisonOscillator_set_inv_voices(self, f64_div(F64_ONE, f64_from(nv)));
+    UnisonOscillator_set_pan_spread(self, UnisonOscillator_stereo_spread(self));
+    UnisonOscillator_set_pan_voices(self, nv);
+    return 0;
 }
 
 # ================================================================
@@ -141,8 +173,7 @@ fn unison_next_sample(self) {
     var sum = 0;
     var i = 0;
     while (i < nv) {
-        var freq = f64_mul(freq_base, vec_get(ratios, i));
-        var dt = f64_div(freq, sr);
+        var dt = f64_div(f64_mul(freq_base, vec_get(ratios, i)), sr);
         var t = vec_get(phases, i);
         sum = f64_add(sum, osc_stateless_waveform_sample(wf, t, dt));
         var ph = f64_add(t, dt);
@@ -154,66 +185,69 @@ fn unison_next_sample(self) {
 }
 
 # ================================================================
-# unison_advance_stereo -- value-returning core: advance one stereo sample and
-# write the (left, right) pair into out_left/out_right at index idx. Allocates
-# nothing, so the buffer loop can call it per sample without leaking. Voices are
-# equal-power panned across the field per stereo_spread.
+# unison_stereo_step -- advance one stereo sample and leave the (left, right) pair
+# in out_left/out_right. Allocates nothing. Voices are equal-power panned across
+# the field per stereo_spread.
 # ================================================================
-fn unison_advance_stereo(self, out_left, out_right, idx) {
+fn unison_stereo_step(self) {
     if (UnisonOscillator_ratios_dirty(self) == 1) {
         unison_recompute_ratios(self);
+    }
+    if (UnisonOscillator_stereo_spread(self) != UnisonOscillator_pan_spread(self)
+      || UnisonOscillator_num_voices(self) != UnisonOscillator_pan_voices(self)) {
+        _unison_refresh_pan(self);
     }
     var wf = UnisonOscillator_waveform(self);
     var freq_base = UnisonOscillator_frequency(self);
     var sr = UnisonOscillator_sample_rate(self);
     var ratios = UnisonOscillator_detune_ratios(self);
+    var gains_l = UnisonOscillator_gains_l(self);
+    var gains_r = UnisonOscillator_gains_r(self);
     var phases = UnisonOscillator_phases(self);
     var nv = UnisonOscillator_num_voices(self);
-    var spread = UnisonOscillator_stereo_spread(self);
 
     var left = 0;
     var right = 0;
     var i = 0;
     while (i < nv) {
-        var freq = f64_mul(freq_base, vec_get(ratios, i));
-        var dt = f64_div(freq, sr);
+        var dt = f64_div(f64_mul(freq_base, vec_get(ratios, i)), sr);
         var t = vec_get(phases, i);
         var sample = osc_stateless_waveform_sample(wf, t, dt);
-        if (nv > 1) {
-            var pan = f64_div(f64_from(i), f64_from(nv - 1));
-            var w = f64_mul(spread, F64_HALF);
-            var pan_scaled = f64_add(F64_HALF, f64_mul(f64_mul(f64_sub(pan, F64_HALF), w), F64_TWO));
-            var angle = f64_mul(pan_scaled, F64_PI_2);
-            left = f64_add(left, f64_mul(sample, f64_cos(angle)));
-            right = f64_add(right, f64_mul(sample, f64_sin(angle)));
-        } else {
-            left = f64_add(left, f64_mul(sample, F64_FRAC_1_SQRT2));
-            right = f64_add(right, f64_mul(sample, F64_FRAC_1_SQRT2));
-        }
+        left = f64_add(left, f64_mul(sample, vec_get(gains_l, i)));
+        right = f64_add(right, f64_mul(sample, vec_get(gains_r, i)));
         var ph = f64_add(t, dt);
         if (f64_ge(ph, F64_ONE) == 1) { ph = f64_sub(ph, F64_ONE); }
         vec_set(phases, i, ph);
         i = i + 1;
     }
-    var inv = f64_div(F64_ONE, f64_from(nv));
-    vec_set(out_left, idx, f64_mul(left, inv));
-    vec_set(out_right, idx, f64_mul(right, inv));
+    var inv = UnisonOscillator_inv_voices(self);
+    UnisonOscillator_set_out_left(self, f64_mul(left, inv));
+    UnisonOscillator_set_out_right(self, f64_mul(right, inv));
     return 0;
 }
 
 # ================================================================
-# unison_next_sample_stereo -- next stereo pair. Voices are equal-power
-# panned across the field per stereo_spread. Returns a UnisonStereo pointer.
-# One-shot API; delegates to unison_advance_stereo for the identical math.
+# unison_advance_stereo -- advance one stereo sample and write the pair into
+# out_left/out_right at index idx. Allocates nothing, so a buffer loop can call it
+# per sample.
+# ================================================================
+fn unison_advance_stereo(self, out_left, out_right, idx) {
+    unison_stereo_step(self);
+    vec_set(out_left, idx, UnisonOscillator_out_left(self));
+    vec_set(out_right, idx, UnisonOscillator_out_right(self));
+    return 0;
+}
+
+# ================================================================
+# unison_next_sample_stereo -- next stereo pair, as a UnisonStereo pointer: 16
+# bytes per call, so a buffer loop uses unison_fill_buffer_stereo instead.
 # ================================================================
 #must_use
 fn unison_next_sample_stereo(self) {
-    var scratch_l = UnisonOscillator_scratch_l(self);
-    var scratch_r = UnisonOscillator_scratch_r(self);
-    unison_advance_stereo(self, scratch_l, scratch_r, 0);
+    unison_stereo_step(self);
     var out = alloc(sizeof(UnisonStereo));
-    UnisonStereo_set_left(out, vec_get(scratch_l, 0));
-    UnisonStereo_set_right(out, vec_get(scratch_r, 0));
+    UnisonStereo_set_left(out, UnisonOscillator_out_left(self));
+    UnisonStereo_set_right(out, UnisonOscillator_out_right(self));
     return out;
 }
 

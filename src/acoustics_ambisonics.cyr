@@ -91,20 +91,20 @@ fn naad_ambisonics_encode_sample_into(enc, input, s) {
 
 # ================================================================
 # naad_ambisonics_encode_buffer -- encode a whole mono `input` vec into the four
-# B-format channel vecs with ONE BFormatSample allocation for the entire buffer.
-# Writes min(len) samples per channel; extra capacity is left untouched.
-# Returns 0.
+# B-format channel vecs. Writes min(len) samples per channel; extra capacity is
+# left untouched. Returns 0. The working sample lives on the stack: this runs
+# per block, and alloc never frees.
 # ================================================================
 fn naad_ambisonics_encode_buffer(enc, input, w, x, y, z) {
     var n = vec_len(input);
-    var s = alloc(sizeof(BFormatSample));
+    var s[sizeof(BFormatSample)];
     var i = 0;
     while (i < n) {
-        naad_ambisonics_encode_sample_into(enc, vec_get(input, i), s);
-        if (i < vec_len(w)) { vec_set(w, i, BFormatSample_w(s)); }
-        if (i < vec_len(x)) { vec_set(x, i, BFormatSample_x(s)); }
-        if (i < vec_len(y)) { vec_set(y, i, BFormatSample_y(s)); }
-        if (i < vec_len(z)) { vec_set(z, i, BFormatSample_z(s)); }
+        naad_ambisonics_encode_sample_into(enc, vec_get(input, i), &s);
+        if (i < vec_len(w)) { vec_set(w, i, BFormatSample_w(&s)); }
+        if (i < vec_len(x)) { vec_set(x, i, BFormatSample_x(&s)); }
+        if (i < vec_len(y)) { vec_set(y, i, BFormatSample_y(&s)); }
+        if (i < vec_len(z)) { vec_set(z, i, BFormatSample_z(&s)); }
         i = i + 1;
     }
     return 0;

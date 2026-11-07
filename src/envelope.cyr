@@ -7,13 +7,14 @@
 # functions on the struct pointer. `Vec<EnvelopeSegment>` / `Vec<EnvelopePoint>`
 # -> stdlib `vec`s holding struct pointers.
 #
-# The Catmull-Rom envelope stays on the canonical hisab implementation: each
-# scalar control value is lifted into HVec3.x, run through calc_catmull_rom,
-# then HVec3_x taken back -- exactly as the Rust oracle lifts into Vec3::new.
+# The Catmull-Rom envelope evaluates hisab's spline formula here, on the x
+# component the Rust oracle lifts into Vec3, because hisab's calc_catmull_rom
+# allocates its result and alloc is a bump allocator with no free: per sample
+# that is a permanent leak. See _env_catmull_scalar.
 #
-# Requires (from the build/test unit): lib/hisab.cyr (hvec3_new / HVec3_x /
-# calc_catmull_rom), stdlib alloc/vec + math (F64_ONE, f64_min/clamp), and
-# error.cyr (validate_sample_rate, naad_is_err, NAAD_ERR_*). No `include` lines.
+# Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE,
+# f64_min/clamp) and error.cyr (validate_sample_rate, naad_is_err, naad_vec_copy,
+# NAAD_ERR_*). No `include` lines.
 
 # ================================================================
 # EnvelopeState -> integer constants (was `enum EnvelopeState`).
@@ -26,6 +27,16 @@ var ENV_STATE_RELEASE = 4;
 
 # Default sample rate shared by the `new` constructors (44100 Hz).
 var ENV_DEFAULT_SAMPLE_RATE = 44100;
+
+# ADSR preset values shared by the envelopes fm.cyr and subtractive.cyr build.
+var ENV_C0_01 = 0x3F847AE147AE147B;   # 0.01
+var ENV_C0_1  = 0x3FB999999999999A;   # 0.1
+var ENV_C0_3  = 0x3FD3333333333333;   # 0.3
+
+# Whole-number coefficients of the Catmull-Rom basis.
+var ENV_C3 = 0x4008000000000000;   # 3.0
+var ENV_C4 = 0x4010000000000000;   # 4.0
+var ENV_C5 = 0x4014000000000000;   # 5.0
 
 # ================================================================
 # Adsr -- Attack/Decay/Sustain/Release generator with linear segments.
@@ -218,8 +229,23 @@ struct MultiStageEnvelope {
     active;
 }
 
-# Create a multi-stage envelope at an explicit sample rate. Returns the struct
-# pointer on success, or a negative NAAD_ERR_* on empty segments / invalid rate.
+# A private copy of `segments`, elements included. Rust takes the Vec by value, so
+# the caller keeps no way to reach it; copying the vec alone would still share
+# the segment structs.
+fn _env_copy_segments(segments) {
+    var out = naad_vec_copy(segments);
+    var i = 0;
+    while (i < vec_len(out)) {
+        var s = vec_get(out, i);
+        vec_set(out, i, envelope_segment_new(EnvelopeSegment_target(s), EnvelopeSegment_duration(s)));
+        i = i + 1;
+    }
+    return out;
+}
+
+# Create a multi-stage envelope at an explicit sample rate. The envelope keeps its
+# own copy of `segments`. Returns the struct pointer on success, or a negative
+# NAAD_ERR_* on empty segments / invalid rate.
 #must_use
 fn envelope_multistage_with_sample_rate(segments, sample_rate) {
     if (vec_len(segments) == 0) { return NAAD_ERR_INVALID_PARAMETER; }
@@ -227,7 +253,7 @@ fn envelope_multistage_with_sample_rate(segments, sample_rate) {
     if (naad_is_err(e) == 1) { return e; }
 
     var self = alloc(sizeof(MultiStageEnvelope));
-    MultiStageEnvelope_set_segments(self, segments);
+    MultiStageEnvelope_set_segments(self, _env_copy_segments(segments));
     MultiStageEnvelope_set_sample_rate(self, sample_rate);
     MultiStageEnvelope_set_current_segment(self, 0);
     MultiStageEnvelope_set_current_value(self, 0);
@@ -320,27 +346,54 @@ fn envelope_point_new(time, value) {
 #   sample_rate     : Hz
 #   elapsed_samples : samples since trigger
 #   active          : 1 = producing values, 0 = stopped
+#   seg_hint        : segment index the next search starts from. t normally only
+#                     rises, so a segment it has left stays behind it. The search
+#                     checks that before trusting it: elapsed_samples is public.
 # ================================================================
 #derive(accessors)
-# lift0..lift3: scratch HVec3 lifts, allocated once. The oracle passes
-# Vec3::new(...) by value (Copy, stack-only, rust-old/src/envelope.rs:475-480);
-# hvec3_new is alloc(sizeof(HVec3)), and lib/alloc.cyr is a bump allocator with
-# NO individual free -- so lifting per sample was a 96 B/sample permanent leak,
-# ~4.6 MB/s at 48 kHz. Mutated in place via the derived setters instead.
 struct CatmullRomEnvelope {
     points;
     sample_rate;
     elapsed_samples;
     active;
-    lift0;
-    lift1;
-    lift2;
-    lift3;
+    seg_hint;
+}
+
+# Catmull-Rom on one scalar: hisab's calc_catmull_rom component formula, in its
+# exact operation order so the result matches it bit for bit, NaN and Inf included
+# (tests/envelope.tcyr holds the two side by side). Allocates nothing.
+#must_use
+fn _env_catmull_scalar(a, b, c, d, t) {
+    var t2 = f64_mul(t, t);
+    var t3 = f64_mul(t2, t);
+    var term0 = f64_mul(F64_TWO, b);
+    var term1 = f64_mul(f64_add(f64_neg(a), c), t);
+    var coeff2 = f64_sub(f64_add(f64_sub(f64_mul(F64_TWO, a), f64_mul(ENV_C5, b)),
+        f64_mul(ENV_C4, c)), d);
+    var term2 = f64_mul(coeff2, t2);
+    var coeff3 = f64_add(f64_sub(f64_add(f64_neg(a), f64_mul(ENV_C3, b)),
+        f64_mul(ENV_C3, c)), d);
+    var term3 = f64_mul(coeff3, t3);
+    return f64_mul(F64_HALF, f64_add(f64_add(f64_add(term0, term1), term2), term3));
+}
+
+# A private copy of `points`, elements included. The constructor validates the
+# time order once, so nothing outside the envelope may be able to change it later.
+fn _env_copy_points(points) {
+    var out = naad_vec_copy(points);
+    var i = 0;
+    while (i < vec_len(out)) {
+        var p = vec_get(out, i);
+        vec_set(out, i, envelope_point_new(EnvelopePoint_time(p), EnvelopePoint_value(p)));
+        i = i + 1;
+    }
+    return out;
 }
 
 # Build a Catmull-Rom envelope from control points (>= 2, strictly increasing
-# times). Returns the struct pointer on success, or a negative NAAD_ERR_* on
-# invalid points / non-monotone times / invalid sample rate.
+# times). The envelope keeps its own copy of `points`. Returns the struct pointer
+# on success, or a negative NAAD_ERR_* on invalid points / non-monotone times /
+# invalid sample rate.
 #must_use
 fn envelope_catmull_rom_new(points, sample_rate) {
     if (vec_len(points) < 2) { return NAAD_ERR_INVALID_PARAMETER; }
@@ -357,20 +410,18 @@ fn envelope_catmull_rom_new(points, sample_rate) {
     if (naad_is_err(e) == 1) { return e; }
 
     var self = alloc(sizeof(CatmullRomEnvelope));
-    CatmullRomEnvelope_set_points(self, points);
+    CatmullRomEnvelope_set_points(self, _env_copy_points(points));
     CatmullRomEnvelope_set_sample_rate(self, sample_rate);
     CatmullRomEnvelope_set_elapsed_samples(self, 0);
     CatmullRomEnvelope_set_active(self, 0);
-    CatmullRomEnvelope_set_lift0(self, hvec3_new(0, 0, 0));
-    CatmullRomEnvelope_set_lift1(self, hvec3_new(0, 0, 0));
-    CatmullRomEnvelope_set_lift2(self, hvec3_new(0, 0, 0));
-    CatmullRomEnvelope_set_lift3(self, hvec3_new(0, 0, 0));
+    CatmullRomEnvelope_set_seg_hint(self, 0);
     return self;
 }
 
 # Start the envelope from t = 0.
 fn envelope_catmull_rom_trigger(self) {
     CatmullRomEnvelope_set_elapsed_samples(self, 0);
+    CatmullRomEnvelope_set_seg_hint(self, 0);
     CatmullRomEnvelope_set_active(self, 1);
     return 0;
 }
@@ -404,17 +455,21 @@ fn envelope_catmull_rom_next_value(self) {
         return EnvelopePoint_value(first);
     }
 
-    # Locate the segment [i, i+1] containing t (first k with t < points[k+1].time).
+    # Locate the segment [i, i+1] containing t: the first k with t < points[k+1].time,
+    # or 0 if none matches. Times rise, so every k below the hint fails while t has
+    # not fallen below points[hint].time.
     var i = 0;
-    var found = 0;
-    var k = 0;
+    var k = CatmullRomEnvelope_seg_hint(self);
+    if (k >= n - 1) {
+        k = 0;
+    } elif (f64_lt(t, EnvelopePoint_time(vec_get(points, k))) == 1) {
+        k = 0;
+    }
     while (k < n - 1) {
-        if (found == 0) {
-            var nxt = vec_get(points, k + 1);
-            if (f64_lt(t, EnvelopePoint_time(nxt)) == 1) {
-                i = k;
-                found = 1;
-            }
+        if (f64_lt(t, EnvelopePoint_time(vec_get(points, k + 1))) == 1) {
+            i = k;
+            CatmullRomEnvelope_set_seg_hint(self, k);
+            break;
         }
         k = k + 1;
     }
@@ -431,19 +486,8 @@ fn envelope_catmull_rom_next_value(self) {
     var t2 = EnvelopePoint_time(p2);
     var u = f64_clamp(f64_div(f64_sub(t, t1), f64_sub(t2, t1)), 0, F64_ONE);
 
-    # Lift each scalar value into HVec3.x, run hisab's catmull_rom, take .x back.
-    # The four lifts are struct-owned and reused; only calc_catmull_rom's own
-    # result HVec3 still allocates, and that one lives in lib/hisab.cyr.
-    var v0 = CatmullRomEnvelope_lift0(self);
-    var v1 = CatmullRomEnvelope_lift1(self);
-    var v2 = CatmullRomEnvelope_lift2(self);
-    var v3 = CatmullRomEnvelope_lift3(self);
-    HVec3_set_x(v0, EnvelopePoint_value(p0));
-    HVec3_set_x(v1, EnvelopePoint_value(p1));
-    HVec3_set_x(v2, EnvelopePoint_value(p2));
-    HVec3_set_x(v3, EnvelopePoint_value(p3));
-    var lifted = calc_catmull_rom(v0, v1, v2, v3, u);
-    return HVec3_x(lifted);
+    return _env_catmull_scalar(EnvelopePoint_value(p0), EnvelopePoint_value(p1),
+      EnvelopePoint_value(p2), EnvelopePoint_value(p3), u);
 }
 
 # Whether the envelope is currently producing values. Returns 1/0.

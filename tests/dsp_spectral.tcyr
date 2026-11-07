@@ -1,5 +1,5 @@
 # dsp_spectral.tcyr -- parity tests for src/dsp_spectral.cyr (the hisab-interop
-# spectral/analysis block deferred out of dsp_util). Ports every
+# spectral/analysis half of dsp_util). Ports every
 # `#[cfg(feature="synthesis")]` #[test] from rust-old/src/dsp_util.rs
 # one-for-one (serde tests dropped; eval_polynomial tests stay in dsp_util).
 # f32 -> f64; oracle tolerances kept (loosened only where the oracle already
@@ -413,6 +413,233 @@ assert_eq(vec_len(fit_polynomial(nxs, nys, 0 - 1)), 0, "fit_polynomial(degree=-1
 assert_eq(vec_len(fit_polynomial(nxs, nys, 0 - 7)), 0, "fit_polynomial(degree=-7) -> empty vec");
 # Control: the same data at a valid degree still fits.
 assert_eq(vec_len(fit_polynomial(nxs, nys, 1)), 2, "control: degree 1 still returns 2 coefficients");
+
+# ================================================================
+# A deterministic non-silent test signal: a ramp folded into [0, 1).
+fn ramp17(i) { return f64_div(f64_from(i % 17), f64_from(17)); }
+
+test_group("fft length is checked before anything is allocated");
+# Header-only vecs: the claimed length is what the guards see, and nothing may
+# read or store a sample before those guards pass. A non-power-of-two length has
+# no transform, and 2^28 is a valid length alloc refuses (16 bytes per bin, over
+# ALLOC_MAX). Both end in the empty vec, not in a store through a null buffer.
+fn fake_len_vec(n) {
+    var v = vec_new();
+    store64(v + 8, n);
+    return v;
+}
+var D1_NOT_POW2 = 134217729;    # 2^27 + 1
+var D1_REFUSED  = 268435456;    # 2^28
+assert_eq(vec_len(fft_magnitudes(fake_len_vec(D1_NOT_POW2))), 0, "fft_magnitudes: non-power-of-two length -> empty");
+assert_eq(vec_len(power_spectrum(fake_len_vec(D1_NOT_POW2))), 0, "power_spectrum: non-power-of-two length -> empty");
+assert_eq(vec_len(fft_magnitudes(fake_len_vec(D1_REFUSED))), 0, "fft_magnitudes: refused allocation -> empty");
+assert_eq(vec_len(power_spectrum(fake_len_vec(D1_REFUSED))), 0, "power_spectrum: refused allocation -> empty");
+assert_eq(vec_len(fft_magnitudes(vec_new())), 0, "fft_magnitudes: empty input -> empty");
+assert_eq(vec_len(power_spectrum(vec_new())), 0, "power_spectrum: empty input -> empty");
+# A length that fits alloc must still be refused before it costs a buffer.
+var D1_FITS = 1048577;          # 2^20 + 1
+var d1_used = alloc_used();
+var d1_sink = fft_magnitudes(fake_len_vec(D1_FITS));
+d1_sink = power_spectrum(fake_len_vec(D1_FITS));
+assert(alloc_used() - d1_used < 1024, "a non-power-of-two length allocates no FFT buffer");
+# Control: the guards must not refuse the lengths num_fft accepts.
+var d1_one = vec_new();
+vec_push(d1_one, T_0_5);
+assert_eq(vec_len(fft_magnitudes(d1_one)), 1, "control: a 1-point input still returns 1 bin");
+assert_eq(vec_len(power_spectrum(d1_one)), 1, "control: a 1-point input still returns 1 bin");
+var d1_three = vec_new();
+vec_push(d1_three, T_0_5); vec_push(d1_three, T_0_5); vec_push(d1_three, T_0_5);
+assert_eq(vec_len(fft_magnitudes(d1_three)), 0, "a real 3-point input is refused, as num_fft refuses it");
+
+# ================================================================
+test_group("a non-positive hop or window is refused");
+# `usize` parameters in the oracle, so `== 0` was its whole lower bound.
+var d6_sig = vec_new();
+var d6_i = 0;
+while (d6_i < 1024) { vec_push(d6_sig, ramp17(d6_i)); d6_i = d6_i + 1; }
+assert_eq(vec_len(stft_magnitudes(d6_sig, 1024, 0 - 256, WINDOW_HANN)), 0, "stft: negative hop -> empty");
+assert_eq(vec_len(stft_magnitudes(d6_sig, 1024, 0, WINDOW_HANN)), 0, "stft: zero hop -> empty");
+assert_eq(vec_len(stft_magnitudes(d6_sig, 1024, 1, WINDOW_HANN)), 1, "control: hop 1, signal == window: 1 frame");
+var d6_mag = stft_magnitudes(d6_sig, 64, 64, WINDOW_HANN);
+assert(vec_len(d6_mag) >= 3, "control: enough frames to reach the hop guard");
+assert_eq(vec_len(detect_onsets(d6_mag, 0 - 256, f64_from(44100), F64_ONE)), 0, "onsets: negative hop -> empty");
+assert_eq(vec_len(detect_onsets(d6_mag, 0, f64_from(44100), F64_ONE)), 0, "onsets: zero hop -> empty");
+assert_eq(vec_len(naad_chromagram(d6_mag, 0 - 64, f64_from(44100))), 0, "chroma: negative window -> empty");
+assert_eq(vec_len(naad_chromagram(d6_mag, 0, f64_from(44100))), 0, "chroma: zero window -> empty");
+var d6_chroma = naad_chromagram(d6_mag, 64, f64_from(44100));
+assert_eq(vec_len(d6_chroma), vec_len(d6_mag), "control: a valid window keeps every frame");
+
+# ================================================================
+test_group("the Q factor is allocated by column");
+# 4 x (2^26 + 1) doubles is 2 GiB + 32 bytes, past what alloc grants in one
+# request, while each column is 512 MiB. Rust fits this size, so the only limit
+# here may be one column. The full-size fit needs over 6 GiB, too much for this
+# suite, so the storage it depends on is what is pinned: every column usable end
+# to end, and none overlapping. Only the touched pages become resident.
+var d4_m = 67108865;
+var d4_n = 4;
+var d4_q = _dsp_alloc_columns(d4_n, d4_m);
+assert(d4_q != 0, "columns are granted past what one block could be");
+var d4_ok = 1;
+if (d4_q != 0) {
+    var d4_j = 0;
+    while (d4_j < d4_n) {
+        var d4_col = load64(d4_q + d4_j * 8);
+        if (d4_col == 0) { d4_ok = 0; }
+        store64(d4_col, d4_j + 1);
+        store64(d4_col + (d4_m - 1) * 8, d4_j + 101);
+        d4_j = d4_j + 1;
+    }
+    d4_j = 0;
+    while (d4_j < d4_n) {
+        var d4_c2 = load64(d4_q + d4_j * 8);
+        if (load64(d4_c2) != d4_j + 1) { d4_ok = 0; }
+        if (load64(d4_c2 + (d4_m - 1) * 8) != d4_j + 101) { d4_ok = 0; }
+        d4_j = d4_j + 1;
+    }
+}
+assert_eq(d4_ok, 1, "each column holds both of its ends independently");
+assert_eq(_dsp_alloc_columns(2, 268435457), 0, "a column alloc refuses is refused for the whole Q");
+
+# ================================================================
+test_group("stft allocates its output and one set of scratch");
+# Rust reuses one frame buffer across the loop. The bump allocator frees nothing,
+# so a buffer made per frame is permanent: the only per-frame cost allowed is the
+# frame's own vec, a 152-byte vec_new plus its bins, and one slot in the outer vec.
+fn d7_stft_bytes(sig) {
+    var before = alloc_used();
+    var frames = stft_magnitudes(sig, 2048, 512, WINDOW_HANN);
+    var used = alloc_used() - before;
+    assert_eq(vec_len(frames), (vec_len(sig) - 2048) / 512 + 1, "frame count is unchanged");
+    return used;
+}
+# n samples of the folded ramp, as a vec.
+fn d7_signal(n) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) { vec_push(v, ramp17(i)); i = i + 1; }
+    return v;
+}
+var D7_FRAME_COST = 152 + 1025 * 8 + 8;
+var d7_small = d7_stft_bytes(d7_signal(2048 + 512 * 39));    # 40 frames
+var d7_large = d7_stft_bytes(d7_signal(2048 + 512 * 119));   # 120 frames
+assert(d7_large - d7_small <= 80 * D7_FRAME_COST, "80 more frames cost 80 outputs and nothing else");
+# One frame vec, one FFT buffer and the outer vec, on top of the output.
+var D7_SCRATCH = 2048 * 8 + 2048 * 16 + 3 * 152 + 120 * 8;
+assert(d7_large <= 120 * D7_FRAME_COST + D7_SCRATCH, "total is the output plus one set of scratch");
+
+# ================================================================
+test_group("the per-sample B-spline core matches calc_bspline bit for bit");
+# _bspline_eval_1d_into repeats calc_bspline's arithmetic on the x component so
+# that it can run without allocating. This grid is what holds the two together:
+# every comparison is on raw bits, NaN results included. Knots are rebuilt here
+# so that a mistake in _bspline_knots cannot hide in both sides.
+fn bs_ref(degree, cp, t) {
+    var n = vec_len(cp);
+    var knots = alloc((n + degree + 2) * 8);
+    var idx = 0;
+    var i = 0;
+    while (i <= degree) { store64(knots + idx * 8, 0); idx = idx + 1; i = i + 1; }
+    var ic = n - degree - 1;
+    i = 1;
+    while (i <= ic) {
+        store64(knots + idx * 8, f64_div(f64_from(i), f64_from(ic + 1)));
+        idx = idx + 1;
+        i = i + 1;
+    }
+    i = 0;
+    while (i <= degree) { store64(knots + idx * 8, F64_ONE); idx = idx + 1; i = i + 1; }
+    var cps = alloc((n + 1) * 8);
+    i = 0;
+    while (i < n) { store64(cps + i * 8, hvec3_new(vec_get(cp, i), 0, 0)); i = i + 1; }
+    var res = calc_bspline(degree, cps, n, knots, n + degree + 1, t);
+    if (res == 0) { return SPEC_NAN; }
+    return HVec3_x(res);
+}
+# n control points: plain values, then a NaN, an infinity, the largest double, or
+# all -0.0, by `kind`, since the bits must match on non-finite data too.
+fn bs_cps(kind, n) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) {
+        var x = f64_sub(f64_mul(ramp17(i * 7 + kind), F64_TWO), F64_ONE);
+        if (kind == 1 && i == n / 2) { x = SPEC_NAN; }
+        if (kind == 2 && i == n / 2) { x = 0x7FF0000000000000; }
+        if (kind == 3 && i % 2 == 0) { x = 0x7FEFFFFFFFFFFFFF; }
+        if (kind == 4) { x = 0x8000000000000000; }
+        vec_push(v, x);
+        i = i + 1;
+    }
+    return v;
+}
+# Parameter values for a curve: the edges and just past them, NaN, infinities,
+# a uniform sweep, and every interior knot.
+fn bs_ts(n, degree) {
+    var v = vec_new();
+    vec_push(v, 0); vec_push(v, 0x8000000000000000); vec_push(v, F64_ONE);
+    vec_push(v, SPEC_NAN); vec_push(v, 0xFFF8000000000000);
+    vec_push(v, 0x7FF0000000000000); vec_push(v, 0xFFF0000000000000);
+    vec_push(v, 0x8000000000000001); vec_push(v, 0x3FF0000000000001); vec_push(v, 0x3FEFFFFFFFFFFFFF);
+    vec_push(v, T_N0_1); vec_push(v, T_1_1);
+    var i = 0;
+    while (i <= 32) { vec_push(v, f64_div(f64_from(i), f64_from(32))); i = i + 1; }
+    # Each interior knot and its two neighbours, where the span choice turns.
+    var ic = n - degree - 1;
+    i = 1;
+    while (i <= ic) {
+        var kv = f64_div(f64_from(i), f64_from(ic + 1));
+        vec_push(v, kv); vec_push(v, kv + 1); vec_push(v, kv - 1);
+        i = i + 1;
+    }
+    return v;
+}
+var bs_knots = alloc(64 * 8);
+var bs_work = alloc(64 * 8);
+var bs_bad = 0;
+var bs_seen = 0;
+var bs_finite = 0;
+var bs_d = 0;
+while (bs_d <= 7) {
+    var bs_n = 1;
+    while (bs_n <= 12) {
+        var bs_k = 0;
+        while (bs_k <= 4) {
+            var bs_cp = bs_cps(bs_k, bs_n);
+            var bs_t = bs_ts(bs_n, bs_d);
+            var bs_i = 0;
+            while (bs_i < vec_len(bs_t)) {
+                var bs_a = _bspline_eval_1d_into(bs_d, bs_cp, vec_get(bs_t, bs_i), bs_knots, bs_work);
+                var bs_b = bs_ref(bs_d, bs_cp, vec_get(bs_t, bs_i));
+                bs_seen = bs_seen + 1;
+                if (bs_a != bs_b) { bs_bad = bs_bad + 1; }
+                if (naad_is_finite(bs_b) == 1) { bs_finite = bs_finite + 1; }
+                bs_i = bs_i + 1;
+            }
+            bs_k = bs_k + 1;
+        }
+        bs_n = bs_n + 1;
+    }
+    bs_d = bs_d + 1;
+}
+assert_eq(bs_bad, 0, "no raw-bit difference over the whole grid");
+assert(bs_seen > 20000, "the grid is the size it claims");
+assert(bs_finite > 5000, "the grid is not all NaN");
+
+# ================================================================
+test_group("the per-sample B-spline core allocates nothing");
+var bs_cp4 = bs_cps(0, 8);
+var bs_used = alloc_used();
+var bs_sink = 0;
+var bs_c = 0;
+while (bs_c < 1000) {
+    bs_sink = _bspline_eval_1d_into(3, bs_cp4, T_0_25, bs_knots, bs_work);
+    bs_c = bs_c + 1;
+}
+assert_eq(alloc_used() - bs_used, 0, "1000 evaluations allocate nothing");
+bs_sink = _bspline_eval_1d_into(0 - 1, bs_cp4, T_0_25, bs_knots, bs_work);
+assert_eq(bs_sink, SPEC_NAN, "negative degree -> None");
+bs_sink = _bspline_eval_1d_into(8, bs_cp4, T_0_25, bs_knots, bs_work);
+assert_eq(bs_sink, SPEC_NAN, "too few control points -> None");
 
 var rc = assert_summary();
 syscall(60, rc);

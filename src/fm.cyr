@@ -16,8 +16,8 @@
 # Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE/HALF/
 # TAU, f64_clamp), builtins (f64_add/sub/mul/div/sin/floor/from/lt/gt),
 # error.cyr (validate_sample_rate, flush_denormal, naad_is_err, NAAD_ERR_*), and
-# envelope.cyr (envelope_adsr_with_sample_rate/next_value/gate_on/gate_off/
-# is_active). No `include` lines.
+# envelope.cyr (ENV_C0_*, envelope_adsr_with_sample_rate/next_value/gate_on/
+# gate_off/is_active). No `include` lines.
 
 # ================================================================
 # Maximum number of FM operators supported (was const MAX_OPERATORS).
@@ -39,12 +39,10 @@ var FM_ALGO_STACK4    = 3;
 var FM_ALGO_CUSTOM    = 4;
 
 # ================================================================
-# Default ADSR parameters for a new operator (IEEE-754 bit patterns).
+# Default sustain level for a new operator (IEEE-754 bit pattern). Its attack,
+# decay and release come from envelope.cyr's ENV_C0_01 / ENV_C0_1 / ENV_C0_3.
 # ================================================================
-var FM_C0_01 = 0x3f847ae147ae147b;   # 0.01 (attack seconds)
-var FM_C0_1  = 0x3fb999999999999a;   # 0.1  (decay seconds)
 var FM_C0_8  = 0x3fe999999999999a;   # 0.8  (sustain level)
-var FM_C0_3  = 0x3fd3333333333333;   # 0.3  (release seconds)
 
 # Default operator frequency (440 Hz) as an integer literal.
 var FM_DEFAULT_FREQ = 440;
@@ -75,7 +73,7 @@ struct FmOperator {
 # on success, or a negative NAAD_ERR_* if the envelope/sample_rate is invalid.
 #must_use
 fn fm_operator_new(frequency, sample_rate) {
-    var envelope = envelope_adsr_with_sample_rate(FM_C0_01, FM_C0_1, FM_C0_8, FM_C0_3, sample_rate);
+    var envelope = envelope_adsr_with_sample_rate(ENV_C0_01, ENV_C0_1, FM_C0_8, ENV_C0_3, sample_rate);
     if (naad_is_err(envelope) == 1) { return envelope; }
 
     var self = alloc(sizeof(FmOperator));
@@ -189,8 +187,12 @@ fn fm_engine_new(num_operators, sample_rate) {
     return self;
 }
 
-# Set the routing algorithm.
+# Set the routing algorithm. Returns 0, or NAAD_ERR_INVALID_PARAMETER with the
+# algorithm unchanged if `algorithm` is not an FM_ALGO_* constant: Rust's enum
+# cannot hold such a value, and next_sample would run it as CUSTOM unannounced.
 fn fm_engine_set_algorithm(self, algorithm) {
+    if (algorithm < FM_ALGO_SERIAL2) { return NAAD_ERR_INVALID_PARAMETER; }
+    if (algorithm > FM_ALGO_CUSTOM) { return NAAD_ERR_INVALID_PARAMETER; }
     FmSynthEngine_set_algorithm(self, algorithm);
     return 0;
 }

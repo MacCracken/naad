@@ -22,12 +22,10 @@
 # src/acoustics_room.cyr. Result<Self> -> struct pointer on success or a
 # negative NAAD_ERR_COMPUTATION on unknown material / non-positive dimensions.
 #
-# Requires (from the build/test unit): stdlib alloc + math (f64_le), hisab
-# (hvec3_new), the goonj bundle (portal_new, acoustic_room_shoebox,
-# CoupledRooms, coupled_room_decay, CoupledDecay_*), and the naad L0 modules
-# error.cyr (NAAD_ERR_COMPUTATION, naad_is_err) + acoustics.cyr
-# (naad_acoustics_material_by_name) + acoustics_room.cyr (RoomReverbConfig_*).
-# This file has no `include` lines.
+# Requires (from the build/test unit): stdlib alloc, hisab (hvec3_new), the goonj
+# bundle (portal_new, CoupledRooms, coupled_room_decay, CoupledDecay_*), and the
+# naad L0 modules error.cyr (NAAD_ERR_COMPUTATION, naad_is_err) + acoustics_room.cyr
+# (RoomReverbConfig_*, _naad_room_build). This file has no `include` lines.
 
 # ================================================================
 # CoupledPortal -- a portal opening connecting two rooms.
@@ -108,15 +106,7 @@ struct CoupledDecayResult {
 # ================================================================
 #must_use
 fn naad_coupled_build_room(config) {
-    var material = naad_acoustics_material_by_name(RoomReverbConfig_wall_material_name(config));
-    if (material == 0) { return NAAD_ERR_COMPUTATION; }
-
-    if (f64_le(RoomReverbConfig_length(config), 0) == 1) { return NAAD_ERR_COMPUTATION; }
-    if (f64_le(RoomReverbConfig_width(config), 0) == 1) { return NAAD_ERR_COMPUTATION; }
-    if (f64_le(RoomReverbConfig_height(config), 0) == 1) { return NAAD_ERR_COMPUTATION; }
-
-    return acoustic_room_shoebox(RoomReverbConfig_length(config),
-      RoomReverbConfig_width(config), RoomReverbConfig_height(config), material);
+    return _naad_room_build(config);
 }
 
 # ================================================================

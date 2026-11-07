@@ -81,9 +81,14 @@ A third hazard was added by the 2.1.3 sweep:
 
 ⚠ **An untrusted sample rate needs a bound of its own.** Room, convolution and binaural
 impulse responses are sized from it. naad refuses a rate goonj would clamp, but below
-that an IR costs about 165 B per Hz for room and convolution and about 27 B per Hz for
+that an IR costs about 160 B per Hz for room and convolution and about 18 B per Hz for
 binaural, and running out of that memory ends the process. A 32 MHz room fails under a
 4 GiB limit.
+
+A refused allocation inside naad stops at the null page. That was measured at 2.3.2, not
+assumed: all 926 faults across 638 refusal points and 450 zero-argument calls landed
+there, with no silent wrong answer and no hang. See
+[ADR-0006](docs/adr/0006-refused-allocation-stops-at-the-null-page.md).
 
 2.1.3 also closed the largest availability issue: `lib/alloc.cyr` is a bump
 allocator with **no individual free**, so a per-call allocation on a streaming

@@ -325,5 +325,42 @@ assert_eq(_dt_kick_streams_match(512), 1, "kick: 512 samples bit-identical via b
 assert_eq(_dt_snare_streams_match(512), 1, "snare: 512 samples bit-identical via both paths");
 assert_eq(_dt_hat_streams_match(512), 1, "hi-hat: 512 samples bit-identical via both paths");
 
+# ================================================================
+test_group("hi-hat open flag is a bool");
+assert(drum_hihat_new(0, f64_from(SR)) > 0, "closed is valid");
+assert(drum_hihat_new(1, f64_from(SR)) > 0, "open is valid");
+assert_eq(drum_hihat_new(2, f64_from(SR)), NAAD_ERR_INVALID_PARAMETER, "2 is refused, not read as closed");
+assert_eq(drum_hihat_new(0 - 1, f64_from(SR)), NAAD_ERR_INVALID_PARAMETER, "-1 is refused");
+
+# ================================================================
+test_group("constant oscillators advance by frequency / sample_rate");
+var dinc_sn = drum_snare_new(f64_from(SR));
+drum_snare_trigger(dinc_sn);
+var dinc_x = drum_snare_next_sample(dinc_sn);
+assert_eq(SnareDrum_phase(dinc_sn), f64_div(f64_from(200), f64_from(SR)), "snare phase after one sample");
+var dinc_hh = drum_hihat_new(0, f64_from(SR));
+drum_hihat_trigger(dinc_hh);
+dinc_x = drum_hihat_next_sample(dinc_hh);
+var dinc_i = 0;
+while (dinc_i < DRUM_HIHAT_OSCILLATORS) {
+    assert_eq(vec_get(HiHat_phases(dinc_hh), dinc_i),
+      f64_div(vec_get(HiHat_frequencies(dinc_hh), dinc_i), f64_from(SR)), "hi-hat phase after one sample");
+    dinc_i = dinc_i + 1;
+}
+
+# ================================================================
+test_group("derived setters reach the next sample");
+var dsn = drum_snare_new(f64_from(44100));
+drum_snare_trigger(dsn);
+SnareDrum_set_tone_freq(dsn, f64_from(441));
+var dsn_s = drum_snare_next_sample(dsn);
+assert_eq(SnareDrum_phase(dsn), f64_div(f64_from(441), f64_from(44100)), "SnareDrum_set_tone_freq");
+var dhh = drum_hihat_new(0, f64_from(44100));
+drum_hihat_trigger(dhh);
+HiHat_set_sample_rate(dhh, f64_from(22050));
+var dhh_s = drum_hihat_next_sample(dhh);
+assert_eq(vec_get(HiHat_phases(dhh), 0), f64_div(vec_get(HiHat_frequencies(dhh), 0), f64_from(22050)),
+  "HiHat_set_sample_rate");
+
 var rc = assert_summary();
 syscall(60, rc);

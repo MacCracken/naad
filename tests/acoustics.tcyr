@@ -17,6 +17,59 @@ assert(naad_acoustics_material_by_name("curtain") != 0, "curtain resolves");
 assert(naad_acoustics_material_by_name("drywall") != 0, "drywall resolves");
 assert(naad_acoustics_material_by_name("tile") != 0, "tile resolves");
 assert_eq(naad_acoustics_material_by_name("unobtainium"), 0, "unknown name -> None(0)");
+assert_eq(naad_acoustics_material_by_name(0), 0, "null name -> None(0), not a read of page 0");
+
+# ================================================================
+# The ring convolution must visit the taps in the order the modular form gives:
+# floating-point addition does not associate, so the same taps in
+# another order are not the same bits. The ring here is longer than the IR at
+# some positions, as the binaural rings are for a shorter ear.
+test_group("ring_convolve_matches_the_modular_form");
+# The sum written with the modular index, read through bounds-checked vec_get.
+fn rc_reference(ring, pos, ir) {
+    var n = vec_len(ring);
+    var out = 0;
+    var k = 0;
+    while (k < vec_len(ir)) {
+        var idx = (pos + n - k) % n;
+        out = f64_add(out, f64_mul(vec_get(ring, idx), vec_get(ir, k)));
+        k = k + 1;
+    }
+    return out;
+}
+# A deterministic `n`-element vec of non-round values.
+fn rc_vec(n, seed) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) {
+        vec_push(v, f64_div(f64_from((i + 1) * seed % 97 - 48), f64_from(7)));
+        i = i + 1;
+    }
+    return v;
+}
+var rc_same = 1;
+var rc_cases = 0;
+var rc_n = 1;
+while (rc_n <= 9) {
+    var rc_ring = rc_vec(rc_n, 31);
+    var rc_m = 1;
+    while (rc_m <= rc_n) {
+        var rc_ir = rc_vec(rc_m, 53);
+        var rc_pos = 0;
+        while (rc_pos < rc_n) {
+            if (_naad_ring_convolve(rc_ring, rc_pos, rc_ir) != rc_reference(rc_ring, rc_pos, rc_ir)) { rc_same = 0; }
+            rc_cases = rc_cases + 1;
+            rc_pos = rc_pos + 1;
+        }
+        rc_m = rc_m + 1;
+    }
+    rc_n = rc_n + 1;
+}
+assert_eq(rc_cases, 285, "every ring length, IR length and position was tried");
+assert_eq(rc_same, 1, "ring convolution == modular form, bit for bit");
+var rc_one = vec_new();
+vec_push(rc_one, F64_TWO);
+assert_eq(_naad_ring_convolve(rc_one, 0, vec_new()), 0, "an empty IR sums to +0.0");
 
 var rc = assert_summary();
 syscall(60, rc);

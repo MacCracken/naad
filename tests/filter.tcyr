@@ -308,5 +308,107 @@ filter_svf_process_buffer_lowpass(pbf, pone);
 var pone_want = filter_svf_process_sample_lowpass(pbr, F64_HALF);
 assert_eq(vec_get(pone, 0), pone_want, "a one-element buffer advances by exactly one sample");
 
+# ================================================================
+test_group("svf into form");
+# The caller-owned form gives the allocating form's four outputs to the bit, and
+# a per-sample loop over it takes no heap.
+var into_a = filter_svf_new(f64_from(FREQ_1K), C0_707, f64_from(SR));
+var into_b = filter_svf_new(f64_from(FREQ_1K), C0_707, f64_from(SR));
+var into_out = alloc(sizeof(SvfOutput));
+var into_same = 1;
+var into_i = 0;
+while (into_i < 64) {
+    var into_x = f64_div(f64_from((into_i * 37) % 64 - 32), f64_from(32));
+    var into_want = filter_svf_process_sample(into_a, into_x);
+    filter_svf_process_sample_into(into_b, into_x, into_out);
+    if (SvfOutput_low_pass(into_out) != SvfOutput_low_pass(into_want)) { into_same = 0; }
+    if (SvfOutput_high_pass(into_out) != SvfOutput_high_pass(into_want)) { into_same = 0; }
+    if (SvfOutput_band_pass(into_out) != SvfOutput_band_pass(into_want)) { into_same = 0; }
+    if (SvfOutput_notch(into_out) != SvfOutput_notch(into_want)) { into_same = 0; }
+    into_i = into_i + 1;
+}
+assert_eq(into_same, 1, "all four outputs match the allocating form");
+assert_eq(StateVariableFilter_ic1eq(into_a), StateVariableFilter_ic1eq(into_b), "both forms leave the same ic1eq");
+assert_eq(StateVariableFilter_ic2eq(into_a), StateVariableFilter_ic2eq(into_b), "both forms leave the same ic2eq");
+# Pins the outputs against the state-variable identity, independently of the
+# allocating form: low + high + k * band reconstructs the input.
+filter_svf_process_sample_into(into_b, F64_ONE, into_out);
+var into_lh = f64_add(SvfOutput_low_pass(into_out), SvfOutput_high_pass(into_out));
+var into_sum = f64_add(into_lh, f64_mul(StateVariableFilter_k(into_b), SvfOutput_band_pass(into_out)));
+assert(f64_lt(f64_abs(f64_sub(into_sum, F64_ONE)), NAAD_EPSILON), "low + high + k*band rebuilds the input");
+# The allocating form wraps this one, so comparing them cannot catch a fault they
+# share. This model is the oracle's process_sample written out with its own state.
+var ref_f = filter_svf_new(f64_from(FREQ_1K), C0_707, f64_from(SR));
+var ref_a1 = StateVariableFilter_a1(ref_f);
+var ref_a2 = StateVariableFilter_a2(ref_f);
+var ref_a3 = StateVariableFilter_a3(ref_f);
+var ref_k = StateVariableFilter_k(ref_f);
+var ref_ic1 = 0;
+var ref_ic2 = 0;
+var ref_same = 1;
+into_i = 0;
+while (into_i < 64) {
+    var ref_x = f64_div(f64_from((into_i * 37) % 64 - 32), f64_from(32));
+    var ref_v3 = f64_sub(ref_x, ref_ic2);
+    var ref_v1 = f64_add(f64_mul(ref_a1, ref_ic1), f64_mul(ref_a2, ref_v3));
+    var ref_v2 = f64_add(f64_add(ref_ic2, f64_mul(ref_a2, ref_ic1)), f64_mul(ref_a3, ref_v3));
+    ref_ic1 = flush_denormal(f64_sub(f64_mul(F64_TWO, ref_v1), ref_ic1));
+    ref_ic2 = flush_denormal(f64_sub(f64_mul(F64_TWO, ref_v2), ref_ic2));
+    var ref_high = f64_sub(f64_sub(ref_x, f64_mul(ref_k, ref_v1)), ref_v2);
+    filter_svf_process_sample_into(ref_f, ref_x, into_out);
+    if (SvfOutput_low_pass(into_out) != ref_v2) { ref_same = 0; }
+    if (SvfOutput_band_pass(into_out) != ref_v1) { ref_same = 0; }
+    if (SvfOutput_high_pass(into_out) != ref_high) { ref_same = 0; }
+    if (SvfOutput_notch(into_out) != f64_add(ref_v2, ref_high)) { ref_same = 0; }
+    into_i = into_i + 1;
+}
+assert_eq(ref_same, 1, "all four outputs match the oracle's equations to the bit");
+var into_used = alloc_used();
+into_i = 0;
+while (into_i < 1000) {
+    filter_svf_process_sample_into(into_b, F64_HALF, into_out);
+    into_i = into_i + 1;
+}
+assert_eq(alloc_used() - into_used, 0, "1000 samples take no heap");
+
+# ================================================================
+test_group("buffer paths match the sample paths");
+# Each buffer loop keeps its state in locals, so what must be pinned is the output
+# to the bit and the state it hands back. A second buffer proves the state resumes.
+var bp_a = filter_biquad_with_gain(NAAD_FILTER_PEAK, f64_from(SR), f64_from(FREQ_1K), F64_ONE, f64_from(6));
+var bp_b = filter_biquad_with_gain(NAAD_FILTER_PEAK, f64_from(SR), f64_from(FREQ_1K), F64_ONE, f64_from(6));
+var sp_a = filter_svf_new(f64_from(FREQ_1K), C0_707, f64_from(SR));
+var sp_b = filter_svf_new(f64_from(FREQ_1K), C0_707, f64_from(SR));
+var bq_buf = naad_vec_zeros(64);
+var sv_buf = naad_vec_zeros(64);
+var bq_ok = 1;
+var sv_ok = 1;
+var bp_round = 0;
+while (bp_round < 2) {
+    var bp_i = 0;
+    while (bp_i < 64) {
+        var bp_x = f64_div(f64_from((bp_i * 29) % 64 - 32), f64_from(32));
+        vec_set(bq_buf, bp_i, bp_x);
+        vec_set(sv_buf, bp_i, bp_x);
+        bp_i = bp_i + 1;
+    }
+    filter_biquad_process_buffer(bp_b, bq_buf);
+    filter_svf_process_buffer_lowpass(sp_b, sv_buf);
+    bp_i = 0;
+    while (bp_i < 64) {
+        var bp_y = f64_div(f64_from((bp_i * 29) % 64 - 32), f64_from(32));
+        if (filter_biquad_process_sample(bp_a, bp_y) != vec_get(bq_buf, bp_i)) { bq_ok = 0; }
+        if (filter_svf_process_sample_lowpass(sp_a, bp_y) != vec_get(sv_buf, bp_i)) { sv_ok = 0; }
+        bp_i = bp_i + 1;
+    }
+    bp_round = bp_round + 1;
+}
+assert_eq(bq_ok, 1, "biquad buffer output matches across two buffers");
+assert_eq(sv_ok, 1, "svf buffer output matches across two buffers");
+assert_eq(BiquadFilter_z1(bp_b), BiquadFilter_z1(bp_a), "biquad buffer hands back z1");
+assert_eq(BiquadFilter_z2(bp_b), BiquadFilter_z2(bp_a), "biquad buffer hands back z2");
+assert_eq(StateVariableFilter_ic1eq(sp_b), StateVariableFilter_ic1eq(sp_a), "svf buffer hands back ic1eq");
+assert_eq(StateVariableFilter_ic2eq(sp_b), StateVariableFilter_ic2eq(sp_a), "svf buffer hands back ic2eq");
+
 var rc = assert_summary();
 syscall(60, rc);

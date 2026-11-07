@@ -7,6 +7,7 @@ include "lib/hisab.cyr"
 include "lib/goonj.cyr"
 include "src/error.cyr"
 include "src/dsp_util.cyr"
+include "src/delay.cyr"
 include "src/acoustics_fdn.cyr"
 
 alloc_init();
@@ -390,6 +391,39 @@ while (fr_i < 3000) {
 }
 assert_eq(fr_any_nonzero, 1, "the comparison stream carries real signal");
 assert_eq(fr_same, 1, "a reset FdnReverb is bit-identical to a fresh one");
+
+# ================================================================
+# A delay no vec can hold is refused before any line is allocated. 3.7 GHz puts
+# only the longest line (73.7 ms) past VEC_CAP_MAX, so a test of the first line
+# alone would let it through; the rest would have to be built to find out.
+test_group("matrix_fdn_refuses_a_delay_no_vec_can_hold");
+var ov_before = alloc_used();
+assert_eq(naad_fdn_matrix_new(F64_ONE, 3700000000, F64_ONE), NAAD_ERR_COMPUTATION, "3.7 GHz: last line overflows");
+assert_eq(naad_fdn_matrix_new(F64_ONE, 1 << 34, F64_ONE), NAAD_ERR_COMPUTATION, "2^34 Hz: every line overflows");
+assert_eq(naad_fdn_matrix_new(F64_ONE, 1 << 40, F64_ONE), NAAD_ERR_COMPUTATION, "2^40 Hz");
+assert_eq(naad_fdn_matrix_new(F64_ONE, 1 << 62, F64_ONE), NAAD_ERR_COMPUTATION, "2^62 Hz");
+assert_eq(naad_fdn_matrix_new(F64_ONE, 0x7FFFFFFFFFFFFFFF, F64_ONE), NAAD_ERR_COMPUTATION, "INT64_MAX Hz");
+assert(alloc_used() - ov_before < 4096, "the refusal costs no delay line");
+
+# ================================================================
+# The per-sample path reads these as constants; they must stay the values it
+# would compute.
+test_group("matrix_fdn_scales_are_the_computed_values");
+assert_eq(FDN_SQRT_N, f64_sqrt(f64_from(MATRIX_FDN_N)), "sqrt(N) bits");
+assert_eq(FDN_INV_SQRT_N, f64_div(F64_ONE, f64_sqrt(f64_from(MATRIX_FDN_N))), "1 / sqrt(N) bits");
+
+# ================================================================
+# Rust's `as u32` sends a NaN delay to 0, then `.max(1)`. Only infinite rooms
+# reach the delay cap and are refused.
+test_group("fdn_reverb_non_finite_rooms");
+var nf_nan = 0x7FF8000000000000;
+var nf_inf = 0x7FF0000000000000;
+var nf_rev = naad_fdn_reverb_new(nf_nan, f64_from(8), f64_from(3), F64_ONE, 48000, F64_ONE);
+assert_eq(naad_is_err(nf_rev), 0, "a NaN dimension builds");
+var nf_cfg = fdn_config_for_room(nf_nan, f64_from(8), f64_from(3), F64_ONE, 48000);
+assert_eq(vec_get(FdnConfig_delay_lengths(nf_cfg), 0), 1, "the NaN dimension's own delay is one sample");
+assert_eq(naad_fdn_reverb_new(nf_inf, f64_from(8), f64_from(3), F64_ONE, 48000, F64_ONE),
+  NAAD_ERR_COMPUTATION, "an infinite dimension is refused");
 
 var rc = assert_summary();
 syscall(60, rc);

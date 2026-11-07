@@ -483,5 +483,186 @@ var qafter = envelope_multistage_next_value(ms2);
 assert_eq(qafter, 0, "past the final segment the value is exactly +0.0");
 assert_eq(envelope_multistage_is_active(ms2), 0, "and the envelope is inactive");
 
+# ================================================================
+test_group("the Catmull-Rom scalar matches hisab bit for bit");
+# NaN payloads and signs and signalling NaN are in the grid on purpose: a NaN's
+# bits show which operand reached the output, so a reordered sum shows up here
+# even where every finite value still agrees.
+var cmr_v = vec_new();
+vec_push(cmr_v, 0x7FF8000000000000);   # NaN
+vec_push(cmr_v, 0xFFF8000000000000);   # -NaN
+vec_push(cmr_v, 0x7FF8000000001234);   # NaN with a payload
+vec_push(cmr_v, 0x7FF0000000000001);   # signalling NaN
+vec_push(cmr_v, 0x7FF0000000000000);   # +Inf
+vec_push(cmr_v, 0xFFF0000000000000);   # -Inf
+vec_push(cmr_v, 0);                    # +0
+vec_push(cmr_v, 0x8000000000000000);   # -0
+vec_push(cmr_v, 1);                    # smallest subnormal
+vec_push(cmr_v, 0x01A56E1FC2F8F359);   # 1e-300
+vec_push(cmr_v, C0_5);
+vec_push(cmr_v, F64_ONE);
+vec_push(cmr_v, f64_neg(C0_7));
+vec_push(cmr_v, C1_5);
+vec_push(cmr_v, 0x7E37E43C8800759C);   # 1e300
+vec_push(cmr_v, 0xFE37E43C8800759C);   # -1e300
+var cmr_t = vec_new();
+vec_push(cmr_t, 0);
+vec_push(cmr_t, C0_25);
+vec_push(cmr_t, C0_3);
+vec_push(cmr_t, C0_75);
+vec_push(cmr_t, F64_ONE);
+vec_push(cmr_t, 0x7FF8000000000000);
+vec_push(cmr_t, 0x7FF0000000000000);
+vec_push(cmr_t, f64_neg(C0_45));
+var cmr_h0 = hvec3_new(0, 0, 0);
+var cmr_h1 = hvec3_new(0, 0, 0);
+var cmr_h2 = hvec3_new(0, 0, 0);
+var cmr_h3 = hvec3_new(0, 0, 0);
+var cmr_n = vec_len(cmr_v);
+var cmr_bad = 0;
+var cmr_cases = 0;
+var cmr_a = 0;
+while (cmr_a < cmr_n) {
+    HVec3_set_x(cmr_h0, vec_get(cmr_v, cmr_a));
+    var cmr_b = 0;
+    while (cmr_b < cmr_n) {
+        HVec3_set_x(cmr_h1, vec_get(cmr_v, cmr_b));
+        var cmr_c = 0;
+        while (cmr_c < cmr_n) {
+            HVec3_set_x(cmr_h2, vec_get(cmr_v, cmr_c));
+            var cmr_d = 0;
+            while (cmr_d < cmr_n) {
+                HVec3_set_x(cmr_h3, vec_get(cmr_v, cmr_d));
+                var cmr_ti = 0;
+                while (cmr_ti < vec_len(cmr_t)) {
+                    var cmr_u = vec_get(cmr_t, cmr_ti);
+                    var cmr_ref = HVec3_x(calc_catmull_rom(cmr_h0, cmr_h1, cmr_h2, cmr_h3, cmr_u));
+                    var cmr_got = _env_catmull_scalar(vec_get(cmr_v, cmr_a), vec_get(cmr_v, cmr_b),
+                      vec_get(cmr_v, cmr_c), vec_get(cmr_v, cmr_d), cmr_u);
+                    if (cmr_got != cmr_ref) { cmr_bad = cmr_bad + 1; }
+                    cmr_cases = cmr_cases + 1;
+                    cmr_ti = cmr_ti + 1;
+                }
+                cmr_d = cmr_d + 1;
+            }
+            cmr_c = cmr_c + 1;
+        }
+        cmr_b = cmr_b + 1;
+    }
+    cmr_a = cmr_a + 1;
+}
+assert_eq(cmr_cases, 524288, "the whole grid ran");
+assert_eq(cmr_bad, 0, "no grid point differs in a single bit");
+
+# ================================================================
+test_group("Catmull-Rom sampling allocates nothing");
+var cmr_lp = vec_new();
+vec_push(cmr_lp, envelope_point_new(0, 0));
+vec_push(cmr_lp, envelope_point_new(F64_ONE, F64_ONE));
+vec_push(cmr_lp, envelope_point_new(F64_TWO, 0));
+var cmr_le = envelope_catmull_rom_new(cmr_lp, f64_from(SR));
+envelope_catmull_rom_trigger(cmr_le);
+var cmr_used = alloc_used();
+var cmr_li = 0;
+while (cmr_li < 10000) { drop = envelope_catmull_rom_next_value(cmr_le); cmr_li = cmr_li + 1; }
+assert_eq(alloc_used() - cmr_used, 0, "10000 samples allocate 0 bytes");
+
+# ================================================================
+test_group("retrigger restarts the Catmull-Rom segment search");
+var cmr_rp = vec_new();
+vec_push(cmr_rp, envelope_point_new(0, 0));
+vec_push(cmr_rp, envelope_point_new(C0_001, F64_ONE));
+vec_push(cmr_rp, envelope_point_new(f64_mul(C0_001, F64_TWO), C0_25));
+vec_push(cmr_rp, envelope_point_new(f64_mul(C0_001, f64_from(3)), C0_75));
+var cmr_re = envelope_catmull_rom_new(cmr_rp, f64_from(SR));
+var cmr_first = vec_new();
+envelope_catmull_rom_trigger(cmr_re);
+var cmr_ri = 0;
+while (cmr_ri < 100) { vec_push(cmr_first, envelope_catmull_rom_next_value(cmr_re)); cmr_ri = cmr_ri + 1; }
+envelope_catmull_rom_trigger(cmr_re);
+var cmr_same = 1;
+cmr_ri = 0;
+while (cmr_ri < 100) {
+    if (envelope_catmull_rom_next_value(cmr_re) != vec_get(cmr_first, cmr_ri)) { cmr_same = 0; }
+    cmr_ri = cmr_ri + 1;
+}
+assert_eq(cmr_same, 1, "the second run is bit-identical to the first");
+
+# ================================================================
+test_group("envelopes own their control data");
+# Three control points, built fresh each call.
+fn own_points() {
+    var v = vec_new();
+    vec_push(v, envelope_point_new(0, 0));
+    vec_push(v, envelope_point_new(C0_01, F64_ONE));
+    vec_push(v, envelope_point_new(C0_05, C0_25));
+    return v;
+}
+# Two segments, built fresh each call.
+fn own_segments() {
+    var v = vec_new();
+    vec_push(v, envelope_segment_new(F64_ONE, C0_01));
+    vec_push(v, envelope_segment_new(C0_25, C0_05));
+    return v;
+}
+# Editing an element the caller still holds must not reach the envelope.
+var own_p = own_points();
+var own_c = envelope_catmull_rom_new(own_p, f64_from(SR));
+EnvelopePoint_set_value(vec_get(own_p, 1), f64_from(99));
+EnvelopePoint_set_time(vec_get(own_p, 2), 0);
+var own_twin = envelope_catmull_rom_new(own_points(), f64_from(SR));
+envelope_catmull_rom_trigger(own_c);
+envelope_catmull_rom_trigger(own_twin);
+var own_same = 1;
+var own_i = 0;
+while (own_i < 1000) {
+    if (envelope_catmull_rom_next_value(own_c) != envelope_catmull_rom_next_value(own_twin)) { own_same = 0; }
+    own_i = own_i + 1;
+}
+assert_eq(own_same, 1, "catmull-rom: edited point structs do not reach the envelope");
+# Shrinking the caller's vec must not either.
+var own_q = own_points();
+var own_d = envelope_catmull_rom_new(own_q, f64_from(SR));
+vec_truncate(own_q, 0);
+envelope_catmull_rom_trigger(own_d);
+assert_eq(envelope_catmull_rom_num_points(own_d), 3, "catmull-rom: truncated caller vec, 3 points kept");
+assert_eq(envelope_catmull_rom_next_value(own_d), 0, "catmull-rom: still samples after the caller truncates");
+
+var own_s = own_segments();
+var own_m = envelope_multistage_new(own_s);
+EnvelopeSegment_set_target(vec_get(own_s, 0), f64_from(99));
+vec_truncate(own_s, 0);
+var own_mt = envelope_multistage_new(own_segments());
+envelope_multistage_trigger(own_m);
+envelope_multistage_trigger(own_mt);
+own_same = 1;
+own_i = 0;
+while (own_i < 3000) {
+    if (envelope_multistage_next_value(own_m) != envelope_multistage_next_value(own_mt)) { own_same = 0; }
+    own_i = own_i + 1;
+}
+assert_eq(own_same, 1, "multi-stage: edited or truncated segments do not reach the envelope");
+
+# ================================================================
+test_group("catmull-rom: rewinding the clock finds the earlier segment");
+var drp = vec_new();
+vec_push(drp, envelope_point_new(0, 0));
+vec_push(drp, envelope_point_new(f64_div(F64_ONE, f64_from(4)), F64_ONE));
+vec_push(drp, envelope_point_new(F64_HALF, 0));
+vec_push(drp, envelope_point_new(F64_ONE, F64_ONE));
+var dre = envelope_catmull_rom_new(drp, f64_from(100));
+envelope_catmull_rom_trigger(dre);
+var drfirst = vec_new();
+var dri = 0;
+while (dri < 80) { vec_push(drfirst, envelope_catmull_rom_next_value(dre)); dri = dri + 1; }
+CatmullRomEnvelope_set_elapsed_samples(dre, 0);
+dri = 0;
+var drbad = 0;
+while (dri < 80) {
+    if (envelope_catmull_rom_next_value(dre) != vec_get(drfirst, dri)) { drbad = drbad + 1; }
+    dri = dri + 1;
+}
+assert_eq(drbad, 0, "CatmullRomEnvelope_set_elapsed_samples(0) replays the curve");
+
 var rc = assert_summary();
 syscall(60, rc);

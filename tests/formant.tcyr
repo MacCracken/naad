@@ -91,8 +91,7 @@ assert_eq(FormantBand_amp(fb), C0_625, "band amp stored exactly");
 # Distinct fields, not one value smeared across three slots.
 assert_neq(FormantBand_freq(fb), FormantBand_bw(fb), "freq and bw are distinct slots");
 assert_neq(FormantBand_bw(fb), FormantBand_amp(fb), "bw and amp are distinct slots");
-# The vowel table is built through formant_band_new -- band 0 of /a/ is
-# (730, 90, 1.0) per rust-old/src/synth/formant.rs Vowel::A.
+# Band 0 of /a/ is (730, 90, 1.0) per rust-old/src/synth/formant.rs Vowel::A.
 var pa = formant_vowel_formants(VOWEL_A);
 assert_eq(FormantBand_freq(vec_get(pa, 0)), f64_from(730), "A F1 = 730 Hz");
 assert_eq(FormantBand_bw(vec_get(pa, 0)), f64_from(90), "A F1 bandwidth = 90 Hz");
@@ -189,7 +188,9 @@ vec_push(ap_params, formant_band_new(C1234_5, C78_25, C0_625));
 vec_push(ap_params, formant_band_new(f64_from(1000), f64_from(100), C0_25));
 vec_push(ap_params, formant_band_new(f64_from(500), 0, C0_75));   # bw = 0 -> Q = 1.0
 assert_eq(formant_synth_apply_params(ap, ap_params), NAAD_ERR_NONE, "apply_params ok");
-assert_eq(FormantSynth_target_params(ap), ap_params, "target_params now holds the supplied vec");
+assert_neq(FormantSynth_target_params(ap), ap_params, "the synth keeps its own bands, not the caller's vec");
+assert_eq(FormantBand_freq(vec_get(FormantSynth_target_params(ap), 0)), C1234_5,
+  "target_params holds the supplied values");
 var ap_f = FormantSynth_filters(ap);
 var ap_a = FormantSynth_amplitudes(ap);
 assert_eq(BiquadFilter_frequency(vec_get(ap_f, 0)), C1234_5, "band 0 frequency applied");
@@ -267,6 +268,59 @@ assert_eq(vec_len(pb_one), 1, "one-element buffer keeps its length");
 var pb_one_ref = formant_synth_new(VOWEL_A, f64_from(SR));
 var pb_one_want = formant_synth_process_sample(pb_one_ref, F64_ONE);
 assert_eq(vec_get(pb_one, 0), pb_one_want, "one-element buffer holds the first per-sample output");
+
+# ================================================================
+test_group("vowel changes allocate nothing");
+var fa_s = formant_synth_new(VOWEL_A, f64_from(SR));
+var fa_used = alloc_used();
+var fa_i = 0;
+while (fa_i < 1000) {
+    formant_synth_set_vowel(fa_s, fa_i % 5);
+    formant_synth_morph(fa_s, fa_i % 5, (fa_i + 2) % 5, F64_HALF);
+    fa_i = fa_i + 1;
+}
+assert_eq(alloc_used() - fa_used, 0, "1000 set_vowel + morph pairs allocate 0 bytes");
+
+# ================================================================
+test_group("a value outside the Vowel enum is refused");
+assert_eq(formant_synth_new(VOWEL_U + 1, f64_from(SR)), NAAD_ERR_INVALID_PARAMETER, "new: one past the enum");
+assert_eq(formant_synth_new(0 - 1, f64_from(SR)), NAAD_ERR_INVALID_PARAMETER, "new: negative");
+assert_eq(formant_vowel_formants(VOWEL_U + 1), NAAD_ERR_INVALID_PARAMETER, "formants: one past the enum");
+assert_eq(formant_vowel_formants(0 - 1), NAAD_ERR_INVALID_PARAMETER, "formants: negative");
+var fv_s = formant_synth_new(VOWEL_E, f64_from(SR));
+assert_eq(formant_synth_set_vowel(fv_s, 99), NAAD_ERR_INVALID_PARAMETER, "set_vowel: out of range");
+assert_eq(formant_synth_set_vowel(fv_s, 0 - 1), NAAD_ERR_INVALID_PARAMETER, "set_vowel: negative");
+assert_eq(formant_synth_current_vowel(fv_s), VOWEL_E, "a refused set_vowel leaves the vowel");
+assert_eq(FormantBand_freq(vec_get(FormantSynth_target_params(fv_s), 0)), f64_from(530),
+  "a refused set_vowel leaves target_params");
+assert_eq(formant_synth_morph(fv_s, 99, VOWEL_A, F64_HALF), NAAD_ERR_INVALID_PARAMETER,
+  "morph: first vowel out of range");
+assert_eq(formant_synth_morph(fv_s, VOWEL_A, 0 - 1, F64_HALF), NAAD_ERR_INVALID_PARAMETER,
+  "morph: second vowel out of range");
+assert_eq(FormantBand_freq(vec_get(FormantSynth_target_params(fv_s), 0)), f64_from(530),
+  "a refused morph leaves target_params");
+
+# ================================================================
+test_group("apply_params copies the caller's values");
+var fc_s = formant_synth_new(VOWEL_A, f64_from(SR));
+var fc_p = formant_vowel_formants(VOWEL_O);
+formant_synth_apply_params(fc_s, fc_p);
+FormantBand_set_freq(vec_get(fc_p, 0), f64_from(1));
+vec_truncate(fc_p, 0);
+assert_eq(FormantBand_freq(vec_get(FormantSynth_target_params(fc_s), 0)), f64_from(570),
+  "editing the caller's bands does not reach target_params");
+
+# ================================================================
+test_group("a refused vowel table does not reach a store");
+assert_eq(formant_filter_new(formant_vowel_formants(99), f64_from(44100)), NAAD_ERR_INVALID_PARAMETER,
+  "formant_filter_new refuses the error");
+var dfs = formant_synth_new(VOWEL_A, f64_from(44100));
+assert_eq(formant_synth_apply_params(dfs, formant_vowel_formants(99)), NAAD_ERR_INVALID_PARAMETER,
+  "apply_params refuses the error");
+assert_eq(formant_synth_apply_params(dfs, vec_new()), NAAD_ERR_INVALID_PARAMETER,
+  "apply_params refuses a short table");
+assert_eq(formant_synth_apply_params(dfs, formant_vowel_formants(VOWEL_E)), NAAD_ERR_NONE,
+  "control: a real table applies");
 
 var rc = assert_summary();
 syscall(60, rc);

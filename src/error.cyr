@@ -93,3 +93,46 @@ fn flush_denormal(x) {
     if (f64_lt(f64_abs(x), NAAD_F32_MIN_POS) == 1) { return 0; }
     return x;
 }
+
+# ================================================================
+# naad_vec_zeros -- a vec of `n` zeros, sized once. Growing a vec by vec_push
+# doubles through every smaller size on a bump allocator that frees nothing, so
+# it leaves about twice the storage behind it. Relies on the header lib/vec.cyr
+# documents (data, len, cap), which tests/error.tcyr pins. A size alloc refuses
+# stops at the null page on the first store, as a refused vec_new does.
+# ================================================================
+#must_use
+fn naad_vec_zeros(n) {
+    var v = vec_new();
+    if (n > vec_cap(v)) {
+        store64(v, alloc(n * 8));
+        store64(v + 16, n);
+    }
+    var data = load64(v);
+    var i = 0;
+    while (i < n) {
+        store64(data + i * 8, 0);
+        i = i + 1;
+    }
+    store64(v + 8, n);
+    return v;
+}
+
+# ================================================================
+# naad_vec_copy -- a fresh vec holding `v`'s elements. For anything that keeps a
+# vec past the call: Rust takes these by value, so the caller can no longer reach
+# them, and here the copy is what keeps that true. ADR-0005.
+# ================================================================
+#must_use
+fn naad_vec_copy(v) {
+    var n = vec_len(v);
+    var out = naad_vec_zeros(n);
+    var src = load64(v);
+    var dst = load64(out);
+    var i = 0;
+    while (i < n) {
+        store64(dst + i * 8, load64(src + i * 8));
+        i = i + 1;
+    }
+    return out;
+}

@@ -277,6 +277,44 @@ fn main(): i64 {
         i = i + 1;
     }
 
+    # --- integer counts past what a vec can hold. Each must refuse before it starts
+    # filling anything. A floor alone used to walk straight into vec_push's abort.
+    var big = VEC_CAP_MAX + 1;
+    fz_ctor(delay_line_new(big), "delay_line_new length");
+    fz_ctor(comb_filter_new(big, FZ_HALF), "comb_filter_new length");
+    fz_ctor(allpass_delay_new(big, FZ_HALF), "allpass_delay_new length");
+    fz_ctor(effects_chorus_new(big, FZ_ONE, FZ_ONE, FZ_ONE, FZ_HALF, sr), "chorus voices");
+    fz_ctor(effects_phaser_new(big, FZ_ONE, f64_from(200), f64_from(2000), FZ_HALF, FZ_HALF, sr),
+      "phaser stages");
+    fz_ctor(vocoder_new(big, f64_from(100), f64_from(8000), sr), "vocoder bands");
+    fz_ctor(naad_fdn_matrix_new(FZ_ONE, 1099511627776, FZ_HALF), "matrix FDN sample rate");
+    var fz_amps = vec_new();
+    vec_push(fz_amps, FZ_ONE);
+    fz_ctor(wavetable_from_harmonics(1, fz_amps, big), "wavetable size");
+
+    # --- a grain rate must not stall the spawn loop. Each call has to return. ---
+    var gr = granular_new(sr);
+    granular_set_source(gr, pitch_sig);
+    i = 0;
+    while (i < 12) {
+        granular_set_grain_rate(gr, fz_val(i));
+        var gr_n = 0;
+        while (gr_n < 8) { var gr_s = granular_next_sample(gr); gr_n = gr_n + 1; }
+        i = i + 1;
+    }
+
+    # --- ids outside an enum: each is refused, or it is a value the type holds. ---
+    i = 0;
+    while (i < 12) {
+        var bad = 99 + i;
+        fz_ctor(effects_distortion_new(bad, FZ_ONE, FZ_HALF), "distortion type");
+        fz_ctor(formant_synth_new(bad, sr), "formant vowel");
+        fz_ctor(unison_new(bad, f64_from(220), 2, FZ_ONE, sr), "unison waveform");
+        fz_ctor(voice_manager_new(4, bad, 0), "voice poly mode");
+        fz_ctor(voice_manager_new(4, 0, bad), "voice steal mode");
+        i = i + 1;
+    }
+
     # --- spectral: empty, tiny and adversarial-length inputs ---
     i = 0;
     while (i < 40) {

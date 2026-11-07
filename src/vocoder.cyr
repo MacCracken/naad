@@ -12,9 +12,9 @@
 # pointer on success, or a negative NAAD_ERR_* on invalid parameters.
 #
 # Requires (from the build/test unit): stdlib alloc/vec + math (F64_ONE/TWO/
-# HALF, f64_min/clamp), error.cyr (flush_denormal, naad_is_finite, NAAD_ERR_*),
-# and filter.cyr (filter_biquad_new, filter_biquad_process_sample, FILTER_*).
-# The module file itself has no `include` lines.
+# HALF, f64_min/clamp), error.cyr (flush_denormal, validate_sample_rate,
+# NAAD_ERR_*), and filter.cyr (filter_biquad_new, filter_biquad_process_sample,
+# NAAD_FILTER_BANDPASS). The module file itself has no `include` lines.
 
 # ================================================================
 # Non-integer float literals (IEEE-754 bit patterns).
@@ -84,9 +84,12 @@ fn vocoder_band_process(self, modulator, carrier) {
 # ================================================================
 #must_use
 fn vocoder_new(num_bands, low_freq, high_freq, sample_rate) {
-    if (f64_le(sample_rate, 0) == 1) { return NAAD_ERR_INVALID_SAMPLE_RATE; }
-    if (naad_is_finite(sample_rate) == 0) { return NAAD_ERR_INVALID_SAMPLE_RATE; }
-    if (num_bands == 0) { return NAAD_ERR_INVALID_PARAMETER; }
+    var e = validate_sample_rate(sample_rate);
+    if (naad_is_err(e) == 1) { return e; }
+    # Rust's usize rules out a negative count; here the guard has to. The upper
+    # bound is what the band vec can hold: past it vec_push ends the process.
+    if (num_bands <= 0) { return NAAD_ERR_INVALID_PARAMETER; }
+    if (num_bands > VEC_CAP_MAX) { return NAAD_ERR_INVALID_PARAMETER; }
     if (f64_le(low_freq, 0) == 1) { return NAAD_ERR_INVALID_PARAMETER; }
     if (f64_le(high_freq, low_freq) == 1) { return NAAD_ERR_INVALID_PARAMETER; }
 

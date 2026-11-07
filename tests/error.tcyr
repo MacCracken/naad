@@ -50,5 +50,40 @@ assert_eq(naad_is_err(NAAD_ERR_NONE), 0, "NAAD_ERR_NONE is not an error");
 assert_eq(naad_is_err(NAAD_ERR_INVALID_FREQUENCY), 1, "negative code is an error");
 assert_streq(naad_err_name(NAAD_ERR_COMPUTATION), "computation error", "err name maps");
 
+# ================================================================
+test_group("naad_vec_zeros and naad_vec_copy");
+# The helpers write the vec header directly, so these fail if lib/vec.cyr moves it.
+fn vec_is_zeros(v, n) {
+    if (vec_len(v) != n) { return 0; }
+    var i = 0;
+    while (i < n) {
+        if (vec_get(v, i) != 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+assert_eq(vec_is_zeros(naad_vec_zeros(0), 0), 1, "an empty vec");
+assert_eq(vec_is_zeros(naad_vec_zeros(16), 16), 1, "exactly vec_new's capacity");
+assert_eq(vec_is_zeros(naad_vec_zeros(17), 17), 1, "one past it");
+assert_eq(vec_is_zeros(naad_vec_zeros(100000), 100000), 1, "sized once");
+var vz = naad_vec_zeros(17);
+assert_eq(vec_cap(vz), 17, "exactly the size asked for");
+vec_push(vz, 5);
+assert_eq(vec_len(vz), 18, "a sized vec still grows");
+assert_eq(vec_get(vz, 17), 5, "and keeps the pushed value");
+assert_eq(vec_get(vz, 16), 0, "and what it held");
+
+var vc_src = vec_new();
+vec_push(vc_src, 7);
+vec_push(vc_src, 9);
+var vc = naad_vec_copy(vc_src);
+assert_eq(vec_len(vc), 2, "a copy has the same length");
+assert_eq(vec_get(vc, 1), 9, "and the same elements");
+vec_set(vc_src, 0, 1);
+assert_eq(vec_get(vc, 0), 7, "a write to the source does not reach the copy");
+vec_truncate(vc_src, 0);
+assert_eq(vec_len(vc), 2, "nor does truncating it");
+assert_eq(vec_len(naad_vec_copy(vec_new())), 0, "an empty source copies to an empty vec");
+
 var rc = assert_summary();
 syscall(60, rc);

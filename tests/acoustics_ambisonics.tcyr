@@ -201,5 +201,17 @@ vec_push(ml_empty_out, AMB_SENTINEL);
 naad_ambisonics_encode_buffer(ml_enc, vec_new(), ml_empty_out, ml_empty_out, ml_empty_out, ml_empty_out);
 assert_eq(vec_get(ml_empty_out, 0), AMB_SENTINEL, "empty input writes nothing");
 
+# ================================================================
+# encode_buffer runs per block, and alloc never frees, so it must not allocate.
+test_group("encode_buffer_allocates_nothing");
+var na_enc = naad_ambisonics_encoder_new(AMB_0_7, d03);
+var na_i = 0;
+var na_before = alloc_used();
+while (na_i < 1000) {
+    naad_ambisonics_encode_buffer(na_enc, eb_in, eb_w, eb_x, eb_y, eb_z);
+    na_i = na_i + 1;
+}
+assert_eq(alloc_used() - na_before, 0, "encode_buffer allocates nothing per block");
+
 var rc = assert_summary();
 syscall(60, rc);
