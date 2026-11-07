@@ -8,6 +8,11 @@
 `VERSION` at the repo root is the source of truth for the current number. The
 entries below are the release record.
 
+**f32 question closed.** The roadmap's P0 is measured and downgraded by its own rule:
+f32 buys 0% on `filter_biquad_process_sample`, in Cyrius and in Rust. The core stays f64,
+and svara and prani need not convert on naad's account. See
+[ADR-0008](../adr/0008-the-dsp-core-stays-f64.md).
+
 **2.3.2** — P(-1) audit, hardening, optimization and refactor sweep. Audio on valid input
 is byte-identical to 2.3.1 over 94,731 values, and all 47 generators agree with the
 compiled Rust oracle on valid input. Of the audits' 50 findings, 45 are fixed and 5 are
@@ -390,6 +395,13 @@ Consequences for the port review:
   where the truncating version is correct, since there is no earlier tail to
   carry. Any equivalence test between a streaming and a non-streaming path must
   span at least two calls.
+
+## Consumers
+
+Six repos declare naad, all on older pins. Measured against 2.3.2 in scratch copies, with
+no failure tracing to naad: dhvani, garjan and ghurni pass as they are, svara needs one
+line, and nidhi and prani each have a failure of their own. The table is in
+[`roadmap.md`](roadmap.md) under *Downstream*.
 
 ## Port progress
 

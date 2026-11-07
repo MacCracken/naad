@@ -9,72 +9,32 @@
 > milestones that delivered it are preserved in [Shipped](#shipped) at the
 > bottom; this file now leads with the gates that are actually still open.
 
-## 🔴 P0 — move the DSP core to f32
+## Closed: moving the DSP core to f32
 
-**Filed 2026-08-31 by prani**, which measured its consequence. **naad is the
-bottom of this stack, so nothing above it can move until naad does.**
+**Filed 2026-08-31 by prani as a P0. Measured and closed by its own rule: the core stays
+f64.** The filing asked for one hot path to be converted first, and to downgrade this if
+f32 bought under about 20%. On `filter_biquad_process_sample` it buys **0%**, in Cyrius and
+in Rust. Eight SIMD lanes against four buy 18% all-in, a delay line is no faster, and f32
+`sin` and `exp` are 15% and 93% slower. Parity with the oracle is real, and is the one
+thing given up. [ADR-0008](../adr/0008-the-dsp-core-stays-f64.md) has the argument and
+[`docs/benchmarks/f32-experiment/`](../benchmarks/f32-experiment/README.md) the numbers.
 
-### The measurement
+**svara and prani do not need to convert on naad's account.** prani 2.1.0 Lane A and
+svara's f32 conversion were blocked on this and no longer are.
 
-prani's roadmap 2.0.7 ran its Cyrius port and its frozen Rust oracle on one host,
-same species, same durations, same 44100 Hz. The oracle is prani 1.1.0 on
-**svara 1.0.0 / naad 1.0.0 in f32**; the port is prani 2.0.6 on **svara 3.5.4 /
-naad 2.2.2 in f64**:
+### What the measurement says to do instead
 
-| | Rust (f32) | Cyrius (f64) | |
-|---|---:|---:|---:|
-| `wolf_howl_1s` | 1.39 ms | 21.9 ms | **15.8× slower** |
-| median, 13 synthesis benchmarks | | | **15.7× slower** |
-| range | | | 9.9× – 17.4× |
-| realtime, wolf howl | **719×** | **45.6×** | |
+The 15.7× is real, and float width is not the cause. These are the levers it found:
 
-The band is *tight* — every vocal apparatus, every duration, 9.9×–17.4×. A
-uniform ratio across unrelated code paths is the signature of something
-systemic in the substrate, not a slow algorithm somewhere.
-
-### Why this lands on naad
-
-naad is the biquad/filter/noise layer everything else calls per sample. Its
-surface is f64 on both sides, so **svara cannot convert without naad, and prani
-cannot convert without svara.** Converting only the layers above naad means
-widening at every per-sample call — strictly more work than doing nothing.
-
-### The constraint that used to justify f64 is gone
-
-The ports were written when Cyrius had no f32 math. **ganita 1.1.4 ships a
-23-function f32 scalar tier** — `sin cos exp ln sqrt pow atan2 hypot cbrt floor
-ceil trunc round abs neg min max clamp lerp sign log2 exp2` — and it is already
-vendored in these projects' `lib/`. Check what naad actually calls against that
-list before assuming a gap; prani calls **nothing** outside it.
-
-Note `f32_add`/`f32_mul` are **not** callable functions — f32 arithmetic
-dispatches through the operators on an `F32_TYID`-typed binding.
-
-### Three reasons, and be honest about which is which
-
-1. **SIMD width — the strongest.** cycc has `f32v8`: **eight lanes against
-   `f64v4`'s four**. A vectorised f32 filter bank has twice the lanes.
-2. **Half the memory traffic** per sample buffer, on a bump allocator that never
-   frees.
-3. **Parity.** Every consumer's Rust oracle is f32. Every tolerance loosened in
-   a port's test suite exists because of this widening; f32 makes them bit-exact.
-
-⚠ **f32 is not proven to be the cause of the 15.7×.** Three things differ in
-that comparison and only one is float width — the other two are three major
-versions of the DSP stack and LLVM `--release` against cycc. **The honest prior
-is that codegen dominates and float width is second.** Do not open this expecting
-a 15× win. Measure a single hot filter path in f32 before converting the module.
-
-### Suggested first step
-
-Convert **one** hot per-sample path — `filter_biquad_process_sample` is the
-obvious candidate — behind whatever the smallest honest experiment is, and
-publish the delta. If f32 buys less than ~20% there, say so loudly and this P0
-gets downgraded rather than propagated up the stack. **A measured "no" is a good
-outcome and closes the question for svara and prani too.**
-
-**Blocked on**: nothing. naad is the bottom.
-**Blocks**: svara's f32 conversion, and prani 2.1.0 Lane A.
+- [ ] **Call the buffer forms from consumers.** The same biquad costs 22.7 ns per sample
+      through a per-sample call and 9.5 ns in one loop in locals, so 58%, with no change to
+      any number. `filter_biquad_process_buffer` already has this shape. The work is in the
+      consumers' render loops, and in giving the other hot modules the same form.
+- [ ] **Filter banks in f64 SIMD.** A 64-filter bank goes from 10.5 to 3.2 ns per filter
+      with `f64v256_*` in structure-of-arrays form: 3.3× without touching width. The roadmap
+      leaves SIMD dispatch to dhvani, so this needs agreeing with dhvani first.
+- [ ] **The compiler.** 9.5 ns against Rust's 2.8 ns on the same loop is codegen. That
+      belongs to cyrius, and is the largest single factor left.
 
 ---
 
@@ -204,9 +164,27 @@ committed to — nothing here is speculative, and no milestone is invented.
       naad is not finished as a dependency until they build and test against
       it — that is the exercise that finds the surface gaps naad's own suites
       cannot.
+
+      **Measured 2026-11-07 against naad 2.3.2**, in scratch copies with cyrius 6.7.18,
+      hisab 3.4.1, goonj 2.3.1 and sakshi 2.5.10 pinned. **No failure traces to naad.**
+
+      | Consumer | Build | Suites | What it still needs |
+      |---|---|---:|---|
+      | dhvani 2.2.6 | builds | 65 pass | its pin bump |
+      | garjan 2.5.2 | builds | 33 pass | its pin bump |
+      | ghurni 2.6.1 | builds | 10 pass | its pin bump |
+      | svara 3.5.5 | fails, then builds | 22 pass | `src/prosody.cyr:115` calls `calc_monotone_cubic`, retired by hisab 3.4.0. One line |
+      | nidhi 2.1.2 | builds | 14 pass, 1 fails | `tests/io.tcyr`: WAV loading through shravan, which does not touch naad |
+      | prani 2.0.13 | builds | 12 pass, 6 fail | its tests pin the old `f64_to`, and two guards rely on it: a NaN count no longer reaches `INVALID_VOCALIZATION` |
+
+      What closes this is each repo moving its pins, which is theirs to do. svara's line is
+      the only code change dhvani's path needs.
 - [ ] **Retire `rust-old/`.** The 13,465-line oracle stays frozen in-tree until
       consumers are green and no open parity question still needs it. Deleting
-      it is the last step of the port, not the first.
+      it is the last step of the port, not the first. Gated on the row above: consumers
+      are measured green in scratch, but none has moved its pin yet. Note that the 2.3.2
+      sweep and the f32 experiment both needed it, so `docs/development/state.md`'s known
+      defects must move into a retirement record first.
 
 ## Out of scope
 

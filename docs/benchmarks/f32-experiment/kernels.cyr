@@ -1,0 +1,67 @@
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "dist/naad.cyr"
+include "lib/simd.cyr"
+fn arg_int(n) {
+    var a = argv(n); var r = 0; var i = 0;
+    while (load8(a + i) != 0) { r = r * 10 + load8(a + i) - 48; i = i + 1; }
+    return r;
+}
+var NB = 64;
+var B0 = 0; var B1 = 0; var B2 = 0; var A1 = 0; var A2 = 0; var Z1 = 0; var Z2 = 0;
+var XV = 0; var YV = 0; var T1 = 0; var T2 = 0; var T3 = 0;
+fn al(sz) { var p = alloc(NB * sz + 64); return (p + 31) & (0 - 32); }
+fn setup(sz) {
+    B0 = al(sz); B1 = al(sz); B2 = al(sz); A1 = al(sz); A2 = al(sz); Z1 = al(sz); Z2 = al(sz);
+    XV = al(sz); YV = al(sz); T1 = al(sz); T2 = al(sz); T3 = al(sz);
+    var i = 0;
+    while (i < NB) {
+        if (sz == 8) {
+            store64(B0 + i * 8, 0x3FC0000000000000); store64(B1 + i * 8, 0x3FD0000000000000);
+            store64(B2 + i * 8, 0x3FC0000000000000); store64(A1 + i * 8, 0xBFE8000000000000);
+            store64(A2 + i * 8, 0x3FD0000000000000); store64(XV + i * 8, 0x3FC0000000000000);
+        } else {
+            store32(B0 + i * 4, 0x3E000000); store32(B1 + i * 4, 0x3E800000);
+            store32(B2 + i * 4, 0x3E000000); store32(A1 + i * 4, 0xBF400000);
+            store32(A2 + i * 4, 0x3E800000); store32(XV + i * 4, 0x3E000000);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+fn main() {
+    args_init();
+    alloc_init();
+    var v = arg_int(1); var n = arg_int(2);
+    var i = 0; var s = 0;
+    if (v == 0) { setup(8); while (i < n) {
+        f64v256_mul(T1, B0, XV, NB); f64v256_add(YV, T1, Z1, NB);
+        f64v256_mul(T1, B1, XV, NB); f64v256_mul(T2, A1, YV, NB); f64v256_sub(T3, T1, T2, NB); f64v256_add(Z1, T3, Z2, NB);
+        f64v256_mul(T1, B2, XV, NB); f64v256_mul(T2, A2, YV, NB); f64v256_sub(Z2, T1, T2, NB);
+        i = i + 1; } }
+    if (v == 1) { setup(4); while (i < n) {
+        f32v8_mul(T1, B0, XV, NB); f32v8_add(YV, T1, Z1, NB);
+        f32v8_mul(T1, B1, XV, NB); f32v8_mul(T2, A1, YV, NB); f32v8_sub(T3, T1, T2, NB); f32v8_add(Z1, T3, Z2, NB);
+        f32v8_mul(T1, B2, XV, NB); f32v8_mul(T2, A2, YV, NB); f32v8_sub(Z2, T1, T2, NB);
+        i = i + 1; } }
+    # transcendentals: the f32 tier against f64
+    if (v == 2) { var x2 = 0x3FE0000000000000; while (i < n) { s = f64_sin(x2); i = i + 1; } }
+    if (v == 3) { var x3 = 0x3F000000; while (i < n) { s = ganita_f32_sin(x3); i = i + 1; } }
+    if (v == 4) { var x4 = 0x3FE0000000000000; while (i < n) { s = f64_exp(x4); i = i + 1; } }
+    if (v == 5) { var x5 = 0x3F000000; while (i < n) { s = ganita_f32_exp(x5); i = i + 1; } }
+    if (v == 6) { var x6 = 0x3FE0000000000000; while (i < n) { s = f64_tanh(x6); i = i + 1; } }
+    # a delay line past the L2 cache: read, mix, write back
+    var LEN = 1048576;
+    if (v == 7) { var d7 = alloc(LEN * 8); var p7 = 0; while (i < n) {
+        var o7 = load64(d7 + p7 * 8);
+        store64(d7 + p7 * 8, f64_add(0x3FE0000000000000, f64_mul(o7, 0x3FE0000000000000)));
+        p7 = p7 + 1; if (p7 == LEN) { p7 = 0; } i = i + 1; } }
+    if (v == 8) { var d8 = alloc(LEN * 4); var p8 = 0; var half: f32 = f32_from(0.5); while (i < n) {
+        var o8: f32 = load32(d8 + p8 * 4);
+        var w8: f32 = half + o8 * half;
+        store32(d8 + p8 * 4, load32(&w8));
+        p8 = p8 + 1; if (p8 == LEN) { p8 = 0; } i = i + 1; } }
+    return s & 0;
+}
+var r = main();
+syscall(60, r);

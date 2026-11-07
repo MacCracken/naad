@@ -1,0 +1,209 @@
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "dist/naad.cyr"
+include "lib/simd.cyr"
+
+var NI = 1024;
+var IN64 = 0;       # f64 input, exact dyadic values
+var IN32 = 0;       # the same values as packed f32
+var HASH = 0xcbf29ce484222325;
+fn mix(v) { HASH = (HASH ^ v) * 0x100000001b3; return 0; }
+
+fn arg_int(n) {
+    var a = argv(n); var r = 0; var i = 0;
+    while (load8(a + i) != 0) { r = r * 10 + load8(a + i) - 48; i = i + 1; }
+    return r;
+}
+
+# ---- single filter, same Transposed DF-II as naad, two widths, same shape ----
+struct B64 { b0: f64; b1: f64; b2: f64; a1: f64; a2: f64; z1: f64; z2: f64; }
+struct B32 { b0: f32; b1: f32; b2: f32; a1: f32; a2: f32; z1: f32; z2: f32; }
+
+# Both flushes test the magnitude's bits: the cheapest honest form of each width.
+fn fl64(x) {
+    if ((x & 0x7FFFFFFFFFFFFFFF) < 0x3810000000000000) { return 0; }
+    return x;
+}
+fn fl32(x) {
+    if ((x & 0x7FFFFFFF) < 0x00800000) { return 0; }
+    return x;
+}
+fn b64_step(q, x: f64): i64 {
+    var p: *B64 = q;
+    var y: f64 = p.b0 * x + p.z1;
+    var n1: f64 = p.b1 * x - p.a1 * y + p.z2;
+    var n2: f64 = p.b2 * x - p.a2 * y;
+    store64(q + 40, fl64(load64(&n1)));
+    store64(q + 48, fl64(load64(&n2)));
+    return load64(&y);
+}
+fn b32_step(q, x: f32): i64 {
+    var p: *B32 = q;
+    var y: f32 = p.b0 * x + p.z1;
+    var n1: f32 = p.b1 * x - p.a1 * y + p.z2;
+    var n2: f32 = p.b2 * x - p.a2 * y;
+    store32(q + 20, fl32(load32(&n1)));
+    store32(q + 24, fl32(load32(&n2)));
+    return load32(&y);
+}
+fn b64_new() {
+    var p = alloc(sizeof(B64));
+    store64(p, 0x3FC0000000000000); store64(p + 8, 0x3FD0000000000000);
+    store64(p + 16, 0x3FC0000000000000); store64(p + 24, 0xBFE8000000000000);
+    store64(p + 32, 0x3FD0000000000000); store64(p + 40, 0); store64(p + 48, 0);
+    return p;
+}
+fn b32_new() {
+    var p = alloc(sizeof(B32));
+    store32(p, 0x3E000000); store32(p + 4, 0x3E800000); store32(p + 8, 0x3E000000);
+    store32(p + 12, 0xBF400000); store32(p + 16, 0x3E800000); store32(p + 20, 0); store32(p + 24, 0);
+    return p;
+}
+
+# ---- same filter with everything in locals, the best scalar loop each width allows ----
+fn loop64(n) {
+    var b0: f64 = 0.125; var b1: f64 = 0.25; var b2: f64 = 0.125; var a1: f64 = -0.75; var a2: f64 = 0.25;
+    var z1: f64 = 0.0; var z2: f64 = 0.0; var i = 0; var h = 0;
+    while (i < n) {
+        var x: f64 = load64(IN64 + (i & 1023) * 8);
+        var y: f64 = b0 * x + z1;
+        var n1: f64 = b1 * x - a1 * y + z2;
+        z2 = b2 * x - a2 * y;
+        z1 = n1;
+        h = y;
+        i = i + 1;
+    }
+    return h;
+}
+fn loop32(n) {
+    var b0: f32 = f32_from(0.125); var b1: f32 = f32_from(0.25); var b2: f32 = f32_from(0.125);
+    var a1: f32 = f32_from(-0.75); var a2: f32 = f32_from(0.25);
+    var z1: f32 = f32_from(0.0); var z2: f32 = f32_from(0.0); var i = 0; var h = 0;
+    while (i < n) {
+        var x: f32 = load32(IN32 + (i & 1023) * 4);
+        var y: f32 = b0 * x + z1;
+        var n1: f32 = b1 * x - a1 * y + z2;
+        z2 = b2 * x - a2 * y;
+        z1 = n1;
+        h = load32(&y);
+        i = i + 1;
+    }
+    return h;
+}
+
+# ---- a bank of NB filters in structure-of-arrays form, one sample per call ----
+var NB = 64;
+var B0 = 0; var B1 = 0; var B2 = 0; var A1 = 0; var A2 = 0; var Z1 = 0; var Z2 = 0;
+var XV = 0; var YV = 0; var T1 = 0; var T2 = 0; var T3 = 0;
+fn bank_alloc(sz) {
+    # 32-byte aligned, as the ymm kernels want
+    var p = alloc(NB * sz + 64);
+    return (p + 31) & (0 - 32);
+}
+fn bank_new64() {
+    B0 = bank_alloc(8); B1 = bank_alloc(8); B2 = bank_alloc(8); A1 = bank_alloc(8); A2 = bank_alloc(8);
+    Z1 = bank_alloc(8); Z2 = bank_alloc(8); XV = bank_alloc(8); YV = bank_alloc(8); T1 = bank_alloc(8); T2 = bank_alloc(8); T3 = bank_alloc(8);
+    var i = 0;
+    while (i < NB) {
+        store64(B0 + i * 8, 0x3FC0000000000000); store64(B1 + i * 8, 0x3FD0000000000000);
+        store64(B2 + i * 8, 0x3FC0000000000000); store64(A1 + i * 8, 0xBFE8000000000000);
+        store64(A2 + i * 8, 0x3FD0000000000000);
+        store64(Z1 + i * 8, 0); store64(Z2 + i * 8, 0);
+        i = i + 1;
+    }
+    return 0;
+}
+fn bank_new32() {
+    B0 = bank_alloc(4); B1 = bank_alloc(4); B2 = bank_alloc(4); A1 = bank_alloc(4); A2 = bank_alloc(4);
+    Z1 = bank_alloc(4); Z2 = bank_alloc(4); XV = bank_alloc(4); YV = bank_alloc(4); T1 = bank_alloc(4); T2 = bank_alloc(4); T3 = bank_alloc(4);
+    var i = 0;
+    while (i < NB) {
+        store32(B0 + i * 4, 0x3E000000); store32(B1 + i * 4, 0x3E800000);
+        store32(B2 + i * 4, 0x3E000000); store32(A1 + i * 4, 0xBF400000);
+        store32(A2 + i * 4, 0x3E800000);
+        store32(Z1 + i * 4, 0); store32(Z2 + i * 4, 0);
+        i = i + 1;
+    }
+    return 0;
+}
+fn bank_scalar64(x) {
+    var i = 0;
+    while (i < NB) {
+        var y = f64_add(f64_mul(load64(B0 + i * 8), x), load64(Z1 + i * 8));
+        var n1 = f64_add(f64_sub(f64_mul(load64(B1 + i * 8), x), f64_mul(load64(A1 + i * 8), y)), load64(Z2 + i * 8));
+        var n2 = f64_sub(f64_mul(load64(B2 + i * 8), x), f64_mul(load64(A2 + i * 8), y));
+        store64(Z1 + i * 8, n1); store64(Z2 + i * 8, n2); store64(YV + i * 8, y);
+        i = i + 1;
+    }
+    return load64(YV);
+}
+fn bank_sse64(x) {
+    var i = 0;
+    while (i < NB) { store64(XV + i * 8, x); i = i + 1; }
+    f64v_mul(T1, B0, XV, NB); f64v_add(YV, T1, Z1, NB);
+    f64v_mul(T1, B1, XV, NB); f64v_mul(T2, A1, YV, NB); f64v_sub(T3, T1, T2, NB); f64v_add(Z1, T3, Z2, NB);
+    f64v_mul(T1, B2, XV, NB); f64v_mul(T2, A2, YV, NB); f64v_sub(Z2, T1, T2, NB);
+    return load64(YV);
+}
+fn bank_avx64(x) {
+    var i = 0;
+    while (i < NB) { store64(XV + i * 8, x); i = i + 1; }
+    f64v256_mul(T1, B0, XV, NB); f64v256_add(YV, T1, Z1, NB);
+    f64v256_mul(T1, B1, XV, NB); f64v256_mul(T2, A1, YV, NB); f64v256_sub(T3, T1, T2, NB); f64v256_add(Z1, T3, Z2, NB);
+    f64v256_mul(T1, B2, XV, NB); f64v256_mul(T2, A2, YV, NB); f64v256_sub(Z2, T1, T2, NB);
+    return load64(YV);
+}
+fn bank_sse32(x) {
+    var i = 0;
+    while (i < NB) { store32(XV + i * 4, x); i = i + 1; }
+    f32v_mul(T1, B0, XV, NB); f32v_add(YV, T1, Z1, NB);
+    f32v_mul(T1, B1, XV, NB); f32v_mul(T2, A1, YV, NB); f32v_sub(T3, T1, T2, NB); f32v_add(Z1, T3, Z2, NB);
+    f32v_mul(T1, B2, XV, NB); f32v_mul(T2, A2, YV, NB); f32v_sub(Z2, T1, T2, NB);
+    return load32(YV);
+}
+fn bank_avx32(x) {
+    var i = 0;
+    while (i < NB) { store32(XV + i * 4, x); i = i + 1; }
+    f32v8_mul(T1, B0, XV, NB); f32v8_add(YV, T1, Z1, NB);
+    f32v8_mul(T1, B1, XV, NB); f32v8_mul(T2, A1, YV, NB); f32v8_sub(T3, T1, T2, NB); f32v8_add(Z1, T3, Z2, NB);
+    f32v8_mul(T1, B2, XV, NB); f32v8_mul(T2, A2, YV, NB); f32v8_sub(Z2, T1, T2, NB);
+    return load32(YV);
+}
+
+fn main() {
+    args_init();
+    alloc_init();
+    var v = arg_int(1); var n = arg_int(2);
+    IN64 = alloc(NI * 8); IN32 = alloc(NI * 4);
+    var i = 0;
+    while (i < NI) {
+        var d = f64_div(f64_from((i % 17) - 8), f64_from(16));
+        store64(IN64 + i * 8, d);
+        store32(IN32 + i * 4, f32_from(d));
+        i = i + 1;
+    }
+    var last = 0;
+    i = 0;
+    if (v == 0) {
+        var f = filter_biquad_new(NAAD_FILTER_LOWPASS, f64_from(44100), f64_from(1000), F64_ONE);
+        BiquadFilter_set_b0(f, 0x3FC0000000000000); BiquadFilter_set_b1(f, 0x3FD0000000000000);
+        BiquadFilter_set_b2(f, 0x3FC0000000000000); BiquadFilter_set_a1(f, 0xBFE8000000000000);
+        BiquadFilter_set_a2(f, 0x3FD0000000000000);
+        while (i < n) { last = filter_biquad_process_sample(f, load64(IN64 + (i & 1023) * 8)); mix(last); i = i + 1; }
+    }
+    if (v == 1) { var p64 = b64_new(); while (i < n) { var x1: f64 = load64(IN64 + (i & 1023) * 8); last = b64_step(p64, x1); mix(last); i = i + 1; } }
+    if (v == 2) { var p32 = b32_new(); while (i < n) { var x2: f32 = load32(IN32 + (i & 1023) * 4); last = b32_step(p32, x2); mix(last); i = i + 1; } }
+    if (v == 3) { last = loop64(n); mix(last); }
+    if (v == 4) { last = loop32(n); mix(last); }
+    if (v >= 5 && v <= 7) { bank_new64(); }
+    if (v >= 8) { bank_new32(); }
+    if (v == 5) { while (i < n) { last = bank_scalar64(load64(IN64 + (i & 1023) * 8)); i = i + 1; } mix(last); }
+    if (v == 6) { while (i < n) { last = bank_sse64(load64(IN64 + (i & 1023) * 8)); i = i + 1; } mix(last); }
+    if (v == 7) { while (i < n) { last = bank_avx64(load64(IN64 + (i & 1023) * 8)); i = i + 1; } mix(last); }
+    if (v == 8) { while (i < n) { last = bank_sse32(load32(IN32 + (i & 1023) * 4)); i = i + 1; } mix(last); }
+    if (v == 9) { while (i < n) { last = bank_avx32(load32(IN32 + (i & 1023) * 4)); i = i + 1; } mix(last); }
+    print_num(last); print(" ", 1); print_num(HASH); println("");
+    return 0;
+}
+var r = main();
+syscall(60, r);
