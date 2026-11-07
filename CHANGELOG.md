@@ -5,6 +5,99 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.3] - Block forms: the hot modules render in real loops
+
+**No output moves.** Every form below is bit-identical to calling its per-sample function
+once per sample, and 94,731 values across 103 streams are byte-identical to 2.3.2. Reverb
+renders 2.6x faster in a block, and the delay-based paths 2.6x to 3.6x. This is the lever
+[ADR-0008](docs/adr/0008-the-dsp-core-stays-f64.md) measured: of 36 buffer forms, 5 were
+real loops and the rest a `while` around the per-sample call. **A consumer gains by
+calling the forms**: the per-sample paths did not change.
+Suite: **41 suites / 3,365 assertions**.
+
+### Added
+
+- `comb_filter_process_buffer` and `allpass_delay_process_buffer`. Rust has neither, so
+  the reference is the per-sample function.
+- `tests/buffer_forms.tcyr`, which holds every form to its per-sample path.
+- [ADR-0009](docs/adr/0009-block-forms-are-a-second-copy.md): what a form owes the path it
+  stands for, what it has to earn, and what is accepted.
+
+### Performance
+
+Nanoseconds per sample in 256-sample blocks: the best of 9 runs, interleaved with 2.3.2 on
+a quiet machine. The timer is read per block, which puts about 4 ns in every row. Compressor,
+limiter and de-esser did not change and read 0.99x to 1.02x, so that is the noise.
+
+| Path | 2.3.2 | 2.3.3 | |
+|---|---:|---:|---:|
+| `physical_wg_fill_buffer` | 83.0 | 23.1 | 3.6x |
+| `comb_filter_process_buffer`, against a loop of `process_sample` | 52.5 | 16.8 | 3.1x |
+| `physical_ks_fill_buffer` | 52.8 | 19.6 | 2.7x |
+| `reverb_process_buffer` | 622 | 237 | 2.6x |
+| `allpass_delay_process_buffer`, against a loop of `process_sample` | 49.6 | 19.0 | 2.6x |
+| `eq_process_buffer`, 3 bands | 90.0 | 39.2 | 2.3x |
+| `noise_fill_buffer`, white | 25.2 | 12.5 | 2.0x |
+| `formant_synth_process_buffer` | 101 | 51.7 | 2.0x |
+| `wavetable_osc_fill_buffer` | 35.9 | 18.9 | 1.9x |
+| `vocoder_process_buffer`, 16 bands | 905 | 534 | 1.7x |
+| `unison_fill_buffer`, 7 saw voices | 239 | 141 | 1.7x |
+| `noise_fill_buffer`, brown | 36.1 | 21.5 | 1.7x |
+| `filter_biquad_process_buffer` | 26.9 | 17.5 | 1.5x |
+| `filter_svf_process_buffer_lowpass` | 28.9 | 18.9 | 1.5x |
+| `noise_fill_buffer`, pink | 76.1 | 51.9 | 1.5x |
+| `unison_fill_buffer`, 7 sine voices | 434 | 311 | 1.4x |
+| `osc_fill_buffer`, saw and pulse | 28.4, 45.9 | 20.3, 33.4 | 1.4x |
+| `osc_fill_buffer`, sine | 55.0 | 43.7 | 1.3x |
+| `dynamics_noise_gate_process_buffer` | 75.0 | 60.0 | 1.25x |
+| `osc_fill_buffer`, square and triangle | 41.4, 49.9 | 33.6, 41.0 | 1.2x |
+| `additive_fill_buffer`, 16 partials | 792 | 681 | 1.16x |
+
+At 64-sample blocks the same rows gain 13% to 60%, with more of the timer in them. The
+check for shared stages costs nothing measurable on reverb and about 2.5% on a 16-band
+vocoder at 64 samples.
+
+**Not made into loops.** The compressor and limiter gained 12%, and the de-esser 7%, since
+`f64_ln` and `f64_pow` run every sample. Both stay as they were. The moog ladder, FM and the
+drums were not tried, for the same reason.
+
+### How it was verified
+
+- **`tests/buffer_forms.tcyr` compares raw bits**, per-sample against block, over block
+  sizes either side of the 256-sample chunk, then runs 64 more samples to show the state
+  went back intact. Streams cover NaN payloads and signs, -0, Inf, a sweep across the flush
+  line and a burst into a quiet tail, each with and without setters between blocks. It
+  also covers aliased outputs, short outputs and desynced rings. Where the per-sample path
+  dies, the case runs in a child and the exit code is the assertion.
+- **The old sweeps never reached the forms.** The Rust differential and fault injection had
+  no buffer call in them, so they say only that the per-sample paths are unchanged. Both
+  were rebuilt to drive the forms: 614 cases over the hostile parameter grid are
+  byte-identical to per-sample, and so are 550 refused-allocation cases but for 2, which
+  are the per-sample harness's own allocation.
+- **149 mutants, all caught.** The first run left 28 of 95 alive, and it was worth more
+  than the passes: it found dead code in two forms, a reverb tap that was never fractional,
+  and three abort tests that were dying by accident on corrupted headers. Those are fixed.
+- **Independent review of the merged diff**, by a reader given only the code and the
+  contract. Its fuzz, up to 400 seeds a form with hostile state before every block, found no
+  arithmetic difference. It also found what the suite could not reach:
+  - **One object in two slots.** The accessors can install one filter in two bands, or two
+    combs on one ring. Per sample it steps once for each slot, and a stage-at-a-time form
+    gave a different answer that depended on where the stream was cut. Eq, formant, vocoder
+    and reverb now check, and take the per-sample path. Reverb compares ring memory, since
+    two distinct rings can sit over one vec.
+  - **Empty blocks.** Forms read their fields on n = 0, and unison recomputed its ratios.
+    An empty block now reads nothing.
+  - **The suite's own gaps**, now closed: NaNs that all carried one payload, so a swapped
+    operand could not show; no -0 in the low streams; and raw syscall numbers that failed
+    on aarch64, where it now passes under emulation.
+
+### Not fixed
+
+Recorded in [ADR-0009](docs/adr/0009-block-forms-are-a-second-copy.md). A form differs from
+the per-sample loop if the caller's vecs overlap without being the same vec, or if an
+object's own state vec is handed to it as the buffer. Neither is reachable through an API,
+and Rust's ownership rules forbid both. A buffer that is its own input stays supported.
+
 ## [2.3.2] - P(-1) sweep: audit, hardening, optimization and refactor
 
 **Audio on valid input does not move**: 94,731 values across 103 streams are

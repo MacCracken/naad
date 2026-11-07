@@ -156,6 +156,31 @@ fn vocoder_process_sample(self, modulator, carrier) {
     return sum;
 }
 
+# Whether one filter serves two places, which the accessors allow: both sides of a
+# band, or two bands. Per sample it steps once for each, in order, and no loop over one
+# band at a time can give that. A band in two slots shows up as its own filters.
+#must_use
+fn _vocoder_bands_share(bands) {
+    var n = vec_len(bands);
+    var i = 0;
+    while (i < n) {
+        var band = vec_get(bands, i);
+        var analysis = VocoderBand_analysis_filter(band);
+        var synthesis = VocoderBand_synthesis_filter(band);
+        if (analysis == synthesis) { return 1; }
+        var j = i + 1;
+        while (j < n) {
+            var other = vec_get(bands, j);
+            var a2 = VocoderBand_analysis_filter(other);
+            var s2 = VocoderBand_synthesis_filter(other);
+            if (a2 == analysis || a2 == synthesis || s2 == analysis || s2 == synthesis) { return 1; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # ================================================================
 # vocoder_process_buffer -- process a buffer of modulator/carrier pairs into
 # `output`. Iterates over min(len(modulator), len(carrier), len(output)).
@@ -167,10 +192,67 @@ fn vocoder_process_buffer(self, modulator, carrier, output) {
     var lo = vec_len(output);
     if (lc < len) { len = lc; }
     if (lo < len) { len = lo; }
-    var i = 0;
-    while (i < len) {
-        vec_set(output, i, vocoder_process_sample(self, vec_get(modulator, i), vec_get(carrier, i)));
-        i = i + 1;
+    if (len == 0) { return 0; }
+    var bands = Vocoder_bands(self);
+    if (_vocoder_bands_share(bands) == 1) {
+        var k = 0;
+        while (k < len) {
+            vec_set(output, k, vocoder_process_sample(self, vec_get(modulator, k), vec_get(carrier, k)));
+            k = k + 1;
+        }
+        return 0;
+    }
+
+    # Each band holds its own state, so each takes the chunk in turn. The sum stays on
+    # the stack until the chunk is done, and `output` may be an input.
+    var nb = vec_len(bands);
+    var mod_data = load64(modulator);
+    var car_data = load64(carrier);
+    var out_data = load64(output);
+    var min_pos = NAAD_F32_MIN_POS;
+    var sum_buf[2048];
+    var ana_buf[2048];
+    var syn_buf[2048];
+    var sum = &sum_buf;
+    var ana = &ana_buf;
+    var syn = &syn_buf;
+
+    var done = 0;
+    while (done < len) {
+        var m = len - done;
+        if (m > NAAD_CHUNK) { m = NAAD_CHUNK; }
+        var j = 0;
+        while (j < m) {
+            store64(sum + j * 8, 0);
+            j = j + 1;
+        }
+        var b = 0;
+        while (b < nb) {
+            var band = vec_get(bands, b);
+            _filter_biquad_run(VocoderBand_analysis_filter(band), mod_data + done * 8, ana, m);
+            _filter_biquad_run(VocoderBand_synthesis_filter(band), car_data + done * 8, syn, m);
+            var attack = VocoderBand_attack_coeff(band);
+            var release = VocoderBand_release_coeff(band);
+            var env = VocoderBand_envelope_follower(band);
+            j = 0;
+            while (j < m) {
+                var level = f64_abs(load64(ana + j * 8));
+                var coeff = release;
+                if (f64_gt(level, env) == 1) { coeff = attack; }
+                env = f64_add(env, f64_mul(coeff, f64_sub(level, env)));
+                if (f64_lt(f64_abs(env), min_pos) == 1) { env = 0; }
+                store64(sum + j * 8, f64_add(load64(sum + j * 8), f64_mul(load64(syn + j * 8), env)));
+                j = j + 1;
+            }
+            VocoderBand_set_envelope_follower(band, env);
+            b = b + 1;
+        }
+        j = 0;
+        while (j < m) {
+            store64(out_data + (done + j) * 8, load64(sum + j * 8));
+            j = j + 1;
+        }
+        done = done + m;
     }
     return 0;
 }

@@ -57,6 +57,17 @@ flock /tmp/naad-build.lock cyrius test
    and bench in one pass, and is the gate the change has to clear anyway.
 7. Bump `VERSION` and add a CHANGELOG entry before tagging.
 
+## Rendering in blocks
+
+A render loop should call the buffer form, not the per-sample function: `reverb_process_buffer`
+is 2.6x faster than a loop of `reverb_process_sample`, and gives the same bits. Setters
+applied between blocks take effect at the next block.
+
+A block form is a second copy of its per-sample path. If you change a per-sample path that
+has one, change both, and `tests/buffer_forms.tcyr` will tell you if you did not. To add a
+form, add it to that suite, measure it interleaved against the loop it replaces, and read
+[ADR-0009](../adr/0009-block-forms-are-a-second-copy.md) first.
+
 ## Quality commands
 
 | Command | What it does |

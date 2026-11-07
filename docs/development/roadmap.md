@@ -26,10 +26,12 @@ svara's f32 conversion were blocked on this and no longer are.
 
 The 15.7× is real, and float width is not the cause. These are the levers it found:
 
-- [ ] **Call the buffer forms from consumers.** The same biquad costs 22.7 ns per sample
-      through a per-sample call and 9.5 ns in one loop in locals, so 58%, with no change to
-      any number. `filter_biquad_process_buffer` already has this shape. The work is in the
-      consumers' render loops, and in giving the other hot modules the same form.
+- [x] **Give the hot modules real block loops.** Shipped in 2.3.3: reverb 2.6x, the delay
+      paths 2.6x to 3.6x, eq 2.3x, with no change to any number.
+      [ADR-0009](../adr/0009-block-forms-are-a-second-copy.md) says what a form owes.
+- [ ] **Call the buffer forms from consumers.** That is where the rest of the gain is: a
+      render loop written per sample gets none of it, and the per-sample paths did not
+      change. The work is in the consumers.
 - [ ] **Filter banks in f64 SIMD.** A 64-filter bank goes from 10.5 to 3.2 ns per filter
       with `f64v256_*` in structure-of-arrays form: 3.3× without touching width. The roadmap
       leaves SIMD dispatch to dhvani, so this needs agreeing with dhvani first.

@@ -144,11 +144,49 @@ fn physical_ks_next_sample(self) {
 # Fill a vec buffer with samples (in place).
 fn physical_ks_fill_buffer(self, buffer) {
     var n = vec_len(buffer);
+    if (n == 0) { return 0; }
     var i = 0;
+    var dl = KarplusStrong_delay_line(self);
+    if (_delay_block_ok(dl) == 0) {
+        while (i < n) {
+            vec_set(buffer, i, physical_ks_next_sample(self));
+            i = i + 1;
+        }
+        return 0;
+    }
+    var clamped = _delay_tap_clamp(dl, KarplusStrong_delay_samples(self));
+    var whole = f64_floor(clamped);
+    var offset = f64_to(whole);
+    var frac = f64_sub(clamped, whole);
+    var near = f64_sub(F64_ONE, frac);
+    var brightness = KarplusStrong_brightness(self);
+    var dark = f64_sub(F64_ONE, brightness);
+    var feedback = KarplusStrong_feedback(self);
+    var prev = KarplusStrong_damping_prev(self);
+    var min_pos = NAAD_F32_MIN_POS;
+    var max = DelayLine_max_delay_samples(dl);
+    var wp = DelayLine_write_pos(dl);
+    var ring = load64(DelayLine_buffer(dl));
+    var data = load64(buffer);
     while (i < n) {
-        vec_set(buffer, i, physical_ks_next_sample(self));
+        var r0 = wp - offset - 1;
+        if (r0 < 0) { r0 = r0 + max; }
+        var r1 = r0 - 1;
+        if (r0 == 0) { r1 = max - 1; }
+        var delayed = f64_add(f64_mul(load64(ring + r0 * 8), near), f64_mul(load64(ring + r1 * 8), frac));
+        var filtered = f64_add(f64_mul(brightness, delayed), f64_mul(dark, prev));
+        prev = filtered;
+        if (f64_lt(f64_abs(prev), min_pos) == 1) { prev = 0; }
+        var back = f64_mul(filtered, feedback);
+        if (f64_lt(f64_abs(back), min_pos) == 1) { back = 0; }
+        store64(ring + wp * 8, back);
+        wp = wp + 1;
+        if (wp >= max) { wp = 0; }
+        store64(data + i * 8, delayed);
         i = i + 1;
     }
+    KarplusStrong_set_damping_prev(self, prev);
+    DelayLine_set_write_pos(dl, wp);
     return 0;
 }
 
@@ -240,11 +278,52 @@ fn physical_wg_next_sample(self) {
 # Fill a vec buffer with samples (in place).
 fn physical_wg_fill_buffer(self, buffer) {
     var n = vec_len(buffer);
+    if (n == 0) { return 0; }
     var i = 0;
+    var fwd_dl = Waveguide_forward_delay(self);
+    var bwd_dl = Waveguide_backward_delay(self);
+    if (fwd_dl == bwd_dl || _delay_block_ok(fwd_dl) == 0 || _delay_block_ok(bwd_dl) == 0
+      || DelayLine_max_delay_samples(fwd_dl) != DelayLine_max_delay_samples(bwd_dl)
+      || DelayLine_write_pos(fwd_dl) != DelayLine_write_pos(bwd_dl)) {
+        while (i < n) {
+            vec_set(buffer, i, physical_wg_next_sample(self));
+            i = i + 1;
+        }
+        return 0;
+    }
+    var clamped = _delay_tap_clamp(fwd_dl, Waveguide_delay_samples(self));
+    var whole = f64_floor(clamped);
+    var offset = f64_to(whole);
+    var frac = f64_sub(clamped, whole);
+    var near = f64_sub(F64_ONE, frac);
+    var attenuation = f64_sub(F64_ONE, Waveguide_damping(self));
+    var jc = Waveguide_junction_coeff(self);
+    var min_pos = NAAD_F32_MIN_POS;
+    var max = DelayLine_max_delay_samples(fwd_dl);
+    var wp = DelayLine_write_pos(fwd_dl);
+    var fwd_ring = load64(DelayLine_buffer(fwd_dl));
+    var bwd_ring = load64(DelayLine_buffer(bwd_dl));
+    var data = load64(buffer);
     while (i < n) {
-        vec_set(buffer, i, physical_wg_next_sample(self));
+        var r0 = wp - offset - 1;
+        if (r0 < 0) { r0 = r0 + max; }
+        var r1 = r0 - 1;
+        if (r0 == 0) { r1 = max - 1; }
+        var fwd = f64_add(f64_mul(load64(fwd_ring + r0 * 8), near), f64_mul(load64(fwd_ring + r1 * 8), frac));
+        var bwd = f64_add(f64_mul(load64(bwd_ring + r0 * 8), near), f64_mul(load64(bwd_ring + r1 * 8), frac));
+        var fwd_back = f64_mul(f64_mul(f64_neg(bwd), attenuation), jc);
+        var bwd_back = f64_mul(f64_mul(f64_neg(fwd), attenuation), jc);
+        if (f64_lt(f64_abs(fwd_back), min_pos) == 1) { fwd_back = 0; }
+        if (f64_lt(f64_abs(bwd_back), min_pos) == 1) { bwd_back = 0; }
+        store64(fwd_ring + wp * 8, fwd_back);
+        store64(bwd_ring + wp * 8, bwd_back);
+        wp = wp + 1;
+        if (wp >= max) { wp = 0; }
+        store64(data + i * 8, f64_add(fwd, bwd));
         i = i + 1;
     }
+    DelayLine_set_write_pos(fwd_dl, wp);
+    DelayLine_set_write_pos(bwd_dl, wp);
     return 0;
 }
 

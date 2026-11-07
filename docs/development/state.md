@@ -8,6 +8,16 @@
 `VERSION` at the repo root is the source of truth for the current number. The
 entries below are the release record.
 
+**2.3.3** — the hot modules' buffer forms are real loops, the lever
+[ADR-0008](../adr/0008-the-dsp-core-stays-f64.md) measured. Output is byte-identical to
+2.3.2 over 94,731 values, and each form is bit-identical to its per-sample path, held there
+by `tests/buffer_forms.tcyr` and 149 mutants. Reverb is 2.6x faster in a block, and the delay
+paths 2.6x to 3.6x. Compressor, limiter and de-esser were tried and left alone: their cost
+is `f64_ln`. Consumers gain by calling the forms, since per-sample paths did not change.
+What a form owes and what is accepted is in
+[ADR-0009](../adr/0009-block-forms-are-a-second-copy.md). Suite: **41 suites / 3365
+assertions**.
+
 **f32 question closed.** The roadmap's P0 is measured and downgraded by its own rule:
 f32 buys 0% on `filter_biquad_process_sample`, in Cyrius and in Rust. The core stays f64,
 and svara and prani need not convert on naad's account. See
@@ -407,10 +417,10 @@ line, and nidhi and prani each have a failure of their own. The table is in
 
 Per-module parity tracked in [`port-audit.md`](port-audit.md). Summary:
 
-**41 / 41 modules ported — PORT COMPLETE** · **2861 assertions green across 40
-suites**, covering **all 450 public fns** (0 untested; 12 `_`-prefixed internal
+**41 / 41 modules ported — PORT COMPLETE** · **3365 assertions green across 41
+suites**, covering **all 452 public fns** (0 untested; 65 `_`-prefixed internal
 helpers are exercised through their public callers) · `dist/naad.cyr` bundle assembled and collision-audited to zero across
-all **759** top-level symbols — `fn`, `var`, `const` and `struct` alike, against
+all **837** top-level symbols — `fn`, `var`, `const` and `struct` alike, against
 hisab, goonj, sakshi, abaco and the whole pinned stdlib. The audit was fn-scoped
 through 2.1.2, which is how the `ERR_*` `var` collision survived three releases;
 `scripts/symbol-collision-check.sh` now enforces the wider scope in CI.
@@ -459,6 +469,11 @@ integration suite that includes `dist/naad.cyr` alongside `lib/hisab.cyr` and
 `lib/goonj.cyr` to pin the bundle's behaviour in the real flat namespace,
 including the naad/goonj error-code overlap.
 
+`tests/buffer_forms.tcyr` is not per-module either: it holds every block loop to the
+per-sample path it stands for, in raw bits. A change to a per-sample path has to reach its
+form, and that suite is what says so
+([ADR-0009](../adr/0009-block-forms-are-a-second-copy.md)).
+
 ## Benchmarks
 
 `tests/hotpath.bcyr`, via `cyrius bench` (also run by `cyrius audit`). **These
@@ -469,16 +484,27 @@ run (hpet clocksource, floor ≈ 1.2–1.4 µs per clock read):
 
 | Path | Per call |
 |------|----------|
-| `osc_next_sample` (sine) | 51 ns |
+| `osc_next_sample` (sine) | 50 ns |
 | `filter_svf` lowpass | 24 ns |
 | `filter_biquad` lowpass | 22 ns |
-| `envelope_adsr` `next_value` | 12 ns |
-| `noise` pink (Voss-McCartney) | 72 ns |
-| `unison` (5 voices) | 173 ns |
-| `subtractive` voice | 97 ns |
-| `additive` (8 partials) | 425 ns |
-| `reverb` | 632 ns |
-| `moog` ladder | 1.9 µs |
+| `envelope_adsr` `next_value` | 11 ns |
+| `noise` pink (Voss-McCartney) | 70 ns |
+| `unison` (5 voices) | 170 ns |
+| `subtractive` voice | 90 ns |
+| `additive` (8 partials) | 401 ns |
+| `reverb` | 593 ns |
+| `moog` ladder | 1.8 µs |
+
+The block rows are per call, on 256 samples. The biquad row includes refilling the block.
+
+| Path | Per block | Per sample |
+|------|-----------|------------|
+| biquad | 5.3 µs | 21 ns |
+| osc (sine) | 10.0 µs | 39 ns |
+| unison (5 voices) | 25.4 µs | 99 ns |
+| additive (8 partials) | 86.6 µs | 338 ns |
+| reverb | 60.2 µs | 235 ns |
+| vocoder (16 bands) | 133.9 µs | 523 ns |
 
 ## Method
 

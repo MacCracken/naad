@@ -208,6 +208,46 @@ ab_i = 0;
 while (ab_i < 1000) { reverb_process_buffer(ab_rv, ab_rv_in, ab_rv_l, ab_rv_r); ab_i = ab_i + 1; }
 assert(alloc_used() - ab_b14 < 1024, "reverb_process_buffer allocates nothing per block");
 
+# A chunked form holds its scratch on the stack. Taken from the allocator it would be
+# a leak per block, since nothing here ever frees.
+test_group("alloc budget: block forms");
+var ab_sr = f64_from(44100);
+var ab_bk_a = naad_vec_zeros(1024);
+var ab_bk_b = naad_vec_zeros(1024);
+var ab_bk_c = naad_vec_zeros(1024);
+var ab_bk_eq = eq_parametric_new(ab_sr);
+ab_sink = eq_add_band(ab_bk_eq, NAAD_FILTER_PEAK, f64_from(300), AB_ONE, f64_from(6));
+var ab_bk_formant = formant_synth_new(VOWEL_A, ab_sr);
+var ab_bk_comb = comb_filter_new(100, AB_C0_5);
+var ab_bk_allpass = allpass_delay_new(100, AB_C0_5);
+var ab_bk_vocoder = vocoder_new(8, f64_from(200), f64_from(8000), ab_sr);
+var ab_bk_additive = additive_new(f64_from(110), 8, ab_sr);
+var ab_bk_unison = unison_new(WAVEFORM_SAW, f64_from(220), 5, f64_from(12), ab_sr);
+var ab_bk_osc = osc_new(WAVEFORM_SAW, f64_from(440), ab_sr);
+var ab_bk_noise = noise_new(NOISE_PINK, 42);
+var ab_bk_ks = physical_ks_new(f64_from(220), AB_C0_5, AB_C0_5, ab_sr);
+var ab_bk_wg = physical_wg_new(f64_from(220), AB_C0_5, ab_sr);
+var ab_bk_gate = dynamics_noise_gate_new(f64_from(0 - 30), AB_C0_5, AB_C0_5, AB_C0_5, ab_sr);
+var ab_b18 = alloc_used();
+ab_i = 0;
+while (ab_i < 100) {
+    eq_process_buffer(ab_bk_eq, ab_bk_a);
+    formant_synth_process_buffer(ab_bk_formant, ab_bk_a);
+    comb_filter_process_buffer(ab_bk_comb, ab_bk_a);
+    allpass_delay_process_buffer(ab_bk_allpass, ab_bk_a);
+    vocoder_process_buffer(ab_bk_vocoder, ab_bk_a, ab_bk_b, ab_bk_c);
+    reverb_process_buffer(ab_rv, ab_bk_a, ab_bk_b, ab_bk_c);
+    ab_sink = additive_fill_buffer(ab_bk_additive, ab_bk_a);
+    unison_fill_buffer(ab_bk_unison, ab_bk_a);
+    osc_fill_buffer(ab_bk_osc, ab_bk_a);
+    noise_fill_buffer(ab_bk_noise, ab_bk_a);
+    physical_ks_fill_buffer(ab_bk_ks, ab_bk_a);
+    physical_wg_fill_buffer(ab_bk_wg, ab_bk_a);
+    dynamics_noise_gate_process_buffer(ab_bk_gate, ab_bk_a);
+    ab_i = ab_i + 1;
+}
+assert(alloc_used() - ab_b18 < 1024, "the block forms allocate nothing per block");
+
 test_group("alloc budget: naad_directivity_gain");
 var ab_dir = hvec3_unit_x();
 var ab_front = hvec3_unit_y();

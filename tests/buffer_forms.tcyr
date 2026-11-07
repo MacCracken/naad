@@ -1,0 +1,1210 @@
+# buffer_forms.tcyr -- every block loop against the per-sample calls it stands for.
+#
+# A block loop is a second copy of a per-sample path, so the two can drift apart
+# with the rest of the suite green. Each group here runs one object per-sample and
+# its twin through the buffer form, over mixed block sizes either side of NAAD_CHUNK,
+# and compares raw bits -- NaN sign and payload included. Sixty-four more per-sample
+# calls on both then show the state went back into the struct intact.
+#
+# Streams: full scale, below the flush line, a sweep down across it, a burst into
+# silence and into a quiet tail, and NaN/Inf/huge after a clean run in. The tail is
+# there because silence hides a gain: 0 * g is 0 whichever g the state holds. The low
+# streams carry -0, which shows the sign of a flushed zero. NaNs have a payload and a
+# sign of their own, since where two meet the first operand's wins, so that is what
+# shows an operand order that moved. Each stream runs with and without setters between
+# blocks: derive setters are public, so a form reads them at the top of a block and
+# nowhere else.
+#
+# The last groups are the loops' preconditions. A form reads through raw pointers,
+# so a ring desynced through its accessors has to reach the per-sample path, where
+# the bounds checks live. Where that path dies, the case runs in a child and the
+# exit code is the assertion.
+#
+# Runs against the shipped bundle. Regenerate with `cyrius distlib` after changing src/.
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "dist/naad.cyr"
+
+alloc_init();
+
+var BF_NEG_ZERO = 0x8000000000000000;
+var BF_NAN      = 0x7FF8000000000000;
+var BF_NEG_NAN  = BF_NAN | BF_NEG_ZERO;
+var BF_INF      = 0x7FF0000000000000;
+var BF_NEG_INF  = BF_INF | BF_NEG_ZERO;
+var BF_HUGE     = 0x7E37E43C8800759C;   # 1e300
+var BF_SR       = f64_from(44100);
+var BF_TINY     = f64_mul(NAAD_F32_MIN_POS, f64_from(4));
+
+var BF_FULL    = 0;
+var BF_BELOW   = 1;
+var BF_HOSTILE = 2;
+var BF_BURST   = 3;
+var BF_SWEEP   = 4;
+var BF_TAIL    = 5;
+
+# Blocks either side of the chunk length, with an empty one partway through.
+var BF_SIZES = vec_new();
+vec_push(BF_SIZES, 1);
+vec_push(BF_SIZES, 7);
+vec_push(BF_SIZES, 64);
+vec_push(BF_SIZES, 255);
+vec_push(BF_SIZES, 256);
+vec_push(BF_SIZES, 257);
+vec_push(BF_SIZES, 300);
+vec_push(BF_SIZES, 1024);
+vec_push(BF_SIZES, 0);
+vec_push(BF_SIZES, 3);
+vec_push(BF_SIZES, 513);
+
+var K_LOWPASS     = 0;
+var K_BANDPASS    = 1;
+var K_SVF         = 2;
+var K_EQ          = 3;
+var K_FORMANT     = 4;
+var K_COMB        = 5;
+var K_COMB_FRAC   = 6;
+var K_ALLPASS     = 7;
+var K_ALLPASS_FRAC = 8;
+var K_ADDITIVE    = 9;
+var K_WAVETABLE   = 10;
+var K_KS          = 11;
+var K_WG          = 12;
+var K_GATE        = 13;
+var K_GATE_LINE   = 14;   # a threshold under the flush line
+var K_OSC         = 100;   # + waveform id
+var K_NOISE       = 200;   # + noise type
+var K_UNISON      = 300;   # + waveform id
+var K_UNISON_ONE  = 400;   # a single voice
+
+# ================================================================
+# Streams
+# ================================================================
+fn bf_hash(pos) {
+    var h = ((pos + 1) * 2654435761) & U32_MASK;
+    h = h ^ (h >> 13);
+    h = (h * 1597334677) & U32_MASK;
+    return h ^ (h >> 16);
+}
+
+# Sample `pos` of the deterministic noise every stream is built on, in [-1, 1).
+fn bf_unit(pos) {
+    return f64_sub(f64_mul(f64_div(f64_from(bf_hash(pos)), DSP_U32_MAX), F64_TWO), F64_ONE);
+}
+
+# A quiet NaN with a payload and a sign drawn from `pos`.
+fn bf_nan(pos) {
+    var h = bf_hash(pos + 77777);
+    var bits = BF_NAN | (h & U32_MASK);
+    if ((h & 0x10000) != 0) { bits = bits | BF_NEG_ZERO; }
+    return bits;
+}
+
+# Signalling: the quiet bit clear, so the payload must be nonzero to stay a NaN.
+fn bf_snan(pos) {
+    var h = bf_hash(pos + 88888);
+    var bits = BF_INF | (h & U32_MASK) | 1;
+    if ((h & 0x10000) != 0) { bits = bits | BF_NEG_ZERO; }
+    return bits;
+}
+
+# Sample `pos` of stream `mode`.
+fn bf_sample(mode, pos) {
+    var x = bf_unit(pos);
+    if ((mode == BF_BELOW || mode == BF_SWEEP || mode == BF_TAIL) && pos % 5 == 0) { return BF_NEG_ZERO; }
+    if (mode == BF_BELOW) { return f64_mul(x, BF_TINY); }
+    if (mode == BF_TAIL) {
+        if (pos < 40) { return x; }
+        return f64_div(x, f64_from(1024));
+    }
+    if (mode == BF_SWEEP) {
+        # Halving every 200 samples, through the flush line a little past halfway.
+        var k = 8 - pos / 200;
+        if (k >= 0) { return f64_mul(f64_mul(x, NAAD_F32_MIN_POS), f64_from(1 << k)); }
+        return f64_div(f64_mul(x, NAAD_F32_MIN_POS), f64_from(1 << (0 - k)));
+    }
+    if (mode == BF_BURST) {
+        if (pos < 40) { return x; }
+        return 0;
+    }
+    if (mode == BF_HOSTILE && pos >= 1400) {
+        var r = pos % 13;
+        if (r == 0) { return bf_nan(pos); }
+        if (r == 1) { return BF_INF; }
+        if (r == 2) { return BF_NEG_INF; }
+        if (r == 3) { return BF_HUGE; }
+        if (r == 4) { return BF_NEG_ZERO; }
+        if (r == 5) { return bf_snan(pos); }
+        if (r == 6) { return f64_mul(NAAD_F32_MIN_POS, F64_HALF); }
+    }
+    return x;
+}
+
+# A value for a setter: `plain`, until the hostile run reaches its last few blocks.
+fn bf_param(mode, turn, plain) {
+    if (mode != BF_HOSTILE || turn < 6) { return plain; }
+    var r = turn % 4;
+    if (r == 1) { return BF_INF; }
+    if (r == 3) { return BF_NEG_INF; }
+    return bf_nan(turn);
+}
+
+# Fill a ring with NaNs of its own, for the rails and strings a setter cannot reach.
+fn bf_nan_ring(dl, base) {
+    var buffer = DelayLine_buffer(dl);
+    var i = 0;
+    while (i < vec_len(buffer)) {
+        vec_set(buffer, i, bf_nan(base + i));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# n / d as an f64.
+fn bf_fraction(n, d) { return f64_div(f64_from(n), f64_from(d)); }
+
+# ================================================================
+# Objects, one per form, and the two ways to drive each.
+# ================================================================
+fn bf_make_eq() {
+    var eq = eq_parametric_new(BF_SR);
+    var e1 = eq_add_band(eq, NAAD_FILTER_PEAK, f64_from(300), F64_ONE, f64_from(6));
+    var e2 = eq_add_band(eq, NAAD_FILTER_LOWSHELF, f64_from(100), F64_ONE, f64_from(3));
+    var e3 = eq_add_band(eq, NAAD_FILTER_HIGHSHELF, f64_from(5000), F64_ONE, f64_from(0 - 4));
+    assert_eq(e1 + e2 + e3, NAAD_ERR_NONE, "eq bands build");
+    EqBand_set_enabled(vec_get(ParametricEq_bands(eq), 1), 0);
+    return eq;
+}
+
+# Noise, so sample 0 is not the zero a harmonic table starts on: reading one past the
+# end instead of wrapping to it has to show.
+fn bf_make_wavetable() {
+    var samples = naad_vec_zeros(256);
+    var i = 0;
+    while (i < 256) {
+        vec_set(samples, i, bf_unit(i));
+        i = i + 1;
+    }
+    return wavetable_osc_new(wavetable_from_samples(samples), bf_fraction(4401, 10), BF_SR);
+}
+
+# A fresh object of `kind`, built the same way every time.
+fn bf_make(kind) {
+    var q = bf_fraction(7, 10);
+    if (kind == K_LOWPASS) { return filter_biquad_new(NAAD_FILTER_LOWPASS, BF_SR, f64_from(1000), q); }
+    if (kind == K_BANDPASS) { return filter_biquad_new(NAAD_FILTER_BANDPASS, BF_SR, f64_from(4000), f64_from(9)); }
+    if (kind == K_SVF) { return filter_svf_new(f64_from(1000), q, BF_SR); }
+    if (kind == K_EQ) { return bf_make_eq(); }
+    if (kind == K_FORMANT) { return formant_synth_new(1, BF_SR); }
+    if (kind == K_COMB) { return comb_filter_new(10, F64_HALF); }
+    if (kind == K_COMB_FRAC) {
+        var cf = comb_filter_new(12, F64_HALF);
+        CombFilter_set_delay_samples(cf, bf_fraction(21, 2));
+        return cf;
+    }
+    if (kind == K_ALLPASS) { return allpass_delay_new(10, F64_HALF); }
+    if (kind == K_ALLPASS_FRAC) {
+        var ap = allpass_delay_new(12, F64_HALF);
+        AllpassDelay_set_delay_samples(ap, bf_fraction(21, 2));
+        return ap;
+    }
+    if (kind == K_ADDITIVE) { return additive_new(f64_from(110), 8, BF_SR); }
+    if (kind == K_WAVETABLE) { return bf_make_wavetable(); }
+    if (kind == K_KS) {
+        var ks = physical_ks_new(f64_from(220), bf_fraction(99, 100), F64_HALF, BF_SR);
+        physical_ks_pluck(ks);
+        return ks;
+    }
+    if (kind == K_WG) {
+        var wg = physical_wg_new(f64_from(220), bf_fraction(1, 100), BF_SR);
+        physical_wg_excite(wg, F64_ONE);
+        return wg;
+    }
+    if (kind == K_GATE) {
+        # A hold long enough for the count to cross a block edge after the burst.
+        return dynamics_noise_gate_new(f64_from(0 - 30), bf_fraction(1, 1000), bf_fraction(3, 100),
+          bf_fraction(1, 100), BF_SR);
+    }
+    if (kind == K_GATE_LINE) {
+        # 5.6e-39, so an envelope between here and the line opens the gate only if it
+        # escaped the flush.
+        return dynamics_noise_gate_new(f64_from(0 - 765), bf_fraction(1, 1000), 0,
+          bf_fraction(1, 100), BF_SR);
+    }
+    if (kind >= K_UNISON_ONE) { return unison_new(WAVEFORM_SAW, f64_from(220), 1, f64_from(20), BF_SR); }
+    if (kind >= K_UNISON) { return unison_new(kind - K_UNISON, f64_from(220), 7, f64_from(20), BF_SR); }
+    if (kind >= K_NOISE) { return noise_new(kind - K_NOISE, 12345); }
+    return osc_new(kind - K_OSC, f64_from(440), BF_SR);
+}
+
+# One per-sample call on `o`.
+fn bf_step(kind, o, x) {
+    if (kind <= K_BANDPASS) { return filter_biquad_process_sample(o, x); }
+    if (kind == K_SVF) { return filter_svf_process_sample_lowpass(o, x); }
+    if (kind == K_EQ) { return eq_process_sample(o, x); }
+    if (kind == K_FORMANT) { return formant_synth_process_sample(o, x); }
+    if (kind == K_COMB || kind == K_COMB_FRAC) { return comb_filter_process_sample(o, x); }
+    if (kind == K_ALLPASS || kind == K_ALLPASS_FRAC) { return allpass_delay_process_sample(o, x); }
+    if (kind == K_ADDITIVE) { return additive_next_sample(o); }
+    if (kind == K_WAVETABLE) { return wavetable_osc_next_sample(o); }
+    if (kind == K_KS) { return physical_ks_next_sample(o); }
+    if (kind == K_WG) { return physical_wg_next_sample(o); }
+    if (kind == K_GATE || kind == K_GATE_LINE) { return dynamics_noise_gate_process_sample(o, x); }
+    if (kind >= K_UNISON) { return unison_next_sample(o); }
+    if (kind >= K_NOISE) { return noise_next_sample(o); }
+    return osc_next_sample(o);
+}
+
+# The buffer form of `kind` on `o`, over `buf`.
+fn bf_block(kind, o, buf) {
+    if (kind <= K_BANDPASS) { return filter_biquad_process_buffer(o, buf); }
+    if (kind == K_SVF) { return filter_svf_process_buffer_lowpass(o, buf); }
+    if (kind == K_EQ) { return eq_process_buffer(o, buf); }
+    if (kind == K_FORMANT) { return formant_synth_process_buffer(o, buf); }
+    if (kind == K_COMB || kind == K_COMB_FRAC) { return comb_filter_process_buffer(o, buf); }
+    if (kind == K_ALLPASS || kind == K_ALLPASS_FRAC) { return allpass_delay_process_buffer(o, buf); }
+    if (kind == K_ADDITIVE) { return additive_fill_buffer(o, buf); }
+    if (kind == K_WAVETABLE) { return wavetable_osc_fill_buffer(o, buf); }
+    if (kind == K_KS) { return physical_ks_fill_buffer(o, buf); }
+    if (kind == K_WG) { return physical_wg_fill_buffer(o, buf); }
+    if (kind == K_GATE || kind == K_GATE_LINE) { return dynamics_noise_gate_process_buffer(o, buf); }
+    if (kind >= K_UNISON) { return unison_fill_buffer(o, buf); }
+    if (kind >= K_NOISE) { return noise_fill_buffer(o, buf); }
+    return osc_fill_buffer(o, buf);
+}
+
+# Through the setters, between blocks, the same on both objects.
+fn bf_poke(kind, o, turn, mode) {
+    var freq = bf_param(mode, turn, f64_from(220 + turn * 55));
+    var level = bf_param(mode, turn, bf_fraction(1 + turn, 16));
+    var delay = bf_param(mode, turn, bf_fraction(5 + turn * 3, 2));
+    var status = 0;
+    if (kind <= K_BANDPASS) {
+        status = filter_biquad_set_params(o, freq, F64_ONE, 0);
+    } elif (kind == K_SVF) {
+        status = filter_svf_set_params(o, freq, F64_ONE);
+    } elif (kind == K_EQ) {
+        EqBand_set_enabled(vec_get(ParametricEq_bands(o), turn % 3), turn & 1);
+    } elif (kind == K_FORMANT) {
+        status = formant_synth_morph(o, turn % 5, (turn + 1) % 5, level);
+        vec_set(FormantSynth_amplitudes(o), turn % FORMANT_NUM, bf_param(mode, turn, level));
+        # A NaN from the stream reaches every band alike. One per filter is what shows
+        # the order of the sum.
+        var f = 0;
+        while (f < FORMANT_NUM && mode == BF_HOSTILE && turn >= 6) {
+            BiquadFilter_set_z1(vec_get(FormantSynth_filters(o), f), bf_nan(turn * 16 + f));
+            f = f + 1;
+        }
+    } elif (kind == K_COMB || kind == K_COMB_FRAC) {
+        CombFilter_set_feedback(o, level);
+        CombFilter_set_delay_samples(o, delay);
+    } elif (kind == K_ALLPASS || kind == K_ALLPASS_FRAC) {
+        AllpassDelay_set_coefficient(o, level);
+        AllpassDelay_set_delay_samples(o, delay);
+    } elif (kind == K_ADDITIVE) {
+        status = additive_set_fundamental(o, freq);
+        AdditiveSynth_set_sample_rate(o, bf_param(mode, turn, f64_from(48000)));
+        # Amplitude zero: a partial that keeps its phase while the others move.
+        var slot = turn % 8;
+        var partial = vec_get(AdditiveSynth_partials(o), slot);
+        Partial_set_amplitude(partial, bf_param(mode, turn, (turn & 1) * level));
+    } elif (kind == K_WAVETABLE) {
+        status = wavetable_osc_set_frequency(o, freq);
+    } elif (kind == K_KS) {
+        KarplusStrong_set_brightness(o, level);
+        KarplusStrong_set_delay_samples(o, delay);
+        KarplusStrong_set_damping_prev(o, bf_param(mode, turn, 0));
+        if (turn == 3) { physical_ks_pluck(o); }
+        if (turn == 6 && mode == BF_HOSTILE) { bf_nan_ring(KarplusStrong_delay_line(o), 300); }
+    } elif (kind == K_WG) {
+        Waveguide_set_damping(o, level);
+        Waveguide_set_delay_samples(o, delay);
+        status = physical_wg_set_junction_coeff(o, level);
+        if (turn == 3) { physical_wg_excite(o, F64_ONE); }
+        if (turn == 6 && mode == BF_HOSTILE) {
+            bf_nan_ring(Waveguide_forward_delay(o), 500);
+            bf_nan_ring(Waveguide_backward_delay(o), 900);
+        }
+    } elif (kind == K_GATE_LINE) {
+        return status;
+    } elif (kind == K_GATE) {
+        NoiseGate_set_threshold_db(o, bf_param(mode, turn, f64_from(0 - 10 - turn * 4)));
+        NoiseGate_set_hold_samples(o, turn * 9);
+        NoiseGate_set_attack_coeff(o, level);
+        NoiseGate_set_release_coeff(o, level);
+        LevelDetector_set_release_coeff(NoiseGate_detector(o), level);
+    } elif (kind >= K_UNISON) {
+        status = unison_set_frequency(o, freq);
+        status = unison_set_detune_cents(o, bf_param(mode, turn, f64_from(3 + turn * 4)));
+        var phases = UnisonOscillator_phases(o);
+        if (mode == BF_HOSTILE && turn >= 6) { vec_set(phases, turn % vec_len(phases), bf_nan(turn)); }
+    } elif (kind >= K_NOISE) {
+        NoiseGenerator_set_brown_prev(o, level);
+        if (turn == 2) { NoiseGenerator_set_pink_counter(o, 0xFFFFFFFE); }
+        if (turn == 3) { store64(NoiseGenerator_rng(o), 0); }
+    } else {
+        status = osc_set_frequency(o, freq);
+        status = osc_set_pulse_width(o, level);
+        # The accessor takes what the setter would clamp; the read clamps it again.
+        if (turn >= 7) { Oscillator_set_pulse_width(o, f64_mul(level, f64_from(2 - 4 * (turn & 1)))); }
+        var wf = Oscillator_waveform(o);
+        if (turn == 4 && wf <= WAVEFORM_PULSE) { Oscillator_set_waveform(o, (wf + 1) % 5); }
+        if (turn == 7 && mode == BF_HOSTILE && wf <= WAVEFORM_PULSE) { Oscillator_set_waveform(o, 9); }
+    }
+    return status;
+}
+
+# The pluck is full scale and would not decay to the flush line inside a run, so for
+# the low streams the string starts from the stream itself.
+fn bf_prime(kind, o, mode) {
+    if (kind != K_KS || (mode != BF_BELOW && mode != BF_SWEEP)) { return 0; }
+    var dl = KarplusStrong_delay_line(o);
+    var i = 0;
+    while (i < DelayLine_max_delay_samples(dl)) {
+        delay_line_write(dl, bf_sample(BF_BELOW, i));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# The comparison. Returns the number of samples that differ.
+# ================================================================
+fn bf_compare(kind, mode, poke) {
+    var a = bf_make(kind);
+    var b = bf_make(kind);
+    bf_prime(kind, a, mode);
+    bf_prime(kind, b, mode);
+    var diff = 0;
+    var pos = 0;
+    var turn = 0;
+    while (turn < vec_len(BF_SIZES)) {
+        var n = vec_get(BF_SIZES, turn);
+        var want = naad_vec_zeros(n);
+        var buf = naad_vec_zeros(n);
+        var j = 0;
+        while (j < n) {
+            var x = bf_sample(mode, pos + j);
+            vec_set(buf, j, x);
+            vec_set(want, j, bf_step(kind, a, x));
+            j = j + 1;
+        }
+        var status = bf_block(kind, b, buf);
+        j = 0;
+        while (j < n) {
+            if (vec_get(buf, j) != vec_get(want, j)) { diff = diff + 1; }
+            j = j + 1;
+        }
+        pos = pos + n;
+        if (poke == 1) {
+            status = bf_poke(kind, a, turn, mode);
+            status = bf_poke(kind, b, turn, mode);
+        }
+        turn = turn + 1;
+    }
+    var t = 0;
+    while (t < 64) {
+        var y = bf_sample(mode, pos + t);
+        if (bf_step(kind, a, y) != bf_step(kind, b, y)) { diff = diff + 1; }
+        t = t + 1;
+    }
+    return diff;
+}
+
+# Every stream against `kind`, with and without setters between blocks.
+fn bf_all(kind) {
+    assert_eq(bf_compare(kind, BF_FULL, 0), 0, "full scale");
+    assert_eq(bf_compare(kind, BF_BELOW, 0), 0, "below the flush line");
+    assert_eq(bf_compare(kind, BF_SWEEP, 0), 0, "down across the flush line");
+    assert_eq(bf_compare(kind, BF_BURST, 0), 0, "a burst into silence");
+    assert_eq(bf_compare(kind, BF_TAIL, 0), 0, "a burst into a quiet tail");
+    assert_eq(bf_compare(kind, BF_HOSTILE, 0), 0, "NaN, Inf and huge");
+    assert_eq(bf_compare(kind, BF_FULL, 1), 0, "full scale, setters between blocks");
+    assert_eq(bf_compare(kind, BF_BELOW, 1), 0, "below the flush line, setters between blocks");
+    assert_eq(bf_compare(kind, BF_SWEEP, 1), 0, "down across the flush line, setters between blocks");
+    assert_eq(bf_compare(kind, BF_BURST, 1), 0, "a burst into silence, setters between blocks");
+    assert_eq(bf_compare(kind, BF_TAIL, 1), 0, "a burst into a quiet tail, setters between blocks");
+    assert_eq(bf_compare(kind, BF_HOSTILE, 1), 0, "hostile through the stream and the setters");
+    return 0;
+}
+
+test_group("biquad lowpass");
+bf_all(K_LOWPASS);
+test_group("biquad bandpass");
+bf_all(K_BANDPASS);
+test_group("svf lowpass");
+bf_all(K_SVF);
+test_group("parametric eq");
+bf_all(K_EQ);
+test_group("formant synth");
+bf_all(K_FORMANT);
+test_group("comb filter");
+bf_all(K_COMB);
+test_group("comb filter, fractional tap");
+bf_all(K_COMB_FRAC);
+test_group("allpass delay");
+bf_all(K_ALLPASS);
+test_group("allpass delay, fractional tap");
+bf_all(K_ALLPASS_FRAC);
+test_group("additive");
+bf_all(K_ADDITIVE);
+test_group("wavetable oscillator");
+bf_all(K_WAVETABLE);
+test_group("karplus-strong");
+bf_all(K_KS);
+test_group("waveguide");
+bf_all(K_WG);
+test_group("noise gate");
+bf_all(K_GATE);
+test_group("noise gate, threshold under the flush line");
+bf_all(K_GATE_LINE);
+
+test_group("oscillator, each waveform");
+var bf_wf = WAVEFORM_SINE;
+while (bf_wf <= WAVEFORM_BROWN_NOISE) {
+    bf_all(K_OSC + bf_wf);
+    bf_wf = bf_wf + 1;
+}
+test_group("noise, each colour");
+bf_all(K_NOISE + NOISE_WHITE);
+bf_all(K_NOISE + NOISE_PINK);
+bf_all(K_NOISE + NOISE_BROWN);
+test_group("unison, each waveform");
+bf_wf = WAVEFORM_SINE;
+while (bf_wf <= WAVEFORM_PULSE) {
+    bf_all(K_UNISON + bf_wf);
+    bf_wf = bf_wf + 1;
+}
+test_group("unison, one voice");
+bf_all(K_UNISON_ONE);
+
+# ================================================================
+# Reverb: two outputs, and the output vecs may be short or be the input.
+# ================================================================
+fn bf_reverb_new() {
+    return reverb_new(bf_fraction(4, 5), F64_HALF, f64_from(10), bf_fraction(2, 5), BF_SR);
+}
+
+# Reverb state and settings through the accessors, between blocks.
+fn bf_reverb_poke(r, turn, mode) {
+    Reverb_set_mix(r, bf_param(mode, turn, bf_fraction(1 + turn, 16)));
+    Reverb_set_width(r, bf_param(mode, turn, bf_fraction(turn, 8)));
+    # Half-sample taps: the constructors only ever build whole ones.
+    Reverb_set_pre_delay_samples(r, bf_param(mode, turn, bf_fraction(41 + turn * 34, 2)));
+    var comb = vec_get(Reverb_combs_l(r), turn % 4);
+    DampedComb_set_feedback(comb, bf_param(mode, turn, F64_HALF));
+    DampedComb_set_delay_samples(comb, bf_param(mode, turn, bf_fraction(801 + turn * 96, 2)));
+    var ap = vec_get(Reverb_allpasses_r(r), turn % 2);
+    ReverbAllpass_set_feedback(ap, bf_param(mode, turn, F64_HALF));
+    ReverbAllpass_set_delay_samples(ap, bf_param(mode, turn, bf_fraction(101 + turn * 12, 2)));
+    var other = vec_get(Reverb_combs_r(r), turn % 4);
+    DampedComb_set_damp1(other, bf_param(mode, turn, bf_fraction(1, 4)));
+    DampedComb_set_damp2(other, bf_param(mode, turn, bf_fraction(3, 4)));
+    DampedComb_set_filter_state(other, bf_param(mode, turn, 0));
+    return 0;
+}
+
+# bf_compare for the reverb: both outputs, then the tail. Returns samples that differ.
+fn bf_reverb_compare(mode, poke) {
+    var a = bf_reverb_new();
+    var b = bf_reverb_new();
+    var res = alloc(sizeof(ReverbStereo));
+    var diff = 0;
+    var pos = 0;
+    var turn = 0;
+    while (turn < vec_len(BF_SIZES)) {
+        var n = vec_get(BF_SIZES, turn);
+        var input = naad_vec_zeros(n);
+        var left = naad_vec_zeros(n);
+        var right = naad_vec_zeros(n);
+        var want_l = naad_vec_zeros(n);
+        var want_r = naad_vec_zeros(n);
+        var j = 0;
+        while (j < n) {
+            var x = bf_sample(mode, pos + j);
+            vec_set(input, j, x);
+            reverb_process_core(a, x, res);
+            vec_set(want_l, j, ReverbStereo_left(res));
+            vec_set(want_r, j, ReverbStereo_right(res));
+            j = j + 1;
+        }
+        reverb_process_buffer(b, input, left, right);
+        j = 0;
+        while (j < n) {
+            if (vec_get(left, j) != vec_get(want_l, j)) { diff = diff + 1; }
+            if (vec_get(right, j) != vec_get(want_r, j)) { diff = diff + 1; }
+            j = j + 1;
+        }
+        pos = pos + n;
+        if (poke == 1) {
+            bf_reverb_poke(a, turn, mode);
+            bf_reverb_poke(b, turn, mode);
+        }
+        turn = turn + 1;
+    }
+    var res2 = alloc(sizeof(ReverbStereo));
+    var t = 0;
+    while (t < 64) {
+        var y = bf_sample(mode, pos + t);
+        reverb_process_core(a, y, res);
+        reverb_process_core(b, y, res2);
+        if (ReverbStereo_left(res) != ReverbStereo_left(res2)) { diff = diff + 1; }
+        if (ReverbStereo_right(res) != ReverbStereo_right(res2)) { diff = diff + 1; }
+        t = t + 1;
+    }
+    return diff;
+}
+
+test_group("reverb");
+assert_eq(bf_reverb_compare(BF_FULL, 0), 0, "full scale");
+assert_eq(bf_reverb_compare(BF_BELOW, 0), 0, "below the flush line");
+assert_eq(bf_reverb_compare(BF_SWEEP, 0), 0, "down across the flush line");
+assert_eq(bf_reverb_compare(BF_BURST, 0), 0, "a burst into silence");
+assert_eq(bf_reverb_compare(BF_HOSTILE, 0), 0, "NaN, Inf and huge");
+assert_eq(bf_reverb_compare(BF_FULL, 1), 0, "full scale, setters between blocks");
+assert_eq(bf_reverb_compare(BF_SWEEP, 1), 0, "down across the flush line, setters between blocks");
+assert_eq(bf_reverb_compare(BF_HOSTILE, 1), 0, "hostile through the stream and the setters");
+
+# Per-sample reference for `n` samples, writing left then right where each is long
+# enough, as the buffer form does; left and right may be the input.
+fn bf_reverb_by_hand(r, input, left, right, n) {
+    var res = alloc(sizeof(ReverbStereo));
+    var i = 0;
+    while (i < n) {
+        reverb_process_core(r, vec_get(input, i), res);
+        if (i < vec_len(left)) { vec_set(left, i, ReverbStereo_left(res)); }
+        if (i < vec_len(right)) { vec_set(right, i, ReverbStereo_right(res)); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# A vec of `n` samples of noise, starting `base` samples in.
+fn bf_filled(n, base) {
+    var v = naad_vec_zeros(n);
+    var i = 0;
+    while (i < n) {
+        vec_set(v, i, bf_unit(base + i));
+        i = i + 1;
+    }
+    return v;
+}
+
+# How many elements of two vecs differ in raw bits, or -1 if the lengths do.
+fn bf_diff(u, v) {
+    var count = 0;
+    var i = 0;
+    if (vec_len(u) != vec_len(v)) { return 0 - 1; }
+    while (i < vec_len(u)) {
+        if (vec_get(u, i) != vec_get(v, i)) { count = count + 1; }
+        i = i + 1;
+    }
+    return count;
+}
+
+test_group("reverb: output vecs");
+var rv_n = 700;
+var rv_in1 = bf_filled(rv_n, 0);
+var rv_in2 = bf_filled(rv_n, 0);
+var rv_l1 = naad_vec_zeros(rv_n);
+var rv_r1 = naad_vec_zeros(rv_n);
+bf_reverb_by_hand(bf_reverb_new(), rv_in1, rv_in1, rv_r1, rv_n);
+reverb_process_buffer(bf_reverb_new(), rv_in2, rv_in2, rv_l1);
+assert_eq(bf_diff(rv_in1, rv_in2), 0, "left may be the input");
+assert_eq(bf_diff(rv_r1, rv_l1), 0, "right beside it");
+
+rv_in1 = bf_filled(rv_n, 0);
+rv_in2 = bf_filled(rv_n, 0);
+rv_l1 = naad_vec_zeros(rv_n);
+var rv_l2 = naad_vec_zeros(rv_n);
+bf_reverb_by_hand(bf_reverb_new(), rv_in1, rv_l1, rv_in1, rv_n);
+reverb_process_buffer(bf_reverb_new(), rv_in2, rv_l2, rv_in2);
+assert_eq(bf_diff(rv_in1, rv_in2), 0, "right may be the input");
+assert_eq(bf_diff(rv_l1, rv_l2), 0, "left beside it");
+
+rv_in1 = bf_filled(rv_n, 0);
+rv_in2 = bf_filled(rv_n, 0);
+bf_reverb_by_hand(bf_reverb_new(), rv_in1, rv_in1, rv_in1, rv_n);
+reverb_process_buffer(bf_reverb_new(), rv_in2, rv_in2, rv_in2);
+assert_eq(bf_diff(rv_in1, rv_in2), 0, "left and right may both be the input");
+
+rv_in1 = bf_filled(rv_n, 0);
+var rv_s1 = naad_vec_zeros(300);
+var rv_s2 = naad_vec_zeros(300);
+var rv_f1 = naad_vec_zeros(rv_n);
+var rv_f2 = naad_vec_zeros(rv_n);
+bf_reverb_by_hand(bf_reverb_new(), rv_in1, rv_s1, rv_f1, rv_n);
+reverb_process_buffer(bf_reverb_new(), rv_in1, rv_s2, rv_f2);
+assert_eq(bf_diff(rv_s1, rv_s2), 0, "a short left stops at its own length");
+assert_eq(bf_diff(rv_f1, rv_f2), 0, "and right runs on");
+
+rv_s1 = naad_vec_zeros(300);
+rv_s2 = naad_vec_zeros(300);
+rv_f1 = naad_vec_zeros(rv_n);
+rv_f2 = naad_vec_zeros(rv_n);
+bf_reverb_by_hand(bf_reverb_new(), rv_in1, rv_f1, rv_s1, rv_n);
+reverb_process_buffer(bf_reverb_new(), rv_in1, rv_f2, rv_s2);
+assert_eq(bf_diff(rv_s1, rv_s2), 0, "a short right stops at its own length");
+assert_eq(bf_diff(rv_f1, rv_f2), 0, "and left runs on");
+
+# ================================================================
+# Vocoder: two inputs, and the output may be either.
+# ================================================================
+fn bf_vocoder_new() {
+    return vocoder_new(8, f64_from(200), f64_from(8000), BF_SR);
+}
+
+# Vocoder state and settings through the accessors, between blocks.
+fn bf_vocoder_poke(v, turn, mode) {
+    var band = vec_get(Vocoder_bands(v), turn % 8);
+    VocoderBand_set_attack_coeff(band, bf_param(mode, turn, bf_fraction(1 + turn, 32)));
+    VocoderBand_set_release_coeff(band, bf_param(mode, turn, bf_fraction(1 + turn, 64)));
+    VocoderBand_set_envelope_follower(band, bf_param(mode, turn, 0));
+    var filter = VocoderBand_synthesis_filter(band);
+    BiquadFilter_set_z1(filter, bf_param(mode, turn, 0));
+    BiquadFilter_set_z2(filter, bf_param(mode, turn, 0));
+    BiquadFilter_set_b0(VocoderBand_analysis_filter(band), bf_param(mode, turn, bf_fraction(1, 8)));
+    return 0;
+}
+
+# bf_compare for the vocoder, on two streams. Returns samples that differ.
+fn bf_vocoder_compare(mode, poke) {
+    var a = bf_vocoder_new();
+    var b = bf_vocoder_new();
+    var diff = 0;
+    var pos = 0;
+    var turn = 0;
+    while (turn < vec_len(BF_SIZES)) {
+        var n = vec_get(BF_SIZES, turn);
+        var mo = naad_vec_zeros(n);
+        var car = naad_vec_zeros(n);
+        var out = naad_vec_zeros(n);
+        var want = naad_vec_zeros(n);
+        var j = 0;
+        while (j < n) {
+            vec_set(mo, j, bf_sample(mode, pos + j));
+            vec_set(car, j, bf_sample(mode, 5000 + pos + j));
+            vec_set(want, j, vocoder_process_sample(a, vec_get(mo, j), vec_get(car, j)));
+            j = j + 1;
+        }
+        vocoder_process_buffer(b, mo, car, out);
+        diff = diff + bf_diff(out, want);
+        pos = pos + n;
+        if (poke == 1) {
+            bf_vocoder_poke(a, turn, mode);
+            bf_vocoder_poke(b, turn, mode);
+        }
+        turn = turn + 1;
+    }
+    var t = 0;
+    while (t < 64) {
+        var m = bf_sample(mode, pos + t);
+        var c = bf_sample(mode, 7000 + pos + t);
+        if (vocoder_process_sample(a, m, c) != vocoder_process_sample(b, m, c)) { diff = diff + 1; }
+        t = t + 1;
+    }
+    return diff;
+}
+
+test_group("vocoder");
+assert_eq(bf_vocoder_compare(BF_FULL, 0), 0, "full scale");
+assert_eq(bf_vocoder_compare(BF_BELOW, 0), 0, "below the flush line");
+assert_eq(bf_vocoder_compare(BF_SWEEP, 0), 0, "down across the flush line");
+assert_eq(bf_vocoder_compare(BF_BURST, 0), 0, "a burst into silence");
+assert_eq(bf_vocoder_compare(BF_HOSTILE, 0), 0, "NaN, Inf and huge");
+assert_eq(bf_vocoder_compare(BF_FULL, 1), 0, "full scale, setters between blocks");
+assert_eq(bf_vocoder_compare(BF_SWEEP, 1), 0, "down across the flush line, setters between blocks");
+assert_eq(bf_vocoder_compare(BF_HOSTILE, 1), 0, "hostile through the stream and the setters");
+
+# The per-sample reference for `n` samples.
+fn bf_vocoder_by_hand(v, mo, car, out, n) {
+    var i = 0;
+    while (i < n) {
+        var s = vocoder_process_sample(v, vec_get(mo, i), vec_get(car, i));
+        vec_set(out, i, s);
+        i = i + 1;
+    }
+    return 0;
+}
+
+test_group("vocoder: output vecs");
+var vo_n = 700;
+var vo_mod1 = bf_filled(vo_n, 0);
+var vo_mod2 = bf_filled(vo_n, 0);
+var vo_car = bf_filled(vo_n, 9000);
+bf_vocoder_by_hand(bf_vocoder_new(), vo_mod1, vo_car, vo_mod1, vo_n);
+vocoder_process_buffer(bf_vocoder_new(), vo_mod2, vo_car, vo_mod2);
+assert_eq(bf_diff(vo_mod1, vo_mod2), 0, "the output may be the modulator");
+
+var vo_car1 = bf_filled(vo_n, 9000);
+var vo_car2 = bf_filled(vo_n, 9000);
+var vo_mod = bf_filled(vo_n, 0);
+bf_vocoder_by_hand(bf_vocoder_new(), vo_mod, vo_car1, vo_car1, vo_n);
+vocoder_process_buffer(bf_vocoder_new(), vo_mod, vo_car2, vo_car2);
+assert_eq(bf_diff(vo_car1, vo_car2), 0, "the output may be the carrier");
+
+var vo_all1 = bf_filled(vo_n, 0);
+var vo_all2 = bf_filled(vo_n, 0);
+bf_vocoder_by_hand(bf_vocoder_new(), vo_all1, vo_all1, vo_all1, vo_n);
+vocoder_process_buffer(bf_vocoder_new(), vo_all2, vo_all2, vo_all2);
+assert_eq(bf_diff(vo_all1, vo_all2), 0, "all three may be one vec");
+
+var vo_short = bf_filled(300, 0);
+var vo_o1 = bf_filled(vo_n, 20000);
+var vo_o2 = bf_filled(vo_n, 20000);
+bf_vocoder_by_hand(bf_vocoder_new(), vo_short, vo_car, vo_o1, 300);
+vocoder_process_buffer(bf_vocoder_new(), vo_short, vo_car, vo_o2);
+assert_eq(bf_diff(vo_o1, vo_o2), 0, "the shortest vec sets the length, the tail stays");
+
+# Samples past the shortest vec must not reach the bands: the state shows it, whatever
+# the output vec looked like.
+fn bf_vocoder_same_after(a, b) {
+    var diff = 0;
+    var i = 0;
+    while (i < 64) {
+        var m = bf_unit(i);
+        var c = bf_unit(i + 400);
+        if (vocoder_process_sample(a, m, c) != vocoder_process_sample(b, m, c)) { diff = diff + 1; }
+        i = i + 1;
+    }
+    return diff;
+}
+
+var vo_a = bf_vocoder_new();
+var vo_b = bf_vocoder_new();
+var vo_o3 = naad_vec_zeros(vo_n);
+var vo_o4 = naad_vec_zeros(vo_n);
+bf_vocoder_by_hand(vo_a, vo_mod, vo_short, vo_o3, 300);
+vocoder_process_buffer(vo_b, vo_mod, vo_short, vo_o4);
+assert_eq(bf_diff(vo_o3, vo_o4), 0, "a short carrier sets the length");
+assert_eq(bf_vocoder_same_after(vo_a, vo_b), 0, "and the bands stop there");
+
+vo_a = bf_vocoder_new();
+vo_b = bf_vocoder_new();
+var vo_o5 = naad_vec_zeros(300);
+var vo_o6 = naad_vec_zeros(300);
+bf_vocoder_by_hand(vo_a, vo_mod, vo_car, vo_o5, 300);
+vocoder_process_buffer(vo_b, vo_mod, vo_car, vo_o6);
+assert_eq(bf_diff(vo_o5, vo_o6), 0, "a short output sets the length");
+assert_eq(bf_vocoder_same_after(vo_a, vo_b), 0, "and the bands stop there");
+
+# Level equal to the envelope takes release. Only a NaN attack shows it: on silence
+# level and envelope are both zero, and coeff * 0 is NaN only if that NaN was taken.
+test_group("vocoder: attack is strictly above the envelope");
+vo_a = bf_vocoder_new();
+vo_b = bf_vocoder_new();
+var vo_i = 0;
+while (vo_i < 8) {
+    VocoderBand_set_attack_coeff(vec_get(Vocoder_bands(vo_a), vo_i), BF_NAN);
+    VocoderBand_set_attack_coeff(vec_get(Vocoder_bands(vo_b), vo_i), BF_NAN);
+    vo_i = vo_i + 1;
+}
+var vo_quiet = naad_vec_zeros(32);
+var vo_o7 = naad_vec_zeros(32);
+var vo_o8 = naad_vec_zeros(32);
+bf_vocoder_by_hand(vo_a, vo_quiet, vo_quiet, vo_o7, 32);
+vocoder_process_buffer(vo_b, vo_quiet, vo_quiet, vo_o8);
+assert_eq(bf_diff(vo_o7, vo_o8), 0, "silence stays silent");
+
+# ================================================================
+# Preconditions: states the per-sample path takes in its stride.
+# ================================================================
+fn bf_fill_a_b(kind, a, b, n) {
+    var want = naad_vec_zeros(n);
+    var buf = naad_vec_zeros(n);
+    var j = 0;
+    while (j < n) {
+        var x = bf_unit(j);
+        vec_set(buf, j, x);
+        vec_set(want, j, bf_step(kind, a, x));
+        j = j + 1;
+    }
+    bf_block(kind, b, buf);
+    var diff = bf_diff(buf, want);
+    j = 0;
+    while (j < 64) {
+        if (bf_step(kind, a, 0) != bf_step(kind, b, 0)) { diff = diff + 1; }
+        j = j + 1;
+    }
+    return diff;
+}
+
+test_group("a ring shorter than its vec");
+var pc_a = bf_make(K_COMB);
+var pc_b = bf_make(K_COMB);
+DelayLine_set_max_delay_samples(CombFilter_delay_line(pc_a), 6);
+DelayLine_set_max_delay_samples(CombFilter_delay_line(pc_b), 6);
+assert_eq(bf_fill_a_b(K_COMB, pc_a, pc_b, 300), 0, "comb");
+pc_a = bf_make(K_ALLPASS);
+pc_b = bf_make(K_ALLPASS);
+DelayLine_set_max_delay_samples(AllpassDelay_delay_line(pc_a), 6);
+DelayLine_set_max_delay_samples(AllpassDelay_delay_line(pc_b), 6);
+assert_eq(bf_fill_a_b(K_ALLPASS, pc_a, pc_b, 300), 0, "allpass");
+pc_a = bf_make(K_KS);
+pc_b = bf_make(K_KS);
+DelayLine_set_max_delay_samples(KarplusStrong_delay_line(pc_a), 6);
+DelayLine_set_max_delay_samples(KarplusStrong_delay_line(pc_b), 6);
+assert_eq(bf_fill_a_b(K_KS, pc_a, pc_b, 300), 0, "karplus-strong");
+
+test_group("a waveguide whose rails disagree");
+pc_a = bf_make(K_WG);
+pc_b = bf_make(K_WG);
+Waveguide_set_backward_delay(pc_a, Waveguide_forward_delay(pc_a));
+Waveguide_set_backward_delay(pc_b, Waveguide_forward_delay(pc_b));
+assert_eq(bf_fill_a_b(K_WG, pc_a, pc_b, 300), 0, "both rails on one ring");
+pc_a = bf_make(K_WG);
+pc_b = bf_make(K_WG);
+DelayLine_set_write_pos(Waveguide_backward_delay(pc_a), 3);
+DelayLine_set_write_pos(Waveguide_backward_delay(pc_b), 3);
+assert_eq(bf_fill_a_b(K_WG, pc_a, pc_b, 300), 0, "rails at different write positions");
+pc_a = bf_make(K_WG);
+pc_b = bf_make(K_WG);
+var pc_short = delay_line_new(40);
+var pc_short2 = delay_line_new(40);
+DelayLine_set_write_pos(pc_short, DelayLine_write_pos(Waveguide_forward_delay(pc_a)));
+DelayLine_set_write_pos(pc_short2, DelayLine_write_pos(Waveguide_forward_delay(pc_b)));
+Waveguide_set_backward_delay(pc_a, pc_short);
+Waveguide_set_backward_delay(pc_b, pc_short2);
+assert_eq(bf_fill_a_b(K_WG, pc_a, pc_b, 300), 0, "rails of different lengths");
+
+test_group("additive with fewer phases than partials");
+pc_a = bf_make(K_ADDITIVE);
+pc_b = bf_make(K_ADDITIVE);
+AdditiveSynth_set_phases(pc_a, naad_vec_zeros(3));
+AdditiveSynth_set_phases(pc_b, naad_vec_zeros(3));
+assert_eq(bf_fill_a_b(K_ADDITIVE, pc_a, pc_b, 300), 0, "the shorter vec sets the count");
+
+# ================================================================
+# One object in two slots, through the accessors. The per-sample path steps it once
+# for each slot in sample order, so a form that takes one stage at a time would both
+# differ and depend on where the stream is cut. These go the per-sample way.
+# ================================================================
+test_group("eq: one filter in two bands");
+pc_a = bf_make(K_EQ);
+pc_b = bf_make(K_EQ);
+EqBand_set_enabled(vec_get(ParametricEq_bands(pc_a), 1), 1);
+EqBand_set_enabled(vec_get(ParametricEq_bands(pc_b), 1), 1);
+EqBand_set_filter(vec_get(ParametricEq_bands(pc_a), 2), EqBand_filter(vec_get(ParametricEq_bands(pc_a), 0)));
+EqBand_set_filter(vec_get(ParametricEq_bands(pc_b), 2), EqBand_filter(vec_get(ParametricEq_bands(pc_b), 0)));
+assert_eq(bf_fill_a_b(K_EQ, pc_a, pc_b, 300), 0, "two bands, first and last");
+pc_a = bf_make(K_EQ);
+pc_b = bf_make(K_EQ);
+vec_set(ParametricEq_bands(pc_a), 2, vec_get(ParametricEq_bands(pc_a), 0));
+vec_set(ParametricEq_bands(pc_b), 2, vec_get(ParametricEq_bands(pc_b), 0));
+assert_eq(bf_fill_a_b(K_EQ, pc_a, pc_b, 300), 0, "one band in two slots");
+pc_a = bf_make(K_EQ);
+pc_b = bf_make(K_EQ);
+EqBand_set_enabled(vec_get(ParametricEq_bands(pc_a), 1), 1);
+EqBand_set_enabled(vec_get(ParametricEq_bands(pc_b), 1), 1);
+EqBand_set_filter(vec_get(ParametricEq_bands(pc_a), 1), EqBand_filter(vec_get(ParametricEq_bands(pc_a), 0)));
+EqBand_set_filter(vec_get(ParametricEq_bands(pc_b), 1), EqBand_filter(vec_get(ParametricEq_bands(pc_b), 0)));
+assert_eq(bf_fill_a_b(K_EQ, pc_a, pc_b, 300), 0, "two bands side by side");
+
+test_group("formant: one filter in two slots");
+pc_a = bf_make(K_FORMANT);
+pc_b = bf_make(K_FORMANT);
+vec_set(FormantSynth_filters(pc_a), 2, vec_get(FormantSynth_filters(pc_a), 0));
+vec_set(FormantSynth_filters(pc_b), 2, vec_get(FormantSynth_filters(pc_b), 0));
+assert_eq(bf_fill_a_b(K_FORMANT, pc_a, pc_b, 300), 0, "first and last");
+pc_a = bf_make(K_FORMANT);
+pc_b = bf_make(K_FORMANT);
+vec_set(FormantSynth_filters(pc_a), 1, vec_get(FormantSynth_filters(pc_a), 0));
+vec_set(FormantSynth_filters(pc_b), 1, vec_get(FormantSynth_filters(pc_b), 0));
+assert_eq(bf_fill_a_b(K_FORMANT, pc_a, pc_b, 300), 0, "side by side");
+
+# Put one filter in two places, in one of the ways the accessors allow.
+fn bf_vocoder_wire(v, how) {
+    var bands = Vocoder_bands(v);
+    var one = vec_get(bands, 1);
+    if (how == 0) { VocoderBand_set_synthesis_filter(one, VocoderBand_analysis_filter(one)); }
+    if (how == 1) { vec_set(bands, 6, one); }
+    if (how == 2) { VocoderBand_set_analysis_filter(vec_get(bands, 6), VocoderBand_analysis_filter(one)); }
+    if (how == 3) { VocoderBand_set_synthesis_filter(vec_get(bands, 6), VocoderBand_analysis_filter(one)); }
+    if (how == 4) { VocoderBand_set_synthesis_filter(vec_get(bands, 6), VocoderBand_synthesis_filter(one)); }
+    if (how == 5) { VocoderBand_set_analysis_filter(vec_get(bands, 6), VocoderBand_synthesis_filter(one)); }
+    if (how == 6) { VocoderBand_set_analysis_filter(vec_get(bands, 2), VocoderBand_analysis_filter(one)); }
+    return 0;
+}
+
+# Per-sample against block on a vocoder wired by bf_vocoder_wire.
+fn bf_vocoder_shared(how) {
+    var a = bf_vocoder_new();
+    var b = bf_vocoder_new();
+    bf_vocoder_wire(a, how);
+    bf_vocoder_wire(b, how);
+    var mo = bf_filled(300, 0);
+    var car = bf_filled(300, 9000);
+    var want = naad_vec_zeros(300);
+    var got = naad_vec_zeros(300);
+    bf_vocoder_by_hand(a, mo, car, want, 300);
+    vocoder_process_buffer(b, mo, car, got);
+    return bf_diff(want, got) + bf_vocoder_same_after(a, b);
+}
+
+test_group("vocoder: one object in two slots");
+assert_eq(bf_vocoder_shared(0), 0, "a band's analysis and synthesis are one filter");
+assert_eq(bf_vocoder_shared(1), 0, "one band in two slots");
+assert_eq(bf_vocoder_shared(2), 0, "two bands, one analysis filter");
+assert_eq(bf_vocoder_shared(3), 0, "one band's analysis is another's synthesis");
+assert_eq(bf_vocoder_shared(4), 0, "two bands, one synthesis filter");
+assert_eq(bf_vocoder_shared(5), 0, "one band's synthesis is another's analysis");
+assert_eq(bf_vocoder_shared(6), 0, "two bands side by side, one analysis filter");
+
+# Comb `i` of `side`, 0 for left.
+fn bf_comb(r, side, i) {
+    if (side == 0) { return vec_get(Reverb_combs_l(r), i); }
+    return vec_get(Reverb_combs_r(r), i);
+}
+
+# Allpass `i` of `side`, 0 for left.
+fn bf_allpass(r, side, i) {
+    if (side == 0) { return vec_get(Reverb_allpasses_l(r), i); }
+    return vec_get(Reverb_allpasses_r(r), i);
+}
+
+# Point `dl` at memory from `over`, `skip` samples in, as a ring of its own.
+fn bf_ring_over(dl, over, skip) {
+    var view = vec_new();
+    var data = load64(DelayLine_buffer(over));
+    store64(view, data + skip * 8);
+    store64(view + 8, vec_len(DelayLine_buffer(over)) - skip);
+    store64(view + 16, vec_len(DelayLine_buffer(over)) - skip);
+    DelayLine_set_buffer(dl, view);
+    DelayLine_set_max_delay_samples(dl, vec_len(view));
+    DelayLine_set_write_pos(dl, 0);
+    return 0;
+}
+
+# Make two stages reach one memory, in one of the ways the accessors allow.
+fn bf_reverb_wire(r, how) {
+    var c0 = bf_comb(r, 0, 0);
+    var c1 = bf_comb(r, 0, 1);
+    var cr = bf_comb(r, 1, 3);
+    var a0 = bf_allpass(r, 0, 0);
+    var ar = bf_allpass(r, 1, 1);
+    var tap = f64_from(900);
+    if (how == 0) { Reverb_set_combs_r(r, Reverb_combs_l(r)); }
+    if (how == 1) { vec_set(Reverb_combs_l(r), 1, c0); }
+    if (how == 2) { DampedComb_set_delay(c1, DampedComb_delay(c0)); }
+    if (how == 3) { Reverb_set_allpasses_r(r, Reverb_allpasses_l(r)); }
+    if (how == 4) { vec_set(Reverb_allpasses_l(r), 1, a0); }
+    if (how == 5) { ReverbAllpass_set_delay(a0, DampedComb_delay(c0)); }
+    if (how == 6) { DampedComb_set_delay(c0, Reverb_pre_delay(r)); }
+    if (how == 7) { ReverbAllpass_set_delay(ar, Reverb_pre_delay(r)); }
+    if (how == 8) { DampedComb_set_delay(cr, DampedComb_delay(c0)); }
+    if (how == 9) { ReverbAllpass_set_delay(ar, ReverbAllpass_delay(a0)); }
+    if (how == 10 || how == 11) {
+        # Two rings over one vec, or over a part of it: no pointer here is equal.
+        bf_ring_over(DampedComb_delay(c1), DampedComb_delay(c0), (how - 10) * 37);
+        DampedComb_set_delay_samples(c0, tap);
+        DampedComb_set_delay_samples(c1, tap);
+    }
+    return 0;
+}
+
+# Per-sample against block on a reverb wired by bf_reverb_wire.
+fn bf_reverb_shared(how) {
+    var a = bf_reverb_new();
+    var b = bf_reverb_new();
+    bf_reverb_wire(a, how);
+    bf_reverb_wire(b, how);
+    var n = 2000;
+    var input = bf_filled(n, 0);
+    var want_l = naad_vec_zeros(n);
+    var want_r = naad_vec_zeros(n);
+    var got_l = naad_vec_zeros(n);
+    var got_r = naad_vec_zeros(n);
+    bf_reverb_by_hand(a, input, want_l, want_r, n);
+    reverb_process_buffer(b, input, got_l, got_r);
+    var diff = bf_diff(want_l, got_l) + bf_diff(want_r, got_r);
+    var ra = alloc(sizeof(ReverbStereo));
+    var rb = alloc(sizeof(ReverbStereo));
+    var t = 0;
+    while (t < 64) {
+        var y = bf_unit(t);
+        reverb_process_core(a, y, ra);
+        reverb_process_core(b, y, rb);
+        if (ReverbStereo_left(ra) != ReverbStereo_left(rb)) { diff = diff + 1; }
+        if (ReverbStereo_right(ra) != ReverbStereo_right(rb)) { diff = diff + 1; }
+        t = t + 1;
+    }
+    return diff;
+}
+
+test_group("reverb: one object in two slots");
+assert_eq(bf_reverb_shared(0), 0, "the right combs are the left combs");
+assert_eq(bf_reverb_shared(1), 0, "one comb in two slots");
+assert_eq(bf_reverb_shared(2), 0, "two combs on one ring");
+assert_eq(bf_reverb_shared(3), 0, "the right allpasses are the left allpasses");
+assert_eq(bf_reverb_shared(4), 0, "one allpass in two slots");
+assert_eq(bf_reverb_shared(5), 0, "an allpass on a comb's ring");
+assert_eq(bf_reverb_shared(6), 0, "a comb on the pre-delay ring");
+assert_eq(bf_reverb_shared(7), 0, "an allpass on the pre-delay ring");
+assert_eq(bf_reverb_shared(8), 0, "a left and a right comb on one ring");
+assert_eq(bf_reverb_shared(9), 0, "a left and a right allpass on one ring");
+assert_eq(bf_reverb_shared(10), 0, "two rings over one vec");
+assert_eq(bf_reverb_shared(11), 0, "a ring over part of another");
+
+# ================================================================
+# The per-sample loop never looks at the object on an empty block, so neither does a
+# form: not the state, and not the fields, here a null object.
+# ================================================================
+# The other direction: a guard that fired on a healthy object would cost every saving
+# and no sample would change, so nothing above would see it.
+test_group("a built object takes the block path");
+assert_eq(_eq_bands_share(ParametricEq_bands(bf_make(K_EQ))), 0, "eq");
+assert_eq(_formant_filters_share(FormantSynth_filters(bf_make(K_FORMANT))), 0, "formant");
+assert_eq(_vocoder_bands_share(Vocoder_bands(bf_vocoder_new())), 0, "vocoder");
+assert_eq(_reverb_rings_overlap(bf_reverb_new()), 0, "reverb");
+assert_eq(_delay_block_ok(CombFilter_delay_line(bf_make(K_COMB))), 1, "comb");
+assert_eq(_delay_block_ok(AllpassDelay_delay_line(bf_make(K_ALLPASS))), 1, "allpass");
+assert_eq(_delay_block_ok(KarplusStrong_delay_line(bf_make(K_KS))), 1, "karplus-strong");
+assert_eq(_delay_block_ok(Waveguide_forward_delay(bf_make(K_WG))), 1, "waveguide");
+
+test_group("an empty block touches nothing");
+# The form of `kind` on an empty vec and a null object.
+fn bf_empty(kind) {
+    var none = vec_new();
+    return bf_block(kind, 0, none);
+}
+
+var ez_st = 0;
+ez_st = bf_empty(K_LOWPASS);
+ez_st = bf_empty(K_SVF);
+ez_st = bf_empty(K_EQ);
+ez_st = bf_empty(K_FORMANT);
+ez_st = bf_empty(K_COMB);
+ez_st = bf_empty(K_ALLPASS);
+ez_st = bf_empty(K_ADDITIVE);
+ez_st = bf_empty(K_WAVETABLE);
+ez_st = bf_empty(K_KS);
+ez_st = bf_empty(K_WG);
+ez_st = bf_empty(K_GATE);
+ez_st = bf_empty(K_OSC);
+ez_st = bf_empty(K_NOISE);
+ez_st = bf_empty(K_UNISON);
+reverb_process_buffer(0, vec_new(), vec_new(), vec_new());
+vocoder_process_buffer(0, vec_new(), vec_new(), vec_new());
+assert_eq(ez_st, 0, "every form returned without reading its object");
+
+var ez_un = bf_make(K_UNISON + WAVEFORM_SAW);
+ez_st = unison_set_detune_cents(ez_un, f64_from(30));
+var ez_dirty = UnisonOscillator_ratios_dirty(ez_un);
+unison_fill_buffer(ez_un, vec_new());
+assert_eq(UnisonOscillator_ratios_dirty(ez_un), ez_dirty, "unison leaves a pending recompute pending");
+
+test_group("unison with no voices");
+pc_a = bf_make(K_UNISON + WAVEFORM_SAW);
+pc_b = bf_make(K_UNISON + WAVEFORM_SAW);
+UnisonOscillator_set_num_voices(pc_a, 0);
+UnisonOscillator_set_num_voices(pc_b, 0);
+assert_eq(bf_fill_a_b(K_UNISON + WAVEFORM_SAW, pc_a, pc_b, 20), 0, "NaN, as sum / 0 gives");
+
+# ================================================================
+# Preconditions: states the per-sample path refuses. The forms read through raw
+# pointers, so each of these has to end in vec.cyr's bounds check, not past the end
+# of an allocation. Exit 1 is that check; a form that ran on exits 0. The reverb's
+# rings are tried with a write position below the vec: past the far end, its own
+# write would run over the next ring's header and die by accident.
+# ================================================================
+fn bf_ring_past_vec(dl) {
+    DelayLine_set_max_delay_samples(dl, vec_len(DelayLine_buffer(dl)) + 1000);
+    return 0;
+}
+
+# Set up and run case `which`, in a child: each has to end in a bounds check.
+fn bf_abort_case(which) {
+    var o = 0;
+    var kind = K_COMB;
+    if (which == 0) {
+        o = bf_make(K_COMB);
+        bf_ring_past_vec(CombFilter_delay_line(o));
+    } elif (which == 1) {
+        o = bf_make(K_COMB);
+        var dl = CombFilter_delay_line(o);
+        DelayLine_set_write_pos(dl, vec_len(DelayLine_buffer(dl)) + 1000);
+    } elif (which == 2) {
+        o = bf_make(K_COMB);
+        DelayLine_set_write_pos(CombFilter_delay_line(o), 0 - 1);
+    } elif (which == 3) {
+        kind = K_ALLPASS;
+        o = bf_make(K_ALLPASS);
+        bf_ring_past_vec(AllpassDelay_delay_line(o));
+    } elif (which == 4) {
+        kind = K_KS;
+        o = bf_make(K_KS);
+        bf_ring_past_vec(KarplusStrong_delay_line(o));
+    } elif (which == 5) {
+        # Only one rail is bad, with the two agreeing on length and position.
+        kind = K_WG;
+        o = bf_make(K_WG);
+        var fw = Waveguide_forward_delay(o);
+        bf_ring_past_vec(fw);
+        var good = delay_line_new(DelayLine_max_delay_samples(fw));
+        DelayLine_set_write_pos(good, DelayLine_write_pos(fw));
+        Waveguide_set_backward_delay(o, good);
+    } elif (which == 11) {
+        kind = K_WG;
+        o = bf_make(K_WG);
+        var bw = Waveguide_backward_delay(o);
+        bf_ring_past_vec(bw);
+        var good2 = delay_line_new(DelayLine_max_delay_samples(bw));
+        DelayLine_set_write_pos(good2, DelayLine_write_pos(bw));
+        Waveguide_set_forward_delay(o, good2);
+    } elif (which == 6) {
+        kind = K_NOISE + NOISE_PINK;
+        o = bf_make(kind);
+        NoiseGenerator_set_pink_octaves(o, naad_vec_zeros(2));
+    } elif (which == 7) {
+        kind = K_UNISON + WAVEFORM_SAW;
+        o = bf_make(kind);
+        UnisonOscillator_set_num_voices(o, 99);
+    } elif (which == 8) {
+        var r = bf_reverb_new();
+        DelayLine_set_write_pos(Reverb_pre_delay(r), 0 - 1);
+        return reverb_process_buffer(r, naad_vec_zeros(64), naad_vec_zeros(64), naad_vec_zeros(64));
+    } elif (which == 9) {
+        var r2 = bf_reverb_new();
+        DelayLine_set_write_pos(DampedComb_delay(vec_get(Reverb_combs_r(r2), 3)), 0 - 1);
+        return reverb_process_buffer(r2, naad_vec_zeros(64), naad_vec_zeros(64), naad_vec_zeros(64));
+    } else {
+        var r3 = bf_reverb_new();
+        DelayLine_set_write_pos(ReverbAllpass_delay(vec_get(Reverb_allpasses_l(r3), 1)), 0 - 1);
+        return reverb_process_buffer(r3, naad_vec_zeros(64), naad_vec_zeros(64), naad_vec_zeros(64));
+    }
+    return bf_block(kind, o, naad_vec_zeros(64));
+}
+
+# Exit code of a child running case `which`, or -1 if a signal ended it.
+fn bf_child(which) {
+    var pid = sys_fork();
+    if (pid == 0) {
+        sys_close(2);
+        bf_abort_case(which);
+        sys_exit(0);
+    }
+    var status[8];
+    store64(&status, 0);
+    sys_waitpid(pid, &status, 0);
+    var s = load64(&status) & U32_MASK;
+    if (WIFEXITED(s) == 0) { return 0 - 1; }
+    return WEXITSTATUS(s);
+}
+
+test_group("a desynced ring reaches the bounds checks");
+assert_eq(bf_child(0), 1, "comb: max past the vec");
+assert_eq(bf_child(1), 1, "comb: write position past the vec");
+assert_eq(bf_child(2), 1, "comb: negative write position");
+assert_eq(bf_child(3), 1, "allpass: max past the vec");
+assert_eq(bf_child(4), 1, "karplus-strong: max past the vec");
+assert_eq(bf_child(5), 1, "waveguide: forward rail past its vec");
+assert_eq(bf_child(11), 1, "waveguide: backward rail past its vec");
+assert_eq(bf_child(6), 1, "pink: octave vec too short");
+assert_eq(bf_child(7), 1, "unison: more voices than phases");
+assert_eq(bf_child(8), 1, "reverb: pre-delay write position below the vec");
+assert_eq(bf_child(9), 1, "reverb: comb write position below the vec");
+assert_eq(bf_child(10), 1, "reverb: allpass write position below the vec");
+
+var rc = assert_summary();
+syscall(60, rc);

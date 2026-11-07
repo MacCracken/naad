@@ -302,11 +302,29 @@ fn wavetable_osc_next_sample(self) {
 # ================================================================
 fn wavetable_osc_fill_buffer(self, buffer) {
     var n = vec_len(buffer);
+    if (n == 0) { return 0; }
+    var samples = Wavetable_samples(WavetableOscillator_table(self));
+    var size = vec_len(samples);
     var i = 0;
+    var table = load64(samples);
+    var data = load64(buffer);
+    var len = f64_from(size);
+    var dt = f64_div(WavetableOscillator_frequency(self), WavetableOscillator_sample_rate(self));
+    var phase = WavetableOscillator_phase(self);
     while (i < n) {
-        vec_set(buffer, i, wavetable_osc_next_sample(self));
+        var index = f64_mul(phase, len);
+        var index_floor = f64_floor(index);
+        var frac = f64_sub(index, index_floor);
+        var i0 = _wt_index(index_floor, size);
+        var i1 = (i0 + 1) % size;
+        store64(data + i * 8, f64_add(f64_mul(load64(table + i0 * 8), f64_sub(F64_ONE, frac)),
+            f64_mul(load64(table + i1 * 8), frac)));
+        var next = f64_add(phase, dt);
+        if (f64_ge(next, F64_ONE) == 1) { next = f64_sub(next, F64_ONE); }
+        phase = next;
         i = i + 1;
     }
+    WavetableOscillator_set_phase(self, phase);
     return 0;
 }
 

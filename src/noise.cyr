@@ -135,16 +135,78 @@ fn noise_brown(self) {
     return prev;
 }
 
+# noise_pink over `n` samples of the raw array `data`; the caller has checked the
+# octave vec is long enough.
+fn _noise_fill_pink(self, data, n) {
+    var rng = NoiseGenerator_rng(self);
+    var octaves = load64(NoiseGenerator_pink_octaves(self));
+    var counter = NoiseGenerator_pink_counter(self);
+    var running_sum = NoiseGenerator_pink_running_sum(self);
+    var i = 0;
+    while (i < n) {
+        var prev = counter & U32_MASK;
+        counter = (counter + 1) & U32_MASK;
+        var changed_bits = counter ^ prev;
+        var o = 0;
+        while (o < NOISE_PINK_OCTAVES && (changed_bits >> o) != 0) {
+            var slot = octaves + o * 8;
+            running_sum = f64_sub(running_sum, load64(slot));
+            var new_val = xorshift32_signed_f32(rng);
+            store64(slot, new_val);
+            running_sum = f64_add(running_sum, new_val);
+            o = o + 1;
+        }
+        var white = xorshift32_signed_f32(rng);
+        store64(data + i * 8, f64_div(f64_add(running_sum, white), NOISE_PINK_SCALE));
+        i = i + 1;
+    }
+    NoiseGenerator_set_pink_counter(self, counter);
+    NoiseGenerator_set_pink_running_sum(self, running_sum);
+    return 0;
+}
+
 # ================================================================
 # noise_fill_buffer -- fill a vec buffer in place with successive samples.
 # ================================================================
 fn noise_fill_buffer(self, buffer) {
     var n = vec_len(buffer);
+    if (n == 0) { return 0; }
+    var nt = NoiseGenerator_noise_type(self);
     var i = 0;
+    if (nt == NOISE_PINK) {
+        if (vec_len(NoiseGenerator_pink_octaves(self)) < NOISE_PINK_OCTAVES) {
+            while (i < n) {
+                vec_set(buffer, i, noise_next_sample(self));
+                i = i + 1;
+            }
+            return 0;
+        }
+        return _noise_fill_pink(self, load64(buffer), n);
+    }
+    # xorshift32 and xorshift32_signed_f32 on a local state; zero can only be the
+    # state it starts from, since the step never leaves the nonzero values.
+    var data = load64(buffer);
+    var slot = NoiseGenerator_rng(self);
+    var x = load64(slot) & U32_MASK;
+    if (x == 0) { x = 1; }
+    var prev = NoiseGenerator_brown_prev(self);
+    var brown_lo = f64_neg(F64_ONE);
     while (i < n) {
-        vec_set(buffer, i, noise_next_sample(self));
+        x = (x ^ ((x << 13) & U32_MASK)) & U32_MASK;
+        x = x ^ (x >> 17);
+        x = (x ^ ((x << 5) & U32_MASK)) & U32_MASK;
+        var white = f64_sub(f64_mul(f64_div(f64_from(x), DSP_U32_MAX), F64_TWO), F64_ONE);
+        if (nt == NOISE_WHITE) {
+            store64(data + i * 8, white);
+        } else {
+            prev = f64_add(prev, f64_mul(white, NOISE_C0_02));
+            prev = f64_mul(f64_clamp(prev, brown_lo, F64_ONE), NOISE_C0_999);
+            store64(data + i * 8, prev);
+        }
         i = i + 1;
     }
+    store64(slot, x);
+    if (nt != NOISE_WHITE) { NoiseGenerator_set_brown_prev(self, prev); }
     return 0;
 }
 

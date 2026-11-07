@@ -183,10 +183,39 @@ fn additive_next_sample(self) {
 # additive_fill_buffer -- fill `buffer` (a vec) with samples. Returns NAAD_ERR_NONE.
 # ================================================================
 fn additive_fill_buffer(self, buffer) {
+    # One partial at a time: each adds into the block in the order
+    # additive_next_sample sums them.
     var n = vec_len(buffer);
+    if (n == 0) { return NAAD_ERR_NONE; }
+    var data = load64(buffer);
+    var j = 0;
+    while (j < n) {
+        store64(data + j * 8, 0);
+        j = j + 1;
+    }
+    var partials = AdditiveSynth_partials(self);
+    var phases = AdditiveSynth_phases(self);
+    var count = vec_len(partials);
+    if (vec_len(phases) < count) { count = vec_len(phases); }
+    var fundamental = AdditiveSynth_fundamental(self);
+    var sample_rate = AdditiveSynth_sample_rate(self);
     var i = 0;
-    while (i < n) {
-        vec_set(buffer, i, additive_next_sample(self));
+    while (i < count) {
+        var p = vec_get(partials, i);
+        var amp = Partial_amplitude(p);
+        if (f64_le(amp, 0) == 0) {
+            var inc = f64_div(f64_mul(fundamental, Partial_frequency_ratio(p)), sample_rate);
+            var phase = vec_get(phases, i);
+            j = 0;
+            while (j < n) {
+                store64(data + j * 8,
+                  f64_add(load64(data + j * 8), f64_mul(f64_sin(f64_mul(phase, F64_TAU)), amp)));
+                var new_phase = f64_add(phase, inc);
+                phase = f64_sub(new_phase, f64_floor(new_phase));
+                j = j + 1;
+            }
+            vec_set(phases, i, phase);
+        }
         i = i + 1;
     }
     return NAAD_ERR_NONE;

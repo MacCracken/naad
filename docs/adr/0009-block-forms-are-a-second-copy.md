@@ -1,0 +1,90 @@
+# 0009 — Block forms are a second copy, held to the per-sample bits
+
+**Status**: Accepted
+**Date**: 2026-11-07
+
+## Context
+
+[ADR-0008](0008-the-dsp-core-stays-f64.md) measured the cost of a per-sample call: the
+same biquad took 22.7 ns through the call and 9.5 ns in one loop in locals. Of naad's 36
+buffer forms, 5 were such loops. The other 31 were a `while` around the per-sample call,
+so they paid for an accessor on every field and a bounds check on every sample.
+
+Making them real loops means every hot path exists twice. Two copies drift, and a suite
+that tests each on its own stays green while they do. The oracle cannot arbitrate, since
+`rust-old/` has no buffer form on most of these paths. So something has to say what a form
+owes the path it stands for, and what a form has to earn before it exists at all.
+
+## Decision
+
+**A form is bit-identical to calling its per-sample function once per sample.** That
+covers the output and the state left behind, on any input including NaN payloads and
+signs, -0, Inf and values below the flush line, and in any state the accessors can build.
+The per-sample path stays the reference, stays public, and is what the Rust differential
+measures.
+
+1. **Fields are read once, at the top of the block.** State lives in locals and goes back
+   at the end. Nothing is kept between calls, so a setter between blocks takes effect at
+   the next block, and the cache rule in
+   [ADR-0007](0007-hostile-input-gaps-we-accept.md) stands.
+2. **Scratch stays on the stack**, in fixed chunks of `NAAD_CHUNK` samples. From the bump
+   allocator it would be a leak per block.
+3. **Raw pointers go behind a check.** `load64` on a ring is safe only while the ring is
+   in step with its vec, so `_delay_block_ok` runs first. If it fails, the form takes the
+   per-sample path, where the bounds checks live.
+4. **A form that takes one stage at a time checks that stages share nothing.** An accessor
+   can install one filter in two slots, and per sample it then steps once for each, in
+   sample order. No stage-at-a-time loop can give that, and the result would depend on
+   where the stream is cut into blocks. So eq, formant and vocoder compare their filters,
+   and reverb compares the memory of its 13 rings, because two distinct rings can sit over
+   one vec. If they share, the form takes the per-sample path.
+5. **An empty block reads nothing**, as the per-sample loop reads nothing.
+6. **A form has to pay.** It needs roughly 15% against the loop it replaces, on a quiet
+   machine, interleaved with the old build. Below that it can stay if the saving in
+   nanoseconds is large, and the reason is written here.
+
+| Tried | Gain at 256 samples | Outcome |
+|---|---|---|
+| noise gate | 22%, 76 to 59 ns | kept |
+| additive | 14%, 796 to 682 ns at 16 partials | kept: under the bar, for the largest saving of any generator. `f64_sin` is the rest |
+| compressor, limiter | 12%, 108 to 95 ns | dropped: `f64_ln` runs every sample |
+| de-esser | 7%, 270 to 251 ns | dropped: `f64_ln` and `f64_pow` run every sample |
+
+The moog ladder, FM and the drums were not tried: their cost is in their math.
+
+### Accepted limits
+
+These differ from the per-sample loop, and stay. None is reachable through an API: each
+needs a hand-built vec header or a state vec given a second job, and Rust's ownership
+rules forbid all of them. A buffer that *is* the input, the same vec, remains supported.
+
+| Case | Forms | Why it stays |
+|---|---|---|
+| Caller's vecs overlap without being the same vec | vocoder, reverb | needs a hand-built header. `lib/vec.cyr` has no slice |
+| An object's own state vec handed to it as the buffer: `phases`, `amplitudes`, a ring | additive, unison, formant, reverb | a form writes that buffer. There is no use for overwriting your own phases with audio |
+| One state vec doing two jobs: `phases` set as unison's `detune_ratios` | unison | a form reads a ratio once per voice, and the per-sample path re-reads it after writing a phase |
+
+## Consequences
+
+- **Positive** — the numbers are in the changelog for 2.3.3. The delay-based paths and
+  reverb gain about 60%, with no change to any output.
+- **Negative** — every path listed in `tests/buffer_forms.tcyr` exists twice. A change to a
+  per-sample path has to reach its form, and that suite is what says so. A form is also
+  slower to read than a `while` around a call.
+- **Neutral** — consumers have to call the forms: a render loop written per sample gains
+  nothing. The per-sample paths did not get faster.
+
+## Alternatives considered
+
+- **Build the per-sample path on the form, with n = 1.** One copy, but every per-sample
+  call would pay for block setup, and that path is what consumers use today and what the
+  Rust differential measures.
+- **Keep derived values in the struct to save reading them.** That is the stale cache
+  [ADR-0007](0007-hostile-input-gaps-we-accept.md) removed ten of.
+- **Forbid sharing.** The accessors are generated by `#derive`, and consumers use them.
+  Nothing can refuse a second slot.
+- **Compare ring pointers.** Two `DelayLine` objects over one vec have different pointers
+  and the same memory, and the review reproduced 3,627 of 6,000 samples differing on it.
+- **Close the accepted limits with more guards.** Each is cheap alone, but they would test
+  for states that no API can build, in the loops this work exists to shorten. Rust cannot
+  express any of them, so there is no parity question to answer.

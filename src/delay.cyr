@@ -87,6 +87,28 @@ fn delay_line_read(dl, delay) {
     return f64_add(a, b);
 }
 
+# ================================================================
+# Block access. A tap at a fixed delay keeps one integer offset and one fraction for
+# a whole block, so a block loop reads the ring through its data pointer.
+# _delay_block_ok says whether that is safe: buffer, max and write_pos are all public
+# fields, so a block loop checks them and otherwise takes the per-sample path, which
+# fails bounds-checked as it always has.
+# ================================================================
+#must_use
+fn _delay_block_ok(dl) {
+    var max = DelayLine_max_delay_samples(dl);
+    var wp = DelayLine_write_pos(dl);
+    if (max < 1 || max != vec_len(DelayLine_buffer(dl))) { return 0; }
+    if (wp < 0 || wp >= max) { return 0; }
+    return 1;
+}
+
+# The clamped delay delay_line_read uses, as a whole offset and a fraction.
+#must_use
+fn _delay_tap_clamp(dl, delay) {
+    return f64_clamp(delay, 0, f64_from(DelayLine_max_delay_samples(dl) - 1));
+}
+
 # Clear the delay line to silence.
 fn delay_line_clear(dl) {
     var buffer = DelayLine_buffer(dl);
@@ -129,6 +151,51 @@ fn comb_filter_process_sample(cf, input) {
     var output = f64_add(input, f64_mul(CombFilter_feedback(cf), flush_denormal(delayed)));
     delay_line_write(dl, output);
     return output;
+}
+
+# ================================================================
+# comb_filter_process_buffer -- comb_filter_process_sample over a vec, in place, in
+# one loop. Returns 0.
+# ================================================================
+fn comb_filter_process_buffer(cf, buffer) {
+    var n = vec_len(buffer);
+    if (n == 0) { return 0; }
+    var i = 0;
+    var dl = CombFilter_delay_line(cf);
+    if (_delay_block_ok(dl) == 0) {
+        while (i < n) {
+            vec_set(buffer, i, comb_filter_process_sample(cf, vec_get(buffer, i)));
+            i = i + 1;
+        }
+        return 0;
+    }
+    var clamped = _delay_tap_clamp(dl, CombFilter_delay_samples(cf));
+    var whole = f64_floor(clamped);
+    var offset = f64_to(whole);
+    var frac = f64_sub(clamped, whole);
+    var near = f64_sub(F64_ONE, frac);
+    var feedback = CombFilter_feedback(cf);
+    var min_pos = NAAD_F32_MIN_POS;
+    var max = DelayLine_max_delay_samples(dl);
+    var wp = DelayLine_write_pos(dl);
+    var ring = load64(DelayLine_buffer(dl));
+    var data = load64(buffer);
+    while (i < n) {
+        var r0 = wp - offset - 1;
+        if (r0 < 0) { r0 = r0 + max; }
+        var r1 = r0 - 1;
+        if (r0 == 0) { r1 = max - 1; }
+        var delayed = f64_add(f64_mul(load64(ring + r0 * 8), near), f64_mul(load64(ring + r1 * 8), frac));
+        if (f64_lt(f64_abs(delayed), min_pos) == 1) { delayed = 0; }
+        var output = f64_add(load64(data + i * 8), f64_mul(feedback, delayed));
+        store64(ring + wp * 8, output);
+        store64(data + i * 8, output);
+        wp = wp + 1;
+        if (wp >= max) { wp = 0; }
+        i = i + 1;
+    }
+    DelayLine_set_write_pos(dl, wp);
+    return 0;
 }
 
 # ================================================================
@@ -179,4 +246,49 @@ fn allpass_delay_process_sample(ap, input) {
     # Store x[n] + g * y[n] in the buffer.
     delay_line_write(dl, f64_add(input, f64_mul(g, output)));
     return output;
+}
+
+# ================================================================
+# allpass_delay_process_buffer -- allpass_delay_process_sample over a vec, in place,
+# in one loop. Returns 0.
+# ================================================================
+fn allpass_delay_process_buffer(ap, buffer) {
+    var n = vec_len(buffer);
+    if (n == 0) { return 0; }
+    var i = 0;
+    var dl = AllpassDelay_delay_line(ap);
+    if (_delay_block_ok(dl) == 0) {
+        while (i < n) {
+            vec_set(buffer, i, allpass_delay_process_sample(ap, vec_get(buffer, i)));
+            i = i + 1;
+        }
+        return 0;
+    }
+    var clamped = _delay_tap_clamp(dl, AllpassDelay_delay_samples(ap));
+    var whole = f64_floor(clamped);
+    var offset = f64_to(whole);
+    var frac = f64_sub(clamped, whole);
+    var near = f64_sub(F64_ONE, frac);
+    var g = AllpassDelay_coefficient(ap);
+    var neg_g = f64_neg(g);
+    var max = DelayLine_max_delay_samples(dl);
+    var wp = DelayLine_write_pos(dl);
+    var ring = load64(DelayLine_buffer(dl));
+    var data = load64(buffer);
+    while (i < n) {
+        var r0 = wp - offset - 1;
+        if (r0 < 0) { r0 = r0 + max; }
+        var r1 = r0 - 1;
+        if (r0 == 0) { r1 = max - 1; }
+        var delayed = f64_add(f64_mul(load64(ring + r0 * 8), near), f64_mul(load64(ring + r1 * 8), frac));
+        var input = load64(data + i * 8);
+        var output = f64_add(f64_mul(neg_g, input), delayed);
+        store64(ring + wp * 8, f64_add(input, f64_mul(g, output)));
+        store64(data + i * 8, output);
+        wp = wp + 1;
+        if (wp >= max) { wp = 0; }
+        i = i + 1;
+    }
+    DelayLine_set_write_pos(dl, wp);
+    return 0;
 }

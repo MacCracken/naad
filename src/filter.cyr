@@ -248,12 +248,9 @@ fn filter_biquad_set_params(self, frequency, q, gain_db) {
     return NAAD_ERR_NONE;
 }
 
-# ================================================================
-# filter_biquad_process_buffer -- process a vec of samples in place. The same
-# equations as filter_biquad_process_sample, with the coefficients and state held
-# in locals: accessors are real calls, and the sample form makes nine of them.
-# ================================================================
-fn filter_biquad_process_buffer(self, buffer) {
+# Run the filter over `n` samples from `src` to `dst`, raw f64 arrays that may be the
+# same array. Every *_process_buffer built on a biquad comes through here.
+fn _filter_biquad_run(self, src, dst, n) {
     var b0 = BiquadFilter_b0(self);
     var b1 = BiquadFilter_b1(self);
     var b2 = BiquadFilter_b2(self);
@@ -261,21 +258,35 @@ fn filter_biquad_process_buffer(self, buffer) {
     var a2 = BiquadFilter_a2(self);
     var z1 = BiquadFilter_z1(self);
     var z2 = BiquadFilter_z2(self);
+    var min_pos = NAAD_F32_MIN_POS;
 
-    var n = vec_len(buffer);
     var i = 0;
     while (i < n) {
-        var input = vec_get(buffer, i);
+        var input = load64(src + i * 8);
         var output = f64_add(f64_mul(b0, input), z1);
-        z1 = flush_denormal(f64_add(f64_sub(f64_mul(b1, input), f64_mul(a1, output)), z2));
-        z2 = flush_denormal(f64_sub(f64_mul(b2, input), f64_mul(a2, output)));
-        vec_set(buffer, i, output);
+        z1 = f64_add(f64_sub(f64_mul(b1, input), f64_mul(a1, output)), z2);
+        z2 = f64_sub(f64_mul(b2, input), f64_mul(a2, output));
+        if (f64_lt(f64_abs(z1), min_pos) == 1) { z1 = 0; }
+        if (f64_lt(f64_abs(z2), min_pos) == 1) { z2 = 0; }
+        store64(dst + i * 8, output);
         i = i + 1;
     }
 
     BiquadFilter_set_z1(self, z1);
     BiquadFilter_set_z2(self, z2);
     return 0;
+}
+
+# ================================================================
+# filter_biquad_process_buffer -- process a vec of samples in place. The same
+# equations as filter_biquad_process_sample, with the coefficients and state held
+# in locals: accessors are real calls, and the sample form makes nine of them.
+# ================================================================
+fn filter_biquad_process_buffer(self, buffer) {
+    var n = vec_len(buffer);
+    if (n == 0) { return 0; }
+    var data = load64(buffer);
+    return _filter_biquad_run(self, data, data, n);
 }
 
 # ================================================================
@@ -436,21 +447,26 @@ fn filter_svf_process_sample_lowpass(self, input) {
 # to spare the accessor calls per sample.
 # ================================================================
 fn filter_svf_process_buffer_lowpass(self, buffer) {
+    var n = vec_len(buffer);
+    if (n == 0) { return 0; }
     var a1 = StateVariableFilter_a1(self);
     var a2 = StateVariableFilter_a2(self);
     var a3 = StateVariableFilter_a3(self);
     var ic1eq = StateVariableFilter_ic1eq(self);
     var ic2eq = StateVariableFilter_ic2eq(self);
 
-    var n = vec_len(buffer);
+    var data = load64(buffer);
+    var min_pos = NAAD_F32_MIN_POS;
     var i = 0;
     while (i < n) {
-        var v3 = f64_sub(vec_get(buffer, i), ic2eq);
+        var v3 = f64_sub(load64(data + i * 8), ic2eq);
         var v1 = f64_add(f64_mul(a1, ic1eq), f64_mul(a2, v3));
         var v2 = f64_add(f64_add(ic2eq, f64_mul(a2, ic1eq)), f64_mul(a3, v3));
-        ic1eq = flush_denormal(f64_sub(f64_mul(F64_TWO, v1), ic1eq));
-        ic2eq = flush_denormal(f64_sub(f64_mul(F64_TWO, v2), ic2eq));
-        vec_set(buffer, i, v2);
+        ic1eq = f64_sub(f64_mul(F64_TWO, v1), ic1eq);
+        ic2eq = f64_sub(f64_mul(F64_TWO, v2), ic2eq);
+        if (f64_lt(f64_abs(ic1eq), min_pos) == 1) { ic1eq = 0; }
+        if (f64_lt(f64_abs(ic2eq), min_pos) == 1) { ic2eq = 0; }
+        store64(data + i * 8, v2);
         i = i + 1;
     }
 

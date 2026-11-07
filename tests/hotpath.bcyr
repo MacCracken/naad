@@ -1,7 +1,8 @@
 # hotpath.bcyr -- per-sample hot-path benchmarks for naad.
 # Run: cyrius bench tests/hotpath.bcyr
-# Covers the inner-loop functions dhvani/svara call per audio sample, and the
-# costliest paths the 2.3.2 sweep measured against the Rust oracle.
+# Covers the inner-loop functions dhvani/svara call per audio sample, the costliest
+# paths the 2.3.2 sweep measured against the Rust oracle, and the block forms 2.3.3
+# made real loops. A block row is per call: divide by 256 for ns/sample.
 
 include "lib/hisab.cyr"
 include "lib/goonj.cyr"
@@ -28,6 +29,21 @@ var _sub = 0;
 var _additive = 0;
 var _biquad = 0;
 var _unison = 0;
+var _vocoder = 0;
+var _source = 0;
+var _block = 0;
+var _left = 0;
+var _right = 0;
+
+# Refill the block from the source, for the forms that write their own input.
+fn block_refill() {
+    var i = 0;
+    while (i < 256) {
+        vec_set(_block, i, vec_get(_source, i));
+        i = i + 1;
+    }
+    return 0;
+}
 
 # b osc next sample — helper used by hotpath.bcyr.
 fn b_osc_next_sample() {
@@ -79,6 +95,37 @@ fn b_unison() {
     return unison_next_sample(_unison);
 }
 
+# b block biquad — helper used by hotpath.bcyr.
+fn b_block_biquad() {
+    block_refill();
+    return filter_biquad_process_buffer(_biquad, _block);
+}
+
+# b block reverb — helper used by hotpath.bcyr.
+fn b_block_reverb() {
+    return reverb_process_buffer(_reverb, _source, _left, _right);
+}
+
+# b block vocoder — helper used by hotpath.bcyr.
+fn b_block_vocoder() {
+    return vocoder_process_buffer(_vocoder, _source, _source, _left);
+}
+
+# b block additive — helper used by hotpath.bcyr.
+fn b_block_additive() {
+    return additive_fill_buffer(_additive, _block);
+}
+
+# b block unison — helper used by hotpath.bcyr.
+fn b_block_unison() {
+    return unison_fill_buffer(_unison, _block);
+}
+
+# b block osc — helper used by hotpath.bcyr.
+fn b_block_osc() {
+    return osc_fill_buffer(_osc, _block);
+}
+
 # Bench entry point — runs every benchmark in this file.
 fn main() {
     alloc_init();
@@ -98,6 +145,12 @@ fn main() {
     _additive = additive_new(f64_from(220), 8, f64_from(44100));
     _biquad = filter_biquad_new(NAAD_FILTER_LOWPASS, f64_from(44100), f64_from(1000), F64_ONE);
     _unison = unison_new(WAVEFORM_SAW, f64_from(220), 5, f64_from(12), f64_from(44100));
+    _vocoder = vocoder_new(16, f64_from(200), f64_from(8000), f64_from(44100));
+    _block = naad_vec_zeros(256);
+    _left = naad_vec_zeros(256);
+    _right = naad_vec_zeros(256);
+    _source = naad_vec_zeros(256);
+    noise_fill_buffer(noise_new(NOISE_WHITE, 42), _source);
 
     bench("osc_next_sample (sine)", &b_osc_next_sample, 200000);
     bench("filter_svf lowpass", &b_svf_lowpass, 200000);
@@ -109,6 +162,12 @@ fn main() {
     bench("additive (8 partials)", &b_additive, 100000);
     bench("reverb", &b_reverb, 100000);
     bench("moog ladder", &b_moog, 50000);
+    bench("biquad block (256)", &b_block_biquad, 20000);
+    bench("osc block (256, sine)", &b_block_osc, 10000);
+    bench("unison block (256, 5 voices)", &b_block_unison, 2000);
+    bench("additive block (256, 8 partials)", &b_block_additive, 2000);
+    bench("reverb block (256)", &b_block_reverb, 2000);
+    bench("vocoder block (256, 16 bands)", &b_block_vocoder, 2000);
 
     return 0;
 }

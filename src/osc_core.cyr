@@ -221,11 +221,47 @@ fn osc_next_sample(self) {
 # ================================================================
 fn osc_fill_buffer(self, buffer) {
     var n = vec_len(buffer);
+    if (n == 0) { return 0; }
+    var wf = Oscillator_waveform(self);
     var i = 0;
+    # Noise spends its time in the generator, and an unknown id takes the checks.
+    if (wf < WAVEFORM_SINE || wf > WAVEFORM_PULSE) {
+        while (i < n) {
+            vec_set(buffer, i, osc_next_sample(self));
+            i = i + 1;
+        }
+        return 0;
+    }
+    var dt = osc_phase_increment(self);
+    var t = Oscillator_phase(self);
+    var ts = Oscillator_triangle_sum(self);
+    var pw = f64_clamp(Oscillator_pulse_width(self), OSC_C0_01, OSC_C0_99);
+    var data = load64(buffer);
     while (i < n) {
-        vec_set(buffer, i, osc_next_sample(self));
+        var sample = 0;
+        if (wf == WAVEFORM_SINE) {
+            sample = f64_sin(f64_mul(t, F64_TAU));
+        } elif (wf == WAVEFORM_SAW) {
+            sample = f64_sub(f64_sub(f64_mul(F64_TWO, t), F64_ONE), osc_polyblep(t, dt));
+        } elif (wf == WAVEFORM_SQUARE) {
+            sample = _osc_square_blep(t, dt);
+        } elif (wf == WAVEFORM_TRIANGLE) {
+            ts = f64_add(f64_mul(OSC_C0_999, ts), f64_mul(f64_mul(_osc_square_blep(t, dt), dt), OSC_C4));
+            sample = f64_clamp(ts, OSC_NEG_ONE, F64_ONE);
+        } else {
+            var pl_naive = OSC_NEG_ONE;
+            if (f64_lt(t, pw) == 1) { pl_naive = F64_ONE; }
+            var pl_t2 = _osc_rem1(f64_add(t, f64_sub(F64_ONE, pw)));
+            sample = f64_sub(f64_add(pl_naive, osc_polyblep(t, dt)), osc_polyblep(pl_t2, dt));
+        }
+        store64(data + i * 8, sample);
+        var ph = f64_add(t, dt);
+        if (f64_ge(ph, F64_ONE) == 1) { ph = f64_sub(ph, F64_ONE); }
+        t = ph;
         i = i + 1;
     }
+    Oscillator_set_phase(self, t);
+    Oscillator_set_triangle_sum(self, ts);
     return 0;
 }
 

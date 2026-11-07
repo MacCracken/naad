@@ -95,6 +95,15 @@ fn flush_denormal(x) {
 }
 
 # ================================================================
+# Block loops. A *_process_buffer keeps its state in locals for the block, reads the
+# struct once at the top and writes it back at the end, so a setter between blocks
+# takes effect exactly as it does between samples. A form that needs scratch works
+# in chunks of NAAD_CHUNK samples on the stack (`var x[2048]`, 8 B each), so it adds
+# nothing to the heap and a buffer may be its own input.
+# ================================================================
+var NAAD_CHUNK = 256;
+
+# ================================================================
 # naad_vec_zeros -- a vec of `n` zeros, sized once. Growing a vec by vec_push
 # doubles through every smaller size on a bump allocator that frees nothing, so
 # it leaves about twice the storage behind it. Relies on the header lib/vec.cyr

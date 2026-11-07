@@ -116,12 +116,45 @@ fn eq_process_sample(self, input) {
     return out;
 }
 
-# Process a buffer (vec of f64) in place. Ports process_buffer().
-fn eq_process_buffer(self, buffer) {
-    var n = vec_len(buffer);
+# Whether one filter sits in two bands, which the accessors allow. Per sample it steps
+# once for each slot, in order, and no loop over one band at a time can give that.
+#must_use
+fn _eq_bands_share(bands) {
+    var n = vec_len(bands);
     var i = 0;
     while (i < n) {
-        vec_set(buffer, i, eq_process_sample(self, vec_get(buffer, i)));
+        var filter = EqBand_filter(vec_get(bands, i));
+        var j = i + 1;
+        while (j < n) {
+            if (EqBand_filter(vec_get(bands, j)) == filter) { return 1; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Process a buffer (vec of f64) in place. Ports process_buffer().
+fn eq_process_buffer(self, buffer) {
+    var len = vec_len(buffer);
+    if (len == 0) { return 0; }
+    var bands = ParametricEq_bands(self);
+    var i = 0;
+    if (_eq_bands_share(bands) == 1) {
+        while (i < len) {
+            vec_set(buffer, i, eq_process_sample(self, vec_get(buffer, i)));
+            i = i + 1;
+        }
+        return 0;
+    }
+    # The bands are in series and hold their own state, so each can take the whole
+    # block in turn.
+    var n = vec_len(bands);
+    while (i < n) {
+        var band = vec_get(bands, i);
+        if (EqBand_enabled(band) == 1) {
+            filter_biquad_process_buffer(EqBand_filter(band), buffer);
+        }
         i = i + 1;
     }
     return 0;

@@ -311,10 +311,46 @@ fn dynamics_noise_gate_process_sample(self, input) {
 # Process a buffer (vec of f64) in place.
 fn dynamics_noise_gate_process_buffer(self, buffer) {
     var n = vec_len(buffer);
+    if (n == 0) { return 0; }
+    var data = load64(buffer);
+    var det = NoiseGate_detector(self);
+    var cur = LevelDetector_current(det);
+    var det_attack = LevelDetector_attack_coeff(det);
+    var det_release = LevelDetector_release_coeff(det);
+    var threshold = NoiseGate_threshold_db(self);
+    var hold = NoiseGate_hold_samples(self);
+    var counter = NoiseGate_hold_counter(self);
+    var attack = NoiseGate_attack_coeff(self);
+    var release = NoiseGate_release_coeff(self);
+    var gg = NoiseGate_gate_gain(self);
+    var min_pos = NAAD_F32_MIN_POS;
     var i = 0;
     while (i < n) {
-        vec_set(buffer, i, dynamics_noise_gate_process_sample(self, vec_get(buffer, i)));
+        var input = load64(data + i * 8);
+        var level = 0;
+        if (naad_is_finite(input) == 1) { level = f64_abs(input); }
+        var det_coeff = det_release;
+        if (f64_gt(level, cur) == 1) { det_coeff = det_attack; }
+        cur = f64_add(cur, f64_mul(det_coeff, f64_sub(level, cur)));
+        if (f64_lt(f64_abs(cur), min_pos) == 1) { cur = 0; }
+
+        var target = 0;
+        if (f64_ge(naad_amplitude_to_db(cur), threshold) == 1) {
+            counter = hold;
+            target = F64_ONE;
+        } elif (counter > 0) {
+            counter = counter - 1;
+            target = F64_ONE;
+        }
+        var coeff = release;
+        if (f64_gt(target, gg) == 1) { coeff = attack; }
+        gg = f64_add(gg, f64_mul(coeff, f64_sub(target, gg)));
+        if (f64_lt(f64_abs(gg), min_pos) == 1) { gg = 0; }
+        store64(data + i * 8, f64_mul(input, gg));
         i = i + 1;
     }
+    LevelDetector_set_current(det, cur);
+    NoiseGate_set_hold_counter(self, counter);
+    NoiseGate_set_gate_gain(self, gg);
     return 0;
 }
