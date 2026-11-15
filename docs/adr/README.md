@@ -26,7 +26,8 @@ Decisions about naad — what we chose, the context, and the consequences we acc
 | [0003](0003-convolution-block-path-streams.md) | Convolution's block path streams instead of truncating | Accepted |
 | [0004](0004-bound-delay-lengths-before-the-cast.md) | Bound delay lengths in f64 before the cast | Accepted |
 | [0005](0005-copy-at-the-ownership-boundary.md) | Copy at the ownership boundary | Accepted |
-| [0006](0006-refused-allocation-stops-at-the-null-page.md) | A refused allocation stops at the null page | Accepted |
+| [0006](0006-refused-allocation-stops-at-the-null-page.md) | A refused allocation stops at the null page | Accepted, narrowed by 0010 |
 | [0007](0007-hostile-input-gaps-we-accept.md) | Hostile-input gaps we accept | Accepted |
 | [0008](0008-the-dsp-core-stays-f64.md) | The DSP core stays f64 | Accepted |
 | [0009](0009-block-forms-are-a-second-copy.md) | Block forms are a second copy, held to the per-sample bits | Accepted |
+| [0010](0010-five-constructors-report-a-refused-allocation.md) | Five constructors report a refused allocation | Accepted (narrows 0006) |

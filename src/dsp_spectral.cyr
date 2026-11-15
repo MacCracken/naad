@@ -10,10 +10,10 @@
 # (naad_is_finite, naad_vec_zeros) and src/dsp_util.cyr (WINDOW_*, DSP_C042/C008).
 # No `include` lines.
 #
-# Public API (names match the frozen Rust oracle, except that chromagram is
-# naad_chromagram in the flat namespace): fft_magnitudes, power_spectrum,
-# stft_magnitudes, naad_chromagram, detect_onsets, detect_pitch_autocorr,
-# bspline_eval_1d, fit_polynomial. Internal helpers carry a `_dsp_` prefix.
+# Public API (names match the frozen Rust oracle, except that chromagram and
+# power_spectrum carry a naad_ prefix in the flat namespace): fft_magnitudes,
+# naad_power_spectrum, stft_magnitudes, naad_chromagram, detect_onsets,
+# detect_pitch_autocorr, bspline_eval_1d, fit_polynomial. Internal helpers carry a `_dsp_` prefix.
 # `eval_polynomial` lives in dsp_util.cyr.
 
 # ================================================================
@@ -139,23 +139,26 @@ fn fft_magnitudes(input) {
     var data = _dsp_fft_scratch(n);
     if (data == 0) { return vec_new(); }
     if (_dsp_fft_real(input, data) == 0) { return vec_new(); }
-    var out = naad_vec_zeros(n / 2 + 1);
+    var out = _naad_vec_zeros_or_stop(n / 2 + 1);
     _dsp_magnitudes_into(data, n, out);
     return out;
 }
 
 # ================================================================
-# power_spectrum -- power (|X|^2) for bins 0..N/2, scaled by 1/N^2. Input
-# length must be a power of two. Empty vec on FFT failure. Ports power_spectrum.
+# naad_power_spectrum -- power (|X|^2) for bins 0..N/2, scaled by 1/N^2. Input
+# length must be a power of two. Empty vec on FFT failure. Ports power_spectrum,
+# renamed in 2.3.4 because abaco 2.8.0 defines a power_spectrum(re, im, out, n)
+# of its own, and a unit cannot hold both. abaco's takes a transformed spectrum
+# and does not scale it; this one takes samples, runs the FFT and scales by 1/N^2.
 # ================================================================
 #must_use
-fn power_spectrum(input) {
+fn naad_power_spectrum(input) {
     var n = vec_len(input);
     var data = _dsp_fft_scratch(n);
     if (data == 0) { return vec_new(); }
     if (_dsp_fft_real(input, data) == 0) { return vec_new(); }
     var half = n / 2 + 1;
-    var out = naad_vec_zeros(half);
+    var out = _naad_vec_zeros_or_stop(half);
     var inv_n_sq = f64_div(F64_ONE, f64_mul(f64_from(n), f64_from(n)));
     var b = 0;
     while (b < half) {
@@ -221,8 +224,8 @@ fn stft_magnitudes(signal, window_size, hop_size, window) {
     # `frame`. alloc frees nothing, so per-frame scratch would be permanent.
     var data = _dsp_fft_scratch(window_size);
     if (data == 0) { return vec_new(); }
-    var frame = naad_vec_zeros(window_size);
-    var frames = naad_vec_zeros(num_frames);
+    var frame = _naad_vec_zeros_or_stop(window_size);
+    var frames = _naad_vec_zeros_or_stop(num_frames);
 
     var f = 0;
     while (f < num_frames) {
@@ -235,7 +238,7 @@ fn stft_magnitudes(signal, window_size, hop_size, window) {
         _dsp_apply_spectral_window(frame, window);
         # FFT failure -- bail out cleanly.
         if (_dsp_fft_real(frame, data) == 0) { return vec_new(); }
-        var mag = naad_vec_zeros(half);
+        var mag = _naad_vec_zeros_or_stop(half);
         _dsp_magnitudes_into(data, window_size, mag);
         vec_set(frames, f, mag);
         f = f + 1;
@@ -261,7 +264,7 @@ fn naad_chromagram(magnitudes, window_size, sample_rate) {
     var fi = 0;
     while (fi < nf) {
         var frame = vec_get(magnitudes, fi);
-        var chroma = naad_vec_zeros(12);
+        var chroma = _naad_vec_zeros_or_stop(12);
         var flen = vec_len(frame);
         var bin = 1;
         while (bin < flen) {

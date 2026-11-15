@@ -54,6 +54,12 @@ committed to — nothing here is speculative, and no milestone is invented.
       started exiting 0 in 2.1.3.
       (When running fmt by hand use `--check`: bare `cyrius fmt <file>`
       **rewrites the file in place**.)
+- [x] **The collision gate covers the siblings** — shipped in 2.3.4. abaco 2.8.0 added a
+      `power_spectrum`, and dhvani, which links both, stopped building; naad's gate could
+      not see a library naad does not depend on. CI now fetches the newest tag of the 15
+      siblings dhvani links, and the gate reads `public` declarations and enum members,
+      which its pattern never matched (1,673 of hisab's 2,783 names). naad renamed its
+      function to `naad_power_spectrum`.
 - [x] **Fuzz harness** — shipped in 2.2.0. `cyrius fuzz` discovers
       `tests/*.fcyr` (no `fuzz/` directory is required — the earlier note here
       was wrong). `tests/naad.fcyr` drives the DSP boundary with the values that
@@ -104,6 +110,17 @@ committed to — nothing here is speculative, and no milestone is invented.
       vacuity: 0 `f64_to` comparisons, 0 tautologies, 155/155 float constants
       verified, one genuine vacuity found and fixed. 12 `_`-prefixed internal
       helpers remain unreferenced by design.
+
+### Refused allocations
+
+- [x] **Five constructors report a refused allocation.** **Filed 2026-11-07 by garjan**,
+      whose fault-injection sweep found `noise_new`, `filter_biquad_with_gain`,
+      `filter_svf_new`, `modulation_lfo_new` and `naad_vec_zeros` storing through a null
+      pointer. garjan already checks for `<= 0`. Shipped in 2.3.4: they return
+      `NAAD_ERR_ALLOCATION` (-6) or 0, and their callers pass it on.
+      [ADR-0010](../adr/0010-five-constructors-report-a-refused-allocation.md) narrows
+      ADR-0006 to everything else. The same filing found `naad_vec_zeros` wrapping `n * 8`,
+      fixed with it.
 
 ### Allocation-free hot paths
 
@@ -181,6 +198,12 @@ committed to — nothing here is speculative, and no milestone is invented.
 
       What closes this is each repo moving its pins, which is theirs to do. svara's line is
       the only code change dhvani's path needs.
+
+      **Since then (2.3.4):** naad pins hisab 3.5.0 and goonj 2.3.2, and goonj 2.3.2 needs
+      hisab >= 3.4.2. A consumer is not forced to follow, though: the 2.3.4 bundle builds and
+      passes its bundle suite against hisab 3.4.1 and goonj 2.3.1 too. dhvani's other
+      block, abaco 2.8.0's `power_spectrum`, is gone with the rename. The table above
+      has not been re-run against 2.3.4.
 - [ ] **Retire `rust-old/`.** The 13,465-line oracle stays frozen in-tree until
       consumers are green and no open parity question still needs it. Deleting
       it is the last step of the port, not the first. Gated on the row above: consumers

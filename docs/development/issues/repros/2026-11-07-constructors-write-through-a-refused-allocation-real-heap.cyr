@@ -1,0 +1,13 @@
+# No fault injection: the real stdlib alloc, run under `ulimit -v`.
+# Exhaust the heap, then call a naad constructor.
+fn main() {
+    var p = 1;
+    while (p != 0) { p = alloc(1048576); }
+    p = 1;
+    while (p != 0) { p = alloc(8); }
+    syscall(1, 1, "heap exhausted; calling noise_new\n", 34);
+    var g = noise_new(NOISE_WHITE, 1);
+    fmt_int(g);
+    syscall(1, 1, " returned\n", 10);
+    return 0;
+}

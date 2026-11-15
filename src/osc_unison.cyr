@@ -66,7 +66,7 @@ fn unison_new(waveform, frequency, num_voices, detune_cents, sample_rate) {
     if (nv < 1) { nv = 1; }
     if (nv > 8) { nv = 8; }
 
-    var phases = naad_vec_zeros(8);
+    var phases = _naad_vec_zeros_or_stop(8);
     var seed = alloc(8);
     store64(seed, 12345);
     var i = 0;
@@ -92,8 +92,8 @@ fn unison_new(waveform, frequency, num_voices, detune_cents, sample_rate) {
     UnisonOscillator_set_phases(self, phases);
     UnisonOscillator_set_detune_ratios(self, detune_ratios);
     UnisonOscillator_set_ratios_dirty(self, 1);
-    UnisonOscillator_set_gains_l(self, naad_vec_zeros(8));
-    UnisonOscillator_set_gains_r(self, naad_vec_zeros(8));
+    UnisonOscillator_set_gains_l(self, _naad_vec_zeros_or_stop(8));
+    UnisonOscillator_set_gains_r(self, _naad_vec_zeros_or_stop(8));
     UnisonOscillator_set_pan_voices(self, 0);
     UnisonOscillator_set_out_left(self, 0);
     UnisonOscillator_set_out_right(self, 0);

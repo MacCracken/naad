@@ -88,7 +88,15 @@ binaural, and running out of that memory ends the process. A 32 MHz room fails u
 A refused allocation inside naad stops at the null page. That was measured at 2.3.2, not
 assumed: all 926 faults across 638 refusal points and 450 zero-argument calls landed
 there, with no silent wrong answer and no hang. See
-[ADR-0006](docs/adr/0006-refused-allocation-stops-at-the-null-page.md).
+[ADR-0006](docs/adr/0006-refused-allocation-stops-at-the-null-page.md). Since 2.3.4, five
+constructors report the refusal instead: `noise_new`, `filter_biquad_with_gain`,
+`filter_svf_new` and `modulation_lfo_new` return `NAAD_ERR_ALLOCATION`, and
+`naad_vec_zeros` returns 0
+([ADR-0010](docs/adr/0010-five-constructors-report-a-refused-allocation.md)).
+
+2.3.4 also closed a heap overrun in `naad_vec_zeros(n)`, which is public: `n * 8` was
+never bounded, so `n = 2^61 + 1` allocated 8 bytes and zeroed 2^61 slots past them. It
+now refuses any `n` outside `[0, VEC_CAP_MAX]`. Every naad caller already bounded its size.
 
 2.1.3 also closed the largest availability issue: `lib/alloc.cyr` is a bump
 allocator with **no individual free**, so a per-call allocation on a streaming
@@ -98,7 +106,7 @@ FFT scratch buffers per block — about 147 MB/s of unreclaimable memory for a
 leaked similarly. `tests/allocbudget.tcyr` now bounds them.
 
 The memory-safety defect predating all of these is 2.1.0's out-of-bounds read in
-`fft_magnitudes` / `power_spectrum`: empty input fell through the FFT's
+`fft_magnitudes` / `power_spectrum` (`naad_power_spectrum` since 2.3.4): empty input fell through the FFT's
 early-return into a scale loop that did a `load64` on a zero-byte allocation
 with a `1/0 = +inf` scale factor.
 

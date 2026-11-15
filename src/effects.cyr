@@ -236,7 +236,7 @@ fn effects_phaser_new(num_stages, rate, min_freq, max_freq, feedback, mix, sampl
     if (naad_is_err(lfo) == 1) { return lfo; }
 
     var self = alloc(sizeof(Phaser));
-    Phaser_set_allpass_states(self, naad_vec_zeros(stages));
+    Phaser_set_allpass_states(self, _naad_vec_zeros_or_stop(stages));
     Phaser_set_lfo(self, lfo);
     Phaser_set_num_stages(self, stages);
     Phaser_set_min_freq(self, min_f);

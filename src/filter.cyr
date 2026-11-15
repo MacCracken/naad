@@ -57,7 +57,8 @@ struct StateVariableFilter { frequency; q; sample_rate; g; k; a1; a2; a3; ic1eq;
 # ================================================================
 
 # Create a biquad filter with gain (shelf/peak types). Returns the struct
-# pointer on success, or a negative NAAD_ERR_* on invalid sample_rate/frequency/q.
+# pointer on success, or a negative NAAD_ERR_* on invalid sample_rate/frequency/q,
+# or NAAD_ERR_ALLOCATION when the struct's allocation is refused (ADR-0010).
 #must_use
 fn filter_biquad_with_gain(filter_type, sample_rate, frequency, q, gain_db) {
     var e = validate_sample_rate(sample_rate);
@@ -74,6 +75,7 @@ fn filter_biquad_with_gain(filter_type, sample_rate, frequency, q, gain_db) {
     if (filter_type > NAAD_FILTER_PEAK) { return NAAD_ERR_INVALID_PARAMETER; }
 
     var self = alloc(sizeof(BiquadFilter));
+    if (self == 0) { return NAAD_ERR_ALLOCATION; }
     BiquadFilter_set_b0(self, F64_ONE);
     BiquadFilter_set_b1(self, 0);
     BiquadFilter_set_b2(self, 0);
@@ -332,6 +334,7 @@ fn filter_svf_new(frequency, q, sample_rate) {
     if (naad_is_finite(q) == 0) { return NAAD_ERR_INVALID_PARAMETER; }
 
     var self = alloc(sizeof(StateVariableFilter));
+    if (self == 0) { return NAAD_ERR_ALLOCATION; }
     StateVariableFilter_set_frequency(self, frequency);
     StateVariableFilter_set_q(self, q);
     StateVariableFilter_set_sample_rate(self, sample_rate);

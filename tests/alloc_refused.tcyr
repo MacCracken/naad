@@ -1,0 +1,539 @@
+# alloc_refused.tcyr -- the constructors ADR-0010 names report a refused
+# allocation as NAAD_ERR_ALLOCATION, and what builds on them passes it on.
+#
+# This suite replaces the stdlib `alloc`. cycc keeps the last definition of a
+# function, so the `alloc` below serves every allocation in the unit: vec_new
+# and vec_push reach it through the stdlib's own allocator. It hands out zeroed
+# memory from one private mapping, as the stdlib does, and while armed it counts
+# requests and refuses one of them:
+#   FI_ONE   the Nth request only
+#   FI_FROM  the Nth request and every later one (a heap that stays exhausted)
+#   FI_SIZE  the Kth request of exactly FI_BYTES bytes, so a caller's test does
+#            not depend on how many allocations come before the one it targets
+#
+# Everything outside ADR-0010's list still stops at the null page (ADR-0006), so
+# no case here refuses an allocation a caller makes for itself: that would end
+# the run, not fail an assertion.
+#
+# Every count is measured here, not written down, so a toolchain whose vec_new
+# allocates differently moves the loops, not the expectations. Each loop is also
+# held to a floor, so it cannot pass by refusing nothing.
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "dist/naad.cyr"
+
+var FI_OFF = 0;
+var FI_ONE = 1;
+var FI_FROM = 2;
+var FI_SIZE = 3;
+
+var FI_MODE = 0;
+var FI_COUNT = 0;
+var FI_N = 0;
+var FI_BYTES = 0;
+var FI_SEEN = 0;
+var FI_BASE = 0;
+var FI_PTR = 0;
+var FI_END = 0;
+var FI_ARENA = 0x10000000;   # 256 MiB, reserved lazily
+
+# The stand-in allocator. The same refusals as the stdlib's for a size it can
+# never serve, then the armed refusal, then a bump from the private mapping.
+fn alloc(size): i64 {
+    if (size <= 0) { return 0; }
+    if (size > ALLOC_MAX) { return 0; }
+    if (FI_MODE != FI_OFF) {
+        FI_COUNT = FI_COUNT + 1;
+        if (FI_MODE == FI_ONE) {
+            if (FI_COUNT == FI_N) { return 0; }
+        }
+        if (FI_MODE == FI_FROM) {
+            if (FI_COUNT >= FI_N) { return 0; }
+        }
+        if (FI_MODE == FI_SIZE) {
+            if (size == FI_BYTES) {
+                FI_SEEN = FI_SEEN + 1;
+                if (FI_SEEN == FI_N) { return 0; }
+            }
+        }
+    }
+    if (FI_BASE == 0) {
+        # PROT_READ|WRITE, MAP_PRIVATE|ANONYMOUS|NORESERVE
+        FI_BASE = syscall(9, 0, FI_ARENA, 3, 0x4022, 0 - 1, 0);
+        if (FI_BASE < 0) { FI_BASE = 0; return 0; }
+        FI_PTR = FI_BASE;
+        FI_END = FI_BASE + FI_ARENA;
+    }
+    size = (size + 7) & (0 - 8);
+    if (FI_PTR + size > FI_END) { return 0; }
+    var p = FI_PTR;
+    FI_PTR = p + size;
+    return p;
+}
+
+# Arm the stand-in: start counting, and refuse request `n` the way `mode` says.
+fn fi_arm(mode, n) {
+    FI_MODE = mode;
+    FI_N = n;
+    FI_COUNT = 0;
+    FI_SEEN = 0;
+    return 0;
+}
+
+# Arm FI_SIZE: refuse the k-th request of exactly `bytes` bytes.
+fn fi_arm_size(bytes, k) {
+    FI_BYTES = bytes;
+    return fi_arm(FI_SIZE, k);
+}
+
+# Disarm and report how many requests were made while armed.
+fn fi_disarm() {
+    FI_MODE = FI_OFF;
+    return FI_COUNT;
+}
+
+var SR = 0;
+var HZ = 0;
+var Q = 0x3FE69FBE76C8B439;   # 0.707
+var GAIN = 0;
+
+# The five, plus the three noise colours, by number.
+var MK_NOISE_WHITE = 1;
+var MK_NOISE_PINK = 2;
+var MK_NOISE_BROWN = 3;
+var MK_BIQUAD = 4;
+var MK_BIQUAD_GAIN = 5;
+var MK_SVF = 6;
+var MK_LFO = 7;
+var MK_LFO_WAVEFORM = 8;
+var MK_LAST = 8;
+
+# Build object `which` (an MK_* number) and return what its constructor returns.
+fn make(which) {
+    if (which == MK_NOISE_WHITE) { return noise_new(NOISE_WHITE, 1); }
+    if (which == MK_NOISE_PINK) { return noise_new(NOISE_PINK, 7); }
+    if (which == MK_NOISE_BROWN) { return noise_new(NOISE_BROWN, 0); }
+    if (which == MK_BIQUAD) { return filter_biquad_new(NAAD_FILTER_LOWPASS, SR, HZ, Q); }
+    if (which == MK_BIQUAD_GAIN) { return filter_biquad_with_gain(NAAD_FILTER_PEAK, SR, HZ, Q, GAIN); }
+    if (which == MK_SVF) { return filter_svf_new(HZ, Q, SR); }
+    if (which == MK_LFO) { return modulation_lfo_new(MODULATION_LFO_SINE, F64_ONE, SR); }
+    return modulation_lfo_from_waveform(WAVEFORM_SAW, F64_TWO, SR);
+}
+
+# The allocations naad itself makes in each, below which a loop is vacuous:
+# noise_new makes rng, the octave vec (at least one) and the struct.
+fn make_floor(which) {
+    if (which <= MK_NOISE_BROWN) { return 3; }
+    if (which <= MK_SVF) { return 1; }
+    return 2;
+}
+
+# The i-th output of a constructed object, from a fixed input.
+fn sample(which, obj, i) {
+    var x = f64_mul(f64_from(i % 7 - 3), F64_HALF);
+    if (which <= MK_NOISE_BROWN) { return noise_next_sample(obj); }
+    if (which <= MK_BIQUAD_GAIN) { return filter_biquad_process_sample(obj, x); }
+    if (which == MK_SVF) { return filter_svf_process_sample_lowpass(obj, x); }
+    return modulation_lfo_next_value(obj);
+}
+
+# 1 when two objects of the same kind give the same 16 outputs, bit for bit.
+fn same_outputs(which, a, b) {
+    var i = 0;
+    while (i < 16) {
+        if (sample(which, a, i) != sample(which, b, i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+alloc_init();
+SR = f64_from(44100);
+HZ = f64_from(1000);
+GAIN = f64_from(6);
+
+# ================================================================
+test_group("the stand-in allocator serves and refuses");
+fi_arm(FI_ONE, 2);
+var t_a = alloc(16);
+var t_b = alloc(16);
+var t_c = alloc(16);
+assert_eq(fi_disarm(), 3, "three requests counted while armed");
+assert(t_a > 0, "request 1 served");
+assert_eq(t_b, 0, "request 2 refused");
+assert(t_c > t_a, "request 3 served after the refusal");
+assert_eq(load64(t_c), 0, "served memory is zeroed");
+fi_arm(FI_FROM, 2);
+t_a = alloc(16);
+t_b = alloc(16);
+t_c = alloc(16);
+fi_disarm();
+assert(t_a > 0, "persistent: request 1 served");
+assert_eq(t_b + t_c, 0, "persistent: requests 2 and 3 refused");
+fi_arm_size(40, 2);
+t_a = alloc(40);
+t_b = alloc(16);
+t_c = alloc(40);
+fi_disarm();
+assert(t_a > 0, "by size: the first 40-byte request served");
+assert(t_b > 0, "by size: a 16-byte request served");
+assert_eq(t_c, 0, "by size: the second 40-byte request refused");
+var t_v = vec_new();
+assert(t_v > 0, "vec_new is served by the stand-in");
+fi_arm(FI_ONE, 1);
+t_v = vec_new();
+fi_disarm();
+assert_eq(t_v, 0, "vec_new reaches the stand-in: refusing its first request refuses it");
+
+# ================================================================
+test_group("each constructor reports every refusal, singly and from then on");
+var which = 1;
+while (which <= MK_LAST) {
+    var ref = make(which);
+    assert(ref > 0, "reference object builds");
+    # Count, refusing nothing (N = 0 is never reached).
+    fi_arm(FI_ONE, 0);
+    var counted = make(which);
+    var k = fi_disarm();
+    assert(counted > 0, "a counted build succeeds");
+    assert(k >= make_floor(which), "the count covers every allocation naad makes itself");
+    var n = 1;
+    var all_single = 1;
+    var all_from = 1;
+    while (n <= k) {
+        fi_arm(FI_ONE, n);
+        var r1 = make(which);
+        fi_disarm();
+        if (r1 != NAAD_ERR_ALLOCATION) { all_single = 0; }
+        fi_arm(FI_FROM, n);
+        var r2 = make(which);
+        fi_disarm();
+        if (r2 != NAAD_ERR_ALLOCATION) { all_from = 0; }
+        n = n + 1;
+    }
+    assert_eq(all_single, 1, "every single refusal returns NAAD_ERR_ALLOCATION");
+    assert_eq(all_from, 1, "every persistent refusal returns NAAD_ERR_ALLOCATION");
+    # Control: one past the last request refuses nothing, and the object is the
+    # same object the unarmed build gives.
+    fi_arm(FI_ONE, k + 1);
+    var past = make(which);
+    fi_disarm();
+    assert(past > 0, "refusing past the last request builds normally");
+    assert_eq(same_outputs(which, ref, past), 1, "and gives the unarmed object's outputs");
+    which = which + 1;
+}
+
+# ================================================================
+test_group("naad_vec_zeros: refusals and sizes it cannot hold return 0");
+fi_arm(FI_ONE, 0);
+var vz = naad_vec_zeros(100);
+var vz_k = fi_disarm();
+assert(vz > 0, "naad_vec_zeros(100) builds");
+assert_eq(vec_len(vz), 100, "with 100 elements");
+assert(vz_k >= 2, "from at least a vec_new and its storage");
+var vz_n = 1;
+var vz_all = 1;
+while (vz_n <= vz_k) {
+    fi_arm(FI_ONE, vz_n);
+    var vz_r = naad_vec_zeros(100);
+    fi_disarm();
+    if (vz_r != 0) { vz_all = 0; }
+    fi_arm(FI_FROM, vz_n);
+    vz_r = naad_vec_zeros(100);
+    fi_disarm();
+    if (vz_r != 0) { vz_all = 0; }
+    vz_n = vz_n + 1;
+}
+assert_eq(vz_all, 1, "every refusal, single or persistent, returns 0");
+# 2^61 + 1 elements: n * 8 wraps to 8. Through 2.3.3 that allocated 8 bytes and
+# zeroed 2^61 slots after them. Nothing is refused here: the bound does it.
+var vz_before = FI_PTR;
+assert_eq(naad_vec_zeros(0x2000000000000001), 0, "n * 8 that wraps is refused");
+assert_eq(FI_PTR, vz_before, "and refused before anything is allocated");
+assert_eq(naad_vec_zeros(VEC_CAP_MAX + 1), 0, "one past VEC_CAP_MAX is refused");
+assert_eq(naad_vec_zeros(0x7FFFFFFFFFFFFFFF), 0, "INT64_MAX is refused");
+assert_eq(naad_vec_zeros(0 - 1), 0, "a negative size is refused");
+assert_eq(naad_vec_zeros(0x8000000000000000), 0, "INT64_MIN is refused");
+# VEC_CAP_MAX itself passes the bound and reaches alloc, which refuses 2 GiB
+# from this suite's 256 MiB mapping.
+assert_eq(naad_vec_zeros(VEC_CAP_MAX), 0, "VEC_CAP_MAX passes the bound; the refused 2 GiB returns 0");
+var vz0 = naad_vec_zeros(0);
+assert(vz0 > 0, "control: 0 elements is an empty vec, not a refusal");
+assert_eq(vec_len(vz0), 0, "of length 0");
+var vz1 = naad_vec_zeros(1);
+assert_eq(vec_len(vz1), 1, "control: 1 element");
+assert_eq(vec_get(vz1, 0), 0, "zeroed");
+
+# ================================================================
+test_group("callers pass the code on");
+# Each case refuses the first allocation the size of the struct one of the five
+# builds. A struct of the caller's own that happened to share the size would be
+# refused instead and end the run, which is why these sizes are pinned first.
+var SZ_NOISE = sizeof(NoiseGenerator);
+var SZ_BIQUAD = sizeof(BiquadFilter);
+var SZ_SVF = sizeof(StateVariableFilter);
+var SZ_LFO = sizeof(Lfo);
+assert_eq(SZ_NOISE, 48, "NoiseGenerator is 48 bytes");
+assert_eq(SZ_BIQUAD, 96, "BiquadFilter is 96 bytes");
+assert_eq(SZ_SVF, 80, "StateVariableFilter is 80 bytes");
+assert_eq(SZ_LFO, 64, "Lfo is 64 bytes");
+
+# osc_new, each noise colour: noise_new's refusal, not a generator of -6.
+var cw = WAVEFORM_WHITE_NOISE;
+while (cw <= WAVEFORM_BROWN_NOISE) {
+    fi_arm_size(SZ_NOISE, 1);
+    var co = osc_new(cw, f64_from(440), SR);
+    fi_disarm();
+    assert_eq(co, NAAD_ERR_ALLOCATION, "osc_new passes on a refused noise generator");
+    fi_arm(FI_ONE, 1);
+    co = osc_new(cw, f64_from(440), SR);
+    fi_disarm();
+    assert_eq(co, NAAD_ERR_ALLOCATION, "osc_new passes on a refused noise rng");
+    cw = cw + 1;
+}
+var co_ok = osc_new(WAVEFORM_PINK_NOISE, f64_from(440), SR);
+assert(co_ok > 0, "control: a noise oscillator still builds");
+assert(naad_is_finite(osc_next_sample(co_ok)), "and runs");
+
+fi_arm_size(SZ_NOISE, 1);
+var c_ring = modulation_ring_new(WAVEFORM_PINK_NOISE, f64_from(5), SR);
+fi_disarm();
+assert_eq(c_ring, NAAD_ERR_ALLOCATION, "modulation_ring_new, noise modulator");
+
+fi_arm_size(SZ_NOISE, 1);
+var c_sync = hardsync_new(f64_from(110), f64_from(220), WAVEFORM_WHITE_NOISE, SR);
+fi_disarm();
+assert_eq(c_sync, NAAD_ERR_ALLOCATION, "hardsync_new, noise slave");
+
+fi_arm_size(SZ_NOISE, 1);
+var c_sub = subosc_new(WAVEFORM_BROWN_NOISE, f64_from(220), 1, SR);
+fi_disarm();
+assert_eq(c_sub, NAAD_ERR_ALLOCATION, "subosc_new, noise waveform");
+
+fi_arm_size(SZ_SVF, 1);
+var c_syn = subtractive_new(WAVEFORM_SAW, f64_from(440), HZ, F64_HALF, SR);
+fi_disarm();
+assert_eq(c_syn, NAAD_ERR_ALLOCATION, "subtractive_new, refused filter");
+fi_arm_size(SZ_NOISE, 1);
+c_syn = subtractive_new(WAVEFORM_WHITE_NOISE, f64_from(440), HZ, F64_HALF, SR);
+fi_disarm();
+assert_eq(c_syn, NAAD_ERR_ALLOCATION, "subtractive_new, refused noise oscillator");
+var c_syn_ok = subtractive_new(WAVEFORM_SAW, f64_from(440), HZ, F64_HALF, SR);
+fi_arm_size(SZ_NOISE, 1);
+var c_osc2 = subtractive_set_osc2(c_syn_ok, WAVEFORM_PINK_NOISE, f64_from(440), F64_HALF);
+fi_disarm();
+assert_eq(c_osc2, NAAD_ERR_ALLOCATION, "subtractive_set_osc2, refused noise oscillator");
+assert_eq(SubtractiveSynth_osc2(c_syn_ok), 0, "and the voice keeps no second oscillator");
+
+fi_arm_size(SZ_LFO, 1);
+var c_lfo = modulation_lfo_from_waveform(WAVEFORM_TRIANGLE, F64_ONE, SR);
+fi_disarm();
+assert_eq(c_lfo, NAAD_ERR_ALLOCATION, "modulation_lfo_from_waveform");
+
+fi_arm_size(SZ_BIQUAD, 1);
+var c_snare = drum_snare_new(SR);
+fi_disarm();
+assert_eq(c_snare, NAAD_ERR_ALLOCATION, "drum_snare_new");
+
+fi_arm_size(SZ_BIQUAD, 1);
+var c_hat = drum_hihat_new(0, SR);
+fi_disarm();
+assert_eq(c_hat, NAAD_ERR_ALLOCATION, "drum_hihat_new, high-pass refused");
+fi_arm_size(SZ_BIQUAD, 2);
+c_hat = drum_hihat_new(1, SR);
+fi_disarm();
+assert_eq(c_hat, NAAD_ERR_ALLOCATION, "drum_hihat_new, band-pass refused");
+
+fi_arm_size(SZ_BIQUAD, 1);
+var c_voc = vocoder_new(16, f64_from(100), f64_from(8000), SR);
+fi_disarm();
+assert_eq(c_voc, NAAD_ERR_ALLOCATION, "vocoder_new, first analysis filter");
+fi_arm_size(SZ_BIQUAD, 32);
+c_voc = vocoder_new(16, f64_from(100), f64_from(8000), SR);
+fi_disarm();
+assert_eq(c_voc, NAAD_ERR_ALLOCATION, "vocoder_new, last synthesis filter");
+
+fi_arm_size(SZ_BIQUAD, 3);
+var c_fmt = formant_synth_new(VOWEL_A, SR);
+fi_disarm();
+assert_eq(c_fmt, NAAD_ERR_ALLOCATION, "formant_synth_new, a band filter");
+
+var c_eq = eq_parametric_new(SR);
+assert_eq(eq_add_band(c_eq, NAAD_FILTER_PEAK, HZ, Q, GAIN), NAAD_ERR_NONE, "a band adds");
+fi_arm_size(SZ_BIQUAD, 1);
+var c_band = eq_add_band(c_eq, NAAD_FILTER_PEAK, f64_from(2000), Q, GAIN);
+fi_disarm();
+assert_eq(c_band, NAAD_ERR_ALLOCATION, "eq_add_band, refused filter");
+assert_eq(eq_num_bands(c_eq), 1, "and no band is added");
+
+fi_arm_size(SZ_BIQUAD, 1);
+var c_ds = eq_deesser_new(f64_from(6000), f64_neg(f64_from(20)), SR);
+fi_disarm();
+assert_eq(c_ds, NAAD_ERR_ALLOCATION, "eq_deesser_new");
+
+# ================================================================
+test_group("every other caller of naad_vec_zeros still stops in its constructor");
+# naad's other 28 callers go through _naad_vec_zeros_or_stop. Passing the 0 on
+# would build an object that looks whole and stops at its first sample. So each
+# case below runs in a child, which exits 7 if a constructor reports success
+# while an allocation it made was refused, and 3 if it reports an error. A signal
+# is the 2.3.3 behaviour this keeps.
+
+# Exit code of a child running `fn_case(arg)`, or -1 if a signal ended it.
+fn ar_child2(fn_case, which, n) {
+    var pid = sys_fork();
+    if (pid == 0) {
+        sys_close(2);
+        sys_exit(fncall2(fn_case, which, n));
+    }
+    var status[8];
+    store64(&status, 0);
+    sys_waitpid(pid, &status, 0);
+    var s = load64(&status) & U32_MASK;
+    if (WIFEXITED(s) == 0) { return 0 - 1; }
+    return WEXITSTATUS(s);
+}
+
+# The helper itself, and naad_vec_copy, which also goes through it. Each source is
+# built before arming, so the refusal lands where the case says.
+fn ar_helper_case(which, n) {
+    var src = vec_new();
+    vec_push(src, F64_ONE);
+    if (which == 0) { var c0 = _naad_vec_zeros_or_stop(VEC_CAP_MAX + 1); }
+    if (which == 1) {
+        fi_arm(FI_ONE, 1);
+        var c1 = _naad_vec_zeros_or_stop(100);
+    }
+    if (which == 2) {
+        fi_arm(FI_FROM, 1);
+        var c2 = naad_vec_copy(src);
+    }
+    if (which == 3) {
+        var c3 = _naad_vec_zeros_or_stop(8);
+        if (vec_len(c3) == 8) { return 0; }
+    }
+    return 7;
+}
+
+assert_eq(ar_child2(&ar_helper_case, 0, 0), 0 - 1, "a size past VEC_CAP_MAX stops in place");
+assert_eq(ar_child2(&ar_helper_case, 1, 0), 0 - 1, "a refused vec_new stops in place");
+assert_eq(ar_child2(&ar_helper_case, 2, 0), 0 - 1, "naad_vec_copy stops in place");
+assert_eq(ar_child2(&ar_helper_case, 3, 0), 0, "control: a size it can hold returns normally");
+
+# Inputs the constructors below take, built before anything is armed.
+var AR_AMPS = vec_new();
+vec_push(AR_AMPS, F64_ONE);
+vec_push(AR_AMPS, F64_HALF);
+var AR_TABLES = vec_new();
+vec_push(AR_TABLES, wavetable_from_harmonics(1, AR_AMPS, 64));
+vec_push(AR_TABLES, wavetable_from_harmonics(2, AR_AMPS, 64));
+vec_push(AR_TABLES, wavetable_from_harmonics(2, AR_AMPS, 64));
+vec_push(AR_TABLES, wavetable_from_harmonics(1, AR_AMPS, 64));
+vec_push(AR_TABLES, wavetable_from_harmonics(2, AR_AMPS, 64));
+var AR_TABLES4 = vec_new();
+vec_push(AR_TABLES4, vec_get(AR_TABLES, 0));
+vec_push(AR_TABLES4, vec_get(AR_TABLES, 1));
+vec_push(AR_TABLES4, vec_get(AR_TABLES, 2));
+vec_push(AR_TABLES4, vec_get(AR_TABLES, 3));
+var AR_EMPTY = vec_new();
+var AR_IR = vec_new();
+var ar_i = 0;
+while (ar_i < 40) { vec_push(AR_IR, f64_div(F64_ONE, f64_from(ar_i + 1))); ar_i = ar_i + 1; }
+
+# Every constructor holding one of the 28 converted call sites but the ones in
+# dsp_spectral and naad_fdn_hadamard8, which fill their vec in the same function,
+# so a 0 there stops at once whichever helper it came from. A 4-table morph has
+# no interior knots, so its knot vec is empty and kept unwritten; an empty IR
+# takes the ring's one-slot branch.
+var AR_LAST = 13;
+# Build constructor `which` (0 to AR_LAST) and return what it returns.
+fn ar_build(which) {
+    if (which == 0) { return delay_line_new(100); }
+    if (which == 1) { return additive_new(f64_from(110), 8, SR); }
+    if (which == 2) { return drum_hihat_new(1, SR); }
+    if (which == 3) { return effects_phaser_new(4, F64_HALF, f64_from(200), f64_from(2000), F64_HALF, F64_HALF, SR); }
+    if (which == 4) { return mod_matrix_new(); }
+    if (which == 5) { return unison_new(WAVEFORM_SAW, f64_from(440), 5, f64_from(10), SR); }
+    if (which == 6) { return physical_moog_new(HZ, F64_HALF, SR); }
+    if (which == 7) { return wavetable_from_harmonics(2, AR_AMPS, 64); }
+    if (which == 8) { return wavetable_morph_new(AR_TABLES, f64_from(440), SR); }
+    if (which == 9) { return naad_fdn_matrix_new(F64_ONE, 8000, F64_HALF); }
+    if (which == 10) { return naad_convolution_from_ir(AR_IR, F64_HALF); }
+    if (which == 11) { return naad_vec_copy(AR_IR); }
+    if (which == 12) { return wavetable_morph_new(AR_TABLES4, f64_from(440), SR); }
+    return naad_convolution_from_ir(AR_EMPTY, F64_HALF);
+}
+
+# Build `which` with request n, and only request n, refused. A single refusal is
+# what shows a stop left for first use: refusing everything from n on makes the next raw
+# alloc fault inside the constructor whatever the converted site did.
+fn ar_build_case(which, n) {
+    fi_arm(FI_ONE, n);
+    var r = ar_build(which);
+    fi_disarm();
+    if (r > 0) { return 7; }
+    return 3;
+}
+
+# 1 when request n of k is a raw allocation the constructor keeps for later, so a
+# refusal there still builds the object, which then stops at the null page on
+# first use. These predate 2.3.4 and are ADR-0006's: mod_matrix_new's routings
+# vec (requests 2 and 3, its header and storage) and its 16 routing slots,
+# physical_moog_new's scratch, and wavetable_morph_new's two scratch buffers.
+# They are pinned so that fixing one, or adding one, shows.
+fn ar_kept(which, n, k) {
+    if (which == 4) {
+        if (n == 2 || n == 3) { return 1; }
+        if (n > k - MOD_MATRIX_MAX_ROUTINGS) { return 1; }
+    }
+    if (which == 6) {
+        if (n == k) { return 1; }
+    }
+    if (which == 8 || which == 12) {
+        if (n >= k - 1) { return 1; }
+    }
+    return 0;
+}
+
+var ar_w = 0;
+var ar_ok = 1;
+var ar_stops = 0;
+var ar_tried = 0;
+var ar_kept_built = 0;
+var ar_kept_want = 0;
+while (ar_w <= AR_LAST) {
+    fi_arm(FI_ONE, 0);
+    var ar_ref = ar_build(ar_w);
+    var ar_k = fi_disarm();
+    if (ar_ref <= 0) { ar_ok = 0; }
+    var ar_n = 1;
+    while (ar_n <= ar_k) {
+        var ar_rc = ar_child2(&ar_build_case, ar_w, ar_n);
+        if (ar_kept(ar_w, ar_n, ar_k) == 1) {
+            ar_kept_want = ar_kept_want + 1;
+            if (ar_rc == 7) { ar_kept_built = ar_kept_built + 1; }
+        } else {
+            if (ar_rc == 7) { ar_ok = 0; }
+            if (ar_rc == 0 - 1) { ar_stops = ar_stops + 1; }
+            ar_tried = ar_tried + 1;
+        }
+        ar_n = ar_n + 1;
+    }
+    ar_w = ar_w + 1;
+}
+assert_eq(ar_ok, 1, "no single refusal leaves one of the 14 cases reporting success");
+assert(ar_tried >= 3 * (AR_LAST + 1), "every constructor was refused at several points");
+assert(ar_stops >= AR_LAST + 1, "and the refusals stopped, not returned");
+assert_eq(ar_kept_want, 2 + MOD_MATRIX_MAX_ROUTINGS + 1 + 2 + 2, "the kept set is the 23 requests named above");
+assert_eq(ar_kept_built, ar_kept_want, "and each of them still builds: ADR-0006 leaves those to first use");
+
+# ================================================================
+test_group("NAAD_ERR_ALLOCATION is its own code");
+assert_eq(NAAD_ERR_ALLOCATION, 0 - 6, "the code is -6");
+assert_eq(naad_is_err(NAAD_ERR_ALLOCATION), 1, "and is an error");
+assert_eq(streq(naad_err_name(NAAD_ERR_ALLOCATION), "allocation refused"), 1, "named for diagnostics");
+assert_eq(streq(naad_err_name(0 - 7), "unknown error"), 1, "control: -7 is still unknown");
+
+var rc = assert_summary();
+syscall(60, rc);

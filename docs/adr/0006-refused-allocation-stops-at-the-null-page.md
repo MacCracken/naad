@@ -1,6 +1,6 @@
 # 0006 — A refused allocation stops at the null page
 
-**Status**: Accepted
+**Status**: Accepted, narrowed by [0010](0010-five-constructors-report-a-refused-allocation.md)
 **Date**: 2026-11-06
 
 ## Context
@@ -23,9 +23,14 @@ All 926 faults were read with ptrace: every one is at the null page, offset 96 a
 
 ## Decision
 
+> **Narrowed in 2.3.4.** [ADR-0010](0010-five-constructors-report-a-refused-allocation.md)
+> makes `noise_new`, `filter_biquad_with_gain`, `filter_svf_new`, `modulation_lfo_new` and
+> `naad_vec_zeros` report a refused allocation, because garjan can act on it. Everything
+> else below still holds for the rest of naad.
+
 **A refused allocation is fail-stop, and naad adds no checks for it.** Rust's allocator
 aborts here too. The exception is a size that depends on input where Rust answers
-something else: `fft_magnitudes` and `power_spectrum` validate first and return empty.
+something else: `fft_magnitudes` and `naad_power_spectrum` validate first and return empty.
 
 ## Consequences
 

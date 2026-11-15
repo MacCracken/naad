@@ -118,7 +118,8 @@ struct Oscillator { waveform; frequency; phase; sample_rate; pulse_width; noise_
 # ================================================================
 # osc_new -- construct. Returns the struct pointer on success, or a negative
 # NAAD_ERR_* on invalid sample_rate/frequency (frequency is not validated for the
-# noise waveforms, matching the oracle).
+# noise waveforms, matching the oracle), or NAAD_ERR_ALLOCATION when a noise
+# waveform's generator cannot be allocated.
 # ================================================================
 #must_use
 fn osc_new(waveform, frequency, sample_rate) {
@@ -145,10 +146,14 @@ fn osc_new(waveform, frequency, sample_rate) {
 
     # Noise waveforms own a NoiseGenerator (White/Pink/Brown), matching the
     # oracle's Option<NoiseGenerator>; non-noise waveforms leave it null (0).
+    # noise_new reports a refused allocation (ADR-0010), and that code is passed
+    # on rather than kept as the generator: a negative handle would be read far
+    # from the null page.
     var noise_gen = 0;
     if (waveform == WAVEFORM_WHITE_NOISE) { noise_gen = noise_new(NOISE_WHITE, OSC_NOISE_SEED); }
     if (waveform == WAVEFORM_PINK_NOISE) { noise_gen = noise_new(NOISE_PINK, OSC_NOISE_SEED); }
     if (waveform == WAVEFORM_BROWN_NOISE) { noise_gen = noise_new(NOISE_BROWN, OSC_NOISE_SEED); }
+    if (naad_is_err(noise_gen) == 1) { return noise_gen; }
 
     var self = alloc(sizeof(Oscillator));
     Oscillator_set_waveform(self, waveform);

@@ -8,6 +8,22 @@
 `VERSION` at the repo root is the source of truth for the current number. The
 entries below are the release record.
 
+**2.3.4** — hisab 3.4.1 -> **3.5.0**, goonj 2.3.1 -> **2.3.2**, cyrius stays **6.7.18** (its
+newest tag), and sakshi 2.5.10 is a stdlib leaf now. Output on valid input is
+byte-identical to 2.3.3 over 90,521 values, and 975 hostile cases match too. Consumers filed
+two issues against 2.3.3, and both are closed. `power_spectrum` is now
+`naad_power_spectrum`, because abaco 2.8.0 has one and dhvani links both. And
+`noise_new`, `filter_biquad_with_gain`, `filter_svf_new`, `modulation_lfo_new` and
+`naad_vec_zeros` report a refused allocation, `NAAD_ERR_ALLOCATION` (-6) or 0, where they
+used to fault. That narrows ADR-0006 to everything else, and
+[ADR-0010](../adr/0010-five-constructors-report-a-refused-allocation.md) draws the line.
+`naad_vec_zeros` also stops wrapping `n * 8`, a heap overrun on a public function. The
+collision gate now reads `public` declarations and enum members, which it had never matched,
+and CI checks the bundle against all 15 siblings dhvani links. The consumer floor stays
+cyrius 6.7.2, measured. Three constructors still build an object around a refused raw
+allocation and stop at first use, unchanged since 2.3.3; see *Known* below. Suite:
+**42 suites / 3500 assertions**.
+
 **2.3.3** — the hot modules' buffer forms are real loops, the lever
 [ADR-0008](../adr/0008-the-dsp-core-stays-f64.md) measured. Output is byte-identical to
 2.3.2 over 94,731 values, and each form is bit-identical to its per-sample path, held there
@@ -289,7 +305,7 @@ coeffs) and per-sample heap allocations eliminated on 4 hot buffer paths
   `cyrius distlib`, and diff `lib/` against `~/.cyrius/versions/<pin>/lib`.
 - Build: `cyrius build src/main.cyr build/naad`
 - Test **everything**: bare `cyrius test` auto-discovers and runs every
-  `tests/**/*.tcyr` (measured: 40 suites). This is the only test step in
+  `tests/**/*.tcyr` (measured: 42 suites at 2.3.4). This is the only test step in
   `.github/workflows/ci.yml`.
 - Test **one** suite: `cyrius test tests/<mod>.tcyr`. Both forms are real.
 - **`cyrius fmt <file>.cyr` rewrites the file in place** and prints nothing.
@@ -319,12 +335,23 @@ consumed.
 - **goonj** — `[deps.goonj]` in `cyrius.cyml`, git+tag, `modules =
   ["dist/goonj.cyr"]`. Acoustics engine consumed by the `acoustics_*` wrapper
   modules. Live and wired — it is *not* commented out.
-- **sakshi** — not declared directly. It arrives transitively (goonj's logging
-  needs it) and is recorded in `cyrius.lock`. The vendored `lib/sakshi.cyr` is
-  byte-identical to the toolchain snapshot's copy.
+- **sakshi** — not declared directly. It is a stdlib leaf (2.5.10) that goonj's
+  `dist/goonj.deps` sidecar names, as it does `simd`. Through 2.3.3 it was a package hisab
+  declared, with a commit row in `cyrius.lock`; hisab 3.4.2 dropped that. The vendored
+  `lib/sakshi.cyr` is the same bytes either way, and byte-identical to the snapshot's.
+- **goonj 2.3.2 needs hisab >= 3.4.2** (its BVH query calls `hisab_alloc_scope`). naad's own
+  bundle does not: the 2.3.4 bundle builds and passes `tests/bundle.tcyr` against hisab
+  3.4.1 and goonj 2.3.1 as well.
 - **Consumer floor: cyrius 6.7.2.** sakshi declares its syscall numbers `const`, and goonj
   pulls sakshi in. Measured at 2.3.1 with a from-scratch consumer: 6.7.2, 6.7.3, 6.7.9 and
-  6.7.18 build and run, and 6.7.1 fails at compile time.
+  6.7.18 build and run, and 6.7.1 fails at compile time. Re-measured at 2.3.4 with hisab
+  3.5.0 and goonj 2.3.2: 6.7.2, 6.7.9 and 6.7.17 build, run and pass the bundle suite, and
+  6.7.1 fails at compile time, on naad's own stack arrays sized by `sizeof`
+  (`var s[sizeof(BFormatSample)]` in ambisonics, `var res[sizeof(BinauralStereo)]` in
+  binaural), which 6.7.1 accepts only from an enum constant.
+- **A refused allocation is fail-stop**, with five exceptions that report it:
+  `noise_new`, `filter_biquad_with_gain`, `filter_svf_new`, `modulation_lfo_new` and
+  `naad_vec_zeros`. ADR-0006 and ADR-0010.
 - **goonj ends the process on a refused allocation** at sizes that depend on input, with
   `goonj: allocation refused` (its ADR-0004, since 2.1.3).
 - stdlib leaves are declared in `[deps].stdlib`. There is no `dist/naad.deps`:
@@ -474,6 +501,13 @@ per-sample path it stands for, in raw bits. A change to a per-sample path has to
 form, and that suite is what says so
 ([ADR-0009](../adr/0009-block-forms-are-a-second-copy.md)).
 
+`tests/alloc_refused.tcyr` replaces the stdlib `alloc` with one that refuses chosen
+requests, and holds the five constructors ADR-0010 names to `NAAD_ERR_ALLOCATION`. It
+also holds their callers to passing the code on. The 12 constructors behind the other
+`naad_vec_zeros` call sites must never report success with a request refused, except
+for the 23 kept raw allocations listed under *Known*. Nothing else in the suite may
+define `alloc`: cycc keeps the last definition for the whole unit.
+
 ## Benchmarks
 
 `tests/hotpath.bcyr`, via `cyrius bench` (also run by `cyrius audit`). **These
@@ -519,6 +553,15 @@ goonj's port ("six parallel workflows landed 30 of 37 modules").
 Nothing open in the port itself — 41 / 41 modules are done. The follow-ups
 below are genuinely open; the scheduled view lives in
 [`roadmap.md`](roadmap.md) under *Open gates*.
+
+**Known, found at 2.3.4:**
+
+- **Three constructors stop at first use, not in the constructor, when a kept raw
+  allocation is refused.** `mod_matrix_new` (routings vec, 16 routing slots),
+  `physical_moog_new` (scratch) and `wavetable_morph_new` (two scratch buffers) store an
+  `alloc` or `vec_new` result without touching it. That is within ADR-0006 and unchanged
+  since 2.3.3. `tests/alloc_refused.tcyr` pins the 23 requests. Not fixed: it is
+  pre-existing, and outside ADR-0010's list.
 
 **Known limit, measured at 2.3.1:**
 
@@ -571,10 +614,11 @@ scoped — verified to fail when the 2.1.2 collision is reintroduced).
   over `src/*.cyr` against the text of `tests/`.
 - ~~`FILTER_*` and `VOICE_NONE` are unprefixed~~ — **closed in 2.2.0**, along
   with the six Tier-1 bare function names. Ecosystem-wide intersection is now
-  zero. ⚠ The CI gate still only covers naad's own dependency bundles and the
-  stdlib; sibling bundles must be passed to
-  `./scripts/symbol-collision-check.sh` as arguments, so a NEW sibling collision
-  would not be caught automatically.
+  zero. ~~The CI gate still only covers naad's own dependency bundles and the
+  stdlib~~ — **closed in 2.3.4**, after abaco 2.8.0's `power_spectrum` showed what it
+  missed. CI fetches the newest tag of the 15 siblings dhvani links
+  (`scripts/fetch-sibling-bundles.sh`), and the gate reads `public` declarations and enum
+  members, which it never had.
 - ~~ADR-0001's residual hole~~ — **closed in 2.2.0** by the thin-QR port; naad
   no longer references `ganita_mat_*` at all. The upstream bug is still real
   and unreported: `ganita_mat_least_squares` forms a square Q and has no failure

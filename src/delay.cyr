@@ -44,7 +44,7 @@ fn delay_line_new(max_delay_samples) {
     if (size < 1) { size = 1; }
     if (size > VEC_CAP_MAX) { return NAAD_ERR_BUFFER_OVERFLOW; }
     var dl = alloc(sizeof(DelayLine));
-    DelayLine_set_buffer(dl, naad_vec_zeros(size));
+    DelayLine_set_buffer(dl, _naad_vec_zeros_or_stop(size));
     DelayLine_set_write_pos(dl, 0);
     DelayLine_set_max_delay_samples(dl, size);
     return dl;

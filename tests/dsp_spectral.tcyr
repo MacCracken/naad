@@ -103,14 +103,14 @@ if (fm_dev < 0) { fm_dev = 0 - fm_dev; }
 assert(fm_dev <= 1, "fft peak within 1 bin of expected");
 
 # ================================================================
-test_group("power_spectrum DC dominance");
+test_group("naad_power_spectrum DC dominance");
 var ps_buf = vec_new();
 var ps_i = 0;
 while (ps_i < 256) {
     vec_push(ps_buf, T_0_5);
     ps_i = ps_i + 1;
 }
-var ps = power_spectrum(ps_buf);
+var ps = naad_power_spectrum(ps_buf);
 assert_eq(vec_len(ps), 129, "power spectrum length = N/2+1");
 assert(f64_gt(vec_get(ps, 0), vec_get(ps, 1)), "DC bin has the most power");
 
@@ -384,7 +384,7 @@ assert(f64_lt(detect_pitch_autocorr(pir_buf, f64_neg(F64_ONE), f64_from(30), f64
 test_group("audit: empty-input + singular guards");
 var empty = vec_new();
 assert_eq(vec_len(fft_magnitudes(empty)), 0, "fft_magnitudes(empty) -> empty (no OOB/1-0)");
-assert_eq(vec_len(power_spectrum(empty)), 0, "power_spectrum(empty) -> empty");
+assert_eq(vec_len(naad_power_spectrum(empty)), 0, "naad_power_spectrum(empty) -> empty");
 # Rank-deficient design (duplicate x) -> singular system -> None (empty vec),
 # NOT a vec of NaN/inf coefficients.
 var sxs = vec_new();
@@ -431,22 +431,24 @@ fn fake_len_vec(n) {
 var D1_NOT_POW2 = 134217729;    # 2^27 + 1
 var D1_REFUSED  = 268435456;    # 2^28
 assert_eq(vec_len(fft_magnitudes(fake_len_vec(D1_NOT_POW2))), 0, "fft_magnitudes: non-power-of-two length -> empty");
-assert_eq(vec_len(power_spectrum(fake_len_vec(D1_NOT_POW2))), 0, "power_spectrum: non-power-of-two length -> empty");
+assert_eq(vec_len(naad_power_spectrum(fake_len_vec(D1_NOT_POW2))), 0,
+  "naad_power_spectrum: non-power-of-two length -> empty");
 assert_eq(vec_len(fft_magnitudes(fake_len_vec(D1_REFUSED))), 0, "fft_magnitudes: refused allocation -> empty");
-assert_eq(vec_len(power_spectrum(fake_len_vec(D1_REFUSED))), 0, "power_spectrum: refused allocation -> empty");
+assert_eq(vec_len(naad_power_spectrum(fake_len_vec(D1_REFUSED))), 0,
+  "naad_power_spectrum: refused allocation -> empty");
 assert_eq(vec_len(fft_magnitudes(vec_new())), 0, "fft_magnitudes: empty input -> empty");
-assert_eq(vec_len(power_spectrum(vec_new())), 0, "power_spectrum: empty input -> empty");
+assert_eq(vec_len(naad_power_spectrum(vec_new())), 0, "naad_power_spectrum: empty input -> empty");
 # A length that fits alloc must still be refused before it costs a buffer.
 var D1_FITS = 1048577;          # 2^20 + 1
 var d1_used = alloc_used();
 var d1_sink = fft_magnitudes(fake_len_vec(D1_FITS));
-d1_sink = power_spectrum(fake_len_vec(D1_FITS));
+d1_sink = naad_power_spectrum(fake_len_vec(D1_FITS));
 assert(alloc_used() - d1_used < 1024, "a non-power-of-two length allocates no FFT buffer");
 # Control: the guards must not refuse the lengths num_fft accepts.
 var d1_one = vec_new();
 vec_push(d1_one, T_0_5);
 assert_eq(vec_len(fft_magnitudes(d1_one)), 1, "control: a 1-point input still returns 1 bin");
-assert_eq(vec_len(power_spectrum(d1_one)), 1, "control: a 1-point input still returns 1 bin");
+assert_eq(vec_len(naad_power_spectrum(d1_one)), 1, "control: a 1-point input still returns 1 bin");
 var d1_three = vec_new();
 vec_push(d1_three, T_0_5); vec_push(d1_three, T_0_5); vec_push(d1_three, T_0_5);
 assert_eq(vec_len(fft_magnitudes(d1_three)), 0, "a real 3-point input is refused, as num_fft refuses it");

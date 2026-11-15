@@ -370,7 +370,7 @@ fn physical_moog_new(cutoff_hz, resonance, sample_rate) {
     e = validate_frequency(cutoff_hz, sample_rate);
     if (naad_is_err(e) == 1) { return e; }
 
-    var state = naad_vec_zeros(4);
+    var state = _naad_vec_zeros_or_stop(4);
 
     var self = alloc(sizeof(MoogLadder));
     MoogLadder_set_cutoff_hz(self, cutoff_hz);

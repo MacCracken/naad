@@ -179,7 +179,7 @@ fn _naad_fdn_hadamard8_into(x, out) {
 # Allocating form of the eight-point Hadamard mix: a new vec of `x` mixed.
 #must_use
 fn naad_fdn_hadamard8(x) {
-    var out = naad_vec_zeros(MATRIX_FDN_N);
+    var out = _naad_vec_zeros_or_stop(MATRIX_FDN_N);
     _naad_fdn_hadamard8_into(x, out);
     return out;
 }
@@ -268,7 +268,7 @@ fn naad_fdn_matrix_new(target_rt60, sample_rate, mix) {
     var buffers = vec_new();
     i = 0;
     while (i < MATRIX_FDN_N) {
-        vec_push(buffers, naad_vec_zeros(vec_get(delay_lengths, i)));
+        vec_push(buffers, _naad_vec_zeros_or_stop(vec_get(delay_lengths, i)));
         i = i + 1;
     }
 
@@ -277,15 +277,15 @@ fn naad_fdn_matrix_new(target_rt60, sample_rate, mix) {
     # would be a leak.
     var self = alloc(sizeof(MatrixFdn));
     MatrixFdn_set_buffers(self, buffers);
-    MatrixFdn_set_positions(self, naad_vec_zeros(MATRIX_FDN_N));
+    MatrixFdn_set_positions(self, _naad_vec_zeros_or_stop(MATRIX_FDN_N));
     MatrixFdn_set_delay_lengths(self, delay_lengths);
-    MatrixFdn_set_damping_state(self, naad_vec_zeros(MATRIX_FDN_N));
+    MatrixFdn_set_damping_state(self, _naad_vec_zeros_or_stop(MATRIX_FDN_N));
     MatrixFdn_set_damping_gain(self, damping_gain);
     MatrixFdn_set_target_rt60(self, target_rt60);
     MatrixFdn_set_sample_rate(self, sample_rate);
     MatrixFdn_set_mix(self, f64_clamp(mix, 0, F64_ONE));
-    MatrixFdn_set_scratch_delay(self, naad_vec_zeros(MATRIX_FDN_N));
-    MatrixFdn_set_scratch_had(self, naad_vec_zeros(MATRIX_FDN_N));
+    MatrixFdn_set_scratch_delay(self, _naad_vec_zeros_or_stop(MATRIX_FDN_N));
+    MatrixFdn_set_scratch_had(self, _naad_vec_zeros_or_stop(MATRIX_FDN_N));
     return self;
 }
 

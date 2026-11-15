@@ -361,7 +361,7 @@ fn drum_hihat_new(open, sample_rate) {
     if (naad_is_err(bandpass) == 1) { return bandpass; }
 
     var self = alloc(sizeof(HiHat));
-    HiHat_set_phases(self, naad_vec_zeros(DRUM_HIHAT_OSCILLATORS));
+    HiHat_set_phases(self, _naad_vec_zeros_or_stop(DRUM_HIHAT_OSCILLATORS));
     HiHat_set_frequencies(self, frequencies);
     HiHat_set_amp(self, 0);
     HiHat_set_decay(self, decay);

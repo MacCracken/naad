@@ -71,7 +71,7 @@ fn wavetable_from_harmonics(num_harmonics, amplitudes, size) {
         return NAAD_ERR_INVALID_PARAMETER;
     }
 
-    var samples = naad_vec_zeros(size);
+    var samples = _naad_vec_zeros_or_stop(size);
 
     var harmonics_to_generate = num_harmonics;
     var alen = vec_len(amplitudes);
@@ -414,7 +414,7 @@ fn wavetable_morph_new(tables, frequency, sample_rate) {
     # as _bspline_eval_1d_into, so _morph_span agrees with it bit for bit.
     var interior = nt - 4;
     if (interior < 0) { interior = 0; }
-    var span_knots = naad_vec_zeros(interior);
+    var span_knots = _naad_vec_zeros_or_stop(interior);
     var ki = 0;
     while (ki < interior) {
         vec_set(span_knots, ki, f64_div(f64_from(ki + 1), f64_from(interior + 1)));
@@ -425,7 +425,7 @@ fn wavetable_morph_new(tables, frequency, sample_rate) {
     # Smooth-morph scratch, sized once for nt control points at cubic degree 3
     # (n_knots = nt + 3 + 1). Reused every sample by
     # wavetable_morph_next_sample_smooth via _bspline_eval_1d_into.
-    MorphWavetable_set_scratch_cps(self, naad_vec_zeros(nt));
+    MorphWavetable_set_scratch_cps(self, _naad_vec_zeros_or_stop(nt));
     MorphWavetable_set_scratch_knots(self, alloc((nt + 4) * 8));
     MorphWavetable_set_scratch_cps_arr(self, alloc(nt * 8));
     return self;

@@ -66,9 +66,16 @@ jobs:
         # ERR_INVALID_FREQUENCY (-1) shadowed goonj's (-3) for three releases.
         # 2.1.3 renamed the error block to NAAD_ERR_*; this keeps it that way.
         # Regenerates the bundle first so the check runs against current src/.
+        # Since 2.3.4 it also checks the newest tag of every sibling naad is
+        # linked with in dhvani: abaco 2.8.0's power_spectrum broke dhvani's
+        # build, and naad's own dependencies could not show it. The fetch is an
+        # assignment of its own so that a failed fetch fails the step: under
+        # `bash -e` a failing $(...) in argument position does not, and the gate
+        # would pass having checked no siblings at all.
         run: |
           cyrius distlib
-          ./scripts/symbol-collision-check.sh
+          SIBLINGS="$(./scripts/fetch-sibling-bundles.sh build/siblings)"
+          ./scripts/symbol-collision-check.sh $SIBLINGS
 
       - name: Bundle is up to date
         # dist/naad.cyr is a TRACKED artifact consumers link directly. If src/

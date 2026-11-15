@@ -11,9 +11,16 @@
 # the intersection to zero — this gate is what keeps it there.
 #
 # The audit that missed it was fn-scoped, so this one is deliberately NOT:
-# it covers `fn`, `var`, `const` and `struct` alike.
+# it covers `fn`, `var`, `const`, `struct` and `enum` alike, with or without a
+# `public` / `pub` prefix, and every enum MEMBER, since members are top-level
+# names too. Through 2.3.3 the pattern was `^(fn|var|const|struct)`, which never
+# matched hisab's 729 `public` declarations or any enum: the hisab leg checked
+# under two thirds of hisab's names. Measured 2026-11-15: 1673 of 2783.
 #
 # Usage:  ./scripts/symbol-collision-check.sh [extra-bundle.cyr ...]
+# CI passes the newest tag of every sibling naad shares a unit with, fetched by
+# scripts/fetch-sibling-bundles.sh: abaco 2.8.0's power_spectrum is what a gate
+# limited to naad's own dependencies could not see.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -26,10 +33,41 @@ STDLIB_DIR="${CYRIUS_HOME:-$HOME/.cyrius}/versions/${PIN}/lib"
 
 # Top-level declarations only: anchored at column 0, so an indented local
 # declaration inside a function body can never be mistaken for exported surface.
-symbols() {
-    grep -hoE '^(fn|var|const|struct)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' "$@" 2>/dev/null \
-        | awk '{print $2}' | sort -u
+# An enum's members follow its `{`, on that line or the next ones, separated by
+# `,` or `;`, so they are read up to the closing `}`. Comments are stripped
+# first. Prints one name per line, duplicates kept (the self-check counts them).
+symbol_list() {
+    awk '
+        function members(body,   n, segs, i, t) {
+            n = split(body, segs, /[,;}]/)
+            for (i = 1; i <= n; i++) {
+                t = segs[i]
+                sub(/^[[:space:]{]+/, "", t)
+                if (match(t, /^[A-Za-z_][A-Za-z0-9_]*/)) print substr(t, RSTART, RLENGTH)
+            }
+        }
+        FNR == 1 { inenum = 0; body = "" }
+        {
+            line = $0
+            sub(/#.*/, "", line)
+            if (inenum) {
+                body = body " " line
+                if (line ~ /}/) { sub(/^[^{]*[{]/, "", body); members(body); inenum = 0; body = "" }
+                next
+            }
+            if (match(line, /^((public|pub)[ \t]+)?(fn|var|const|struct|enum)[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) {
+                n = split(substr(line, RSTART, RLENGTH), w, /[ \t]+/)
+                print w[n]
+                if (w[n - 1] == "enum") {
+                    body = substr(line, RSTART + RLENGTH)
+                    if (body ~ /[{]/ && body ~ /}/) { sub(/^[^{]*[{]/, "", body); members(body); body = "" }
+                    else inenum = 1
+                }
+            }
+        }
+    ' "$@" 2>/dev/null
 }
+symbols() { symbol_list "$@" | sort -u; }
 
 NAAD_SYMS=$(mktemp); trap 'rm -f "$NAAD_SYMS" "$DEP_SYMS"' EXIT
 DEP_SYMS=$(mktemp)
@@ -72,12 +110,20 @@ else
 fi
 
 # Any bundle named on the command line — used to check a sibling library naad is
-# co-linked with downstream (abaco was the 2.1.1 case).
-for extra in "$@"; do check "vs $extra" "$extra"; done
+# co-linked with downstream (abaco was the 2.1.1 case, and again at 2.3.4). One that
+# is named but missing fails the gate: passing after checking fewer bundles than
+# were asked for is the failure this script exists to prevent.
+for extra in "$@"; do
+    if [ ! -f "$extra" ]; then
+        echo "  FAIL  vs $extra (named, but not present)"
+        STATUS=1
+        continue
+    fi
+    check "vs $extra" "$extra"
+done
 
 # Self-consistency: the bundle must not define the same top-level name twice.
-DUPES=$(grep -hoE '^(fn|var|const|struct)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' "$BUNDLE" \
-        | awk '{print $2}' | sort | uniq -d)
+DUPES=$(symbol_list "$BUNDLE" | sort | uniq -d)
 if [ -n "$DUPES" ]; then
     echo "  FAIL  bundle defines a symbol more than once:"
     printf '          %s\n' $DUPES

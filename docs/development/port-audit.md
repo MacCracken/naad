@@ -92,7 +92,7 @@ still is, for any change to a ported module — "matches what Rust did".
 |-----------|-----:|--------|------:|-------|
 | error     |  192 | ✅ | 23 | Integer codes + `flush_denormal`, `naad_is_finite`, `NAAD_EPSILON/POS_INF/NEG_INF/F32_MIN_POS`, `validate_frequency/sample_rate`. The universal base — every entry includes it first. Folds in the `lib.rs` crate-root helpers. |
 | dsp_util  | 1218 | ✅ | 36 | Scalar core: dB↔amp, normalize/rms/peak, clip/lerp/hermite/crossfade, hann/blackman windows, `eval_polynomial`, dB LUT, xorshift32 PRNG, enums. (The `synthesis`-gated spectral block split into `dsp_spectral.cyr` — needs hisab, most dsp_util consumers don't.) |
-| dsp_spectral | — | ✅ | 40 | The former dsp_util hisab-interop block: `fft_magnitudes`, `power_spectrum`, `stft_magnitudes`, `chromagram`, `detect_onsets`, `detect_pitch_autocorr` (inline Newton), `bspline_eval_1d` (hisab `calc_bspline`), `fit_polynomial` (Vandermonde + `ganita_mat_least_squares`). |
+| dsp_spectral | — | ✅ | 40 | The former dsp_util hisab-interop block: `fft_magnitudes`, `power_spectrum` (`naad_power_spectrum` since 2.3.4), `stft_magnitudes`, `chromagram`, `detect_onsets`, `detect_pitch_autocorr` (inline Newton), `bspline_eval_1d` (hisab `calc_bspline`), `fit_polynomial` (Vandermonde + `ganita_mat_least_squares`). |
 | panning   |  131 | ✅ | 12 | `PanLaw`→consts; tuple returns → `PanPair`/`PanGains` structs. |
 | mod_matrix|  312 | ✅ |  5 | `ModSource`/`ModDest`→index consts (value==slot); vec of `ModRouting`. |
 | tuning    |  309 | ✅ | 13 | `TuningSystem`→consts, `TuningTable` struct; div_euclid/rem_euclid over 12; cstring note names via fmt. |

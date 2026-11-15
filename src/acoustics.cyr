@@ -32,8 +32,8 @@ fn naad_acoustics_material_by_name(name) {
 # ================================================================
 #must_use
 fn _naad_ring_new(ir_len) {
-    if (ir_len < 1) { return naad_vec_zeros(1); }
-    return naad_vec_zeros(ir_len);
+    if (ir_len < 1) { return _naad_vec_zeros_or_stop(1); }
+    return _naad_vec_zeros_or_stop(ir_len);
 }
 
 # ================================================================

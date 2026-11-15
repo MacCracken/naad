@@ -10,7 +10,8 @@
 # failure. Diagnostic strings come from naad_err_name().
 
 # ================================================================
-# Error codes (was `enum NaadError`). One per Rust variant.
+# Error codes (was `enum NaadError`). One per Rust variant, plus
+# NAAD_ERR_ALLOCATION, which Rust has no variant for: its allocator aborts.
 # ================================================================
 var NAAD_ERR_NONE                = 0;
 var NAAD_ERR_INVALID_FREQUENCY   = (0 - 1);   # frequency out of (0, Nyquist)
@@ -18,6 +19,11 @@ var NAAD_ERR_INVALID_SAMPLE_RATE = (0 - 2);   # sample rate <= 0 or non-finite
 var NAAD_ERR_INVALID_PARAMETER   = (0 - 3);   # a named parameter out of range
 var NAAD_ERR_BUFFER_OVERFLOW     = (0 - 4);   # buffer op exceeded capacity
 var NAAD_ERR_COMPUTATION         = (0 - 5);   # computation produced invalid result
+# An allocation was refused. Returned only by the constructors ADR-0010 names
+# (noise_new, filter_biquad_new / _with_gain, filter_svf_new, modulation_lfo_new)
+# and by what builds on them. Everywhere else a refusal stops at the null page,
+# as ADR-0006 measured.
+var NAAD_ERR_ALLOCATION          = (0 - 6);
 
 # ================================================================
 # Shared f64 tolerances / sentinels (IEEE-754 bit patterns).
@@ -46,6 +52,7 @@ fn naad_err_name(code) {
     if (code == NAAD_ERR_INVALID_PARAMETER) { return "invalid parameter"; }
     if (code == NAAD_ERR_BUFFER_OVERFLOW) { return "buffer overflow"; }
     if (code == NAAD_ERR_COMPUTATION) { return "computation error"; }
+    if (code == NAAD_ERR_ALLOCATION) { return "allocation refused"; }
     return "unknown error";
 }
 
@@ -107,14 +114,24 @@ var NAAD_CHUNK = 256;
 # naad_vec_zeros -- a vec of `n` zeros, sized once. Growing a vec by vec_push
 # doubles through every smaller size on a bump allocator that frees nothing, so
 # it leaves about twice the storage behind it. Relies on the header lib/vec.cyr
-# documents (data, len, cap), which tests/error.tcyr pins. A size alloc refuses
-# stops at the null page on the first store, as a refused vec_new does.
+# documents (data, len, cap), which tests/error.tcyr pins.
+#
+# Returns 0, as vec_new does, when an allocation is refused or `n` is outside
+# [0, VEC_CAP_MAX]. The bound is what keeps `n * 8` from wrapping: through 2.3.3,
+# n = 2^61 + 1 allocated 8 bytes and then zeroed 2^61 slots past them, through
+# whatever the heap held next. noise_new checks for the 0 (ADR-0010); naad's
+# other callers go through _naad_vec_zeros_or_stop, which stops on it.
 # ================================================================
 #must_use
 fn naad_vec_zeros(n) {
+    if (n < 0) { return 0; }
+    if (n > VEC_CAP_MAX) { return 0; }
     var v = vec_new();
+    if (v == 0) { return 0; }
     if (n > vec_cap(v)) {
-        store64(v, alloc(n * 8));
+        var data = alloc(n * 8);
+        if (data == 0) { return 0; }
+        store64(v, data);
         store64(v + 16, n);
     }
     var data = load64(v);
@@ -128,6 +145,21 @@ fn naad_vec_zeros(n) {
 }
 
 # ================================================================
+# _naad_vec_zeros_or_stop -- naad_vec_zeros for every caller ADR-0010 leaves
+# fail-stop, which is every caller but noise_new. Where naad_vec_zeros answers 0
+# this stores through it, so the process stops here, at the null page, inside the
+# constructor, as it did through 2.3.3. Passing the 0 on instead would build an
+# object that looks whole and stops at its first sample: measured on
+# naad_fdn_matrix_new at a 2^31 Hz rate under a 4 GiB limit.
+# ================================================================
+#must_use
+fn _naad_vec_zeros_or_stop(n) {
+    var v = naad_vec_zeros(n);
+    if (v == 0) { store64(v, 0); }
+    return v;
+}
+
+# ================================================================
 # naad_vec_copy -- a fresh vec holding `v`'s elements. For anything that keeps a
 # vec past the call: Rust takes these by value, so the caller can no longer reach
 # them, and here the copy is what keeps that true. ADR-0005.
@@ -135,7 +167,7 @@ fn naad_vec_zeros(n) {
 #must_use
 fn naad_vec_copy(v) {
     var n = vec_len(v);
-    var out = naad_vec_zeros(n);
+    var out = _naad_vec_zeros_or_stop(n);
     var src = load64(v);
     var dst = load64(out);
     var i = 0;

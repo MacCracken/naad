@@ -49,6 +49,8 @@ test_group("error codes");
 assert_eq(naad_is_err(NAAD_ERR_NONE), 0, "NAAD_ERR_NONE is not an error");
 assert_eq(naad_is_err(NAAD_ERR_INVALID_FREQUENCY), 1, "negative code is an error");
 assert_streq(naad_err_name(NAAD_ERR_COMPUTATION), "computation error", "err name maps");
+assert_eq(NAAD_ERR_ALLOCATION, 0 - 6, "NAAD_ERR_ALLOCATION is -6, after the five Rust variants");
+assert_streq(naad_err_name(NAAD_ERR_ALLOCATION), "allocation refused", "allocation code name maps");
 
 # ================================================================
 test_group("naad_vec_zeros and naad_vec_copy");
@@ -72,6 +74,12 @@ vec_push(vz, 5);
 assert_eq(vec_len(vz), 18, "a sized vec still grows");
 assert_eq(vec_get(vz, 17), 5, "and keeps the pushed value");
 assert_eq(vec_get(vz, 16), 0, "and what it held");
+# Sizes no vec can hold are refused with 0, as vec_new refuses. Through 2.3.3 a
+# size whose n * 8 wrapped was allocated short and zeroed far past its end.
+# tests/alloc_refused.tcyr covers the refused allocations themselves.
+assert_eq(naad_vec_zeros(0 - 1), 0, "a negative size is refused");
+assert_eq(naad_vec_zeros(VEC_CAP_MAX + 1), 0, "one past VEC_CAP_MAX is refused");
+assert_eq(naad_vec_zeros(0x2000000000000001), 0, "a size whose n * 8 wraps to 8 is refused");
 
 var vc_src = vec_new();
 vec_push(vc_src, 7);

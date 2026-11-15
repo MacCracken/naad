@@ -82,7 +82,7 @@ fn additive_new(fundamental, num_partials, sample_rate) {
     var self = alloc(sizeof(AdditiveSynth));
     AdditiveSynth_set_fundamental(self, fundamental);
     AdditiveSynth_set_partials(self, partials);
-    AdditiveSynth_set_phases(self, naad_vec_zeros(count));
+    AdditiveSynth_set_phases(self, _naad_vec_zeros_or_stop(count));
     AdditiveSynth_set_sample_rate(self, sample_rate);
     return self;
 }

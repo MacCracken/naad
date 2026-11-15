@@ -41,16 +41,21 @@ struct NoiseGenerator { noise_type; rng; pink_octaves; pink_counter; pink_runnin
 # ================================================================
 # noise_new -- create a generator. Mirrors NoiseGenerator::new: seeds the
 # PRNG (0 -> 1 to avoid the dead zero state) and, for pink noise only,
-# primes the 16 octave values plus their running sum.
+# primes the 16 octave values plus their running sum. Returns the generator,
+# or NAAD_ERR_ALLOCATION when any of its three allocations is refused, which
+# Rust cannot report (ADR-0010). What was allocated before the refusal is
+# kept: the bump allocator frees nothing.
 # ================================================================
 #must_use
 fn noise_new(noise_type, seed) {
     var rng = alloc(8);
+    if (rng == 0) { return NAAD_ERR_ALLOCATION; }
     var state = seed;
     if (state == 0) { state = 1; }
     store64(rng, state);
 
     var pink_octaves = naad_vec_zeros(NOISE_PINK_OCTAVES);
+    if (pink_octaves == 0) { return NAAD_ERR_ALLOCATION; }
 
     var pink_running_sum = 0;
     if (noise_type == NOISE_PINK) {
@@ -64,6 +69,7 @@ fn noise_new(noise_type, seed) {
     }
 
     var g = alloc(sizeof(NoiseGenerator));
+    if (g == 0) { return NAAD_ERR_ALLOCATION; }
     NoiseGenerator_set_noise_type(g, noise_type);
     NoiseGenerator_set_rng(g, rng);
     NoiseGenerator_set_pink_octaves(g, pink_octaves);

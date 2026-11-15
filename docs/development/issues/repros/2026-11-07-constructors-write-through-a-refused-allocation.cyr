@@ -1,0 +1,63 @@
+# naad 2.3.3: constructors write through a refused allocation.
+#
+# Replaces the stdlib `alloc` (the compiler keeps the last definition) with a
+# bump allocator that refuses the Nth allocation made after fi_arm(N). Every
+# other request is served from a private zeroed mmap, as the stdlib does.
+#
+# usage: repro CASE N
+#   1 noise_new(NOISE_WHITE, 1)
+#   2 filter_biquad_with_gain(LOWPASS, 44100, 1000, 0.707, 0)
+#   3 filter_svf_new(1000, 0.707, 44100)
+#   4 modulation_lfo_new(SINE, 1, 44100)
+#   5 naad_vec_zeros(100)
+#   6 naad_vec_zeros(2^61 + 1)   (n * 8 wraps to 8; run with N = 0)
+# Exits 0 and prints the return value if the call returns; a segfault is 139.
+
+var FI_ARMED = 0;
+var FI_COUNT = 0;
+var FI_N = 0;
+var FI_BASE = 0;
+var FI_PTR = 0;
+var FI_END = 0;
+
+fn alloc(size): i64 {
+    if (size <= 0) { return 0; }
+    if (FI_ARMED == 1) {
+        FI_COUNT = FI_COUNT + 1;
+        if (FI_COUNT == FI_N) { return 0; }
+    }
+    if (FI_BASE == 0) {
+        FI_BASE = syscall(9, 0, 0x4000000, 3, 0x22, 0 - 1, 0);   # 64 MiB, RW, private anon
+        FI_PTR = FI_BASE;
+        FI_END = FI_BASE + 0x4000000;
+    }
+    size = (size + 7) & (0 - 8);
+    if (FI_PTR + size > FI_END) { return 0; }
+    var p = FI_PTR;
+    FI_PTR = p + size;
+    return p;
+}
+
+fn fi_arm(n) { FI_COUNT = 0; FI_N = n; FI_ARMED = 1; return 0; }
+fn fi_disarm() { FI_ARMED = 0; return FI_COUNT; }
+
+fn main() {
+    args_init();
+    var which = atoi(argv(1));
+    var n = atoi(argv(2));
+    var sr = f64_from(44100);
+    var hz = f64_from(1000);
+    var q = f64_div(f64_from(707), f64_from(1000));
+    var r = 0;
+    fi_arm(n);
+    if (which == 1) { r = noise_new(NOISE_WHITE, 1); }
+    if (which == 2) { r = filter_biquad_with_gain(NAAD_FILTER_LOWPASS, sr, hz, q, 0); }
+    if (which == 3) { r = filter_svf_new(hz, q, sr); }
+    if (which == 4) { r = modulation_lfo_new(MODULATION_LFO_SINE, F64_ONE, sr); }
+    if (which == 5) { r = naad_vec_zeros(100); }
+    if (which == 6) { r = naad_vec_zeros(0x2000000000000001); }
+    var made = fi_disarm();
+    fmt_int(r);
+    syscall(1, 1, " returned\n", 10);
+    return 0;
+}

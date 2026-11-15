@@ -20,7 +20,7 @@ These stay as they are.
 | `voice` age comparison | signed, where Rust's is u64 | needs 2^63 ticks: about 6.6 million years at 44.1 kHz |
 | `#derive(accessors)` setters | public, and bypass what a real setter derives: `Limiter_set_ceiling_db` leaves the linear ceiling, and editing an IR through `ConvolutionReverb_ir` leaves the cached spectrum | Rust's fields are private. Use the module's own setter, or `naad_convolution_rebuild_from_ir` |
 | `granular_window_value` | an unknown window id returns 1.0 | it returns a sample, so it has no error channel. `granular_set_window` refuses the id |
-| `fft_magnitudes`, `power_spectrum` | past 2^27 points return empty, where Rust computes | past `ALLOC_MAX`, which is a stdlib limit |
+| `fft_magnitudes`, `naad_power_spectrum` | past 2^27 points return empty, where Rust computes | past `ALLOC_MAX`, which is a stdlib limit |
 | `naad_convolution_process_block` | samples near f64::MAX overflow inside the FFT and give NaN, where the sample path stays finite | the non-finite guard sees finite input. Real audio is nowhere near this |
 | f32 range | an input that overflows or underflows f32 but not f64 gives a different answer | naad is f64 today. See the roadmap's f32 item |
 

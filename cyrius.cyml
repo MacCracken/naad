@@ -18,14 +18,18 @@ output = "build/naad"
 # The bundle resolves stdlib + hisab (HVec3/HComplex/num_fft/calc_bspline/
 # ganita) + goonj (acoustics engine, which itself pulls sakshi) from the
 # CONSUMER's manifest. Cross-library symbol collisions audited to zero, and
-# since 2.1.3 that audit covers top-level `var`s as well as `fn`s: the bundle's
-# whole top-level symbol set is disjoint from hisab, goonj, sakshi, abaco and
-# the stdlib, in all five directions. naad's six error constants carry the
-# `NAAD_ERR_` prefix precisely so the `var` class stays empty -- the bare names
-# used to shadow goonj's, and duplicate top-level `var`s draw NO diagnostic
-# from cycc or cyrlint. Re-measure rather than trusting any number here:
-#   grep -c '^fn ' dist/naad.cyr
-#   and intersect `^(fn|var) NAME` across dist/naad.cyr and each dep bundle.
+# since 2.1.3 that audit covers top-level `var`s as well as `fn`s. naad's six
+# error constants carry the `NAAD_ERR_` prefix precisely so the `var` class
+# stays empty -- the bare names used to shadow goonj's, and duplicate top-level
+# `var`s draw NO diagnostic from cycc or cyrlint. abaco 2.8.0 then added a
+# `power_spectrum` of its own, which naad renamed to `naad_power_spectrum` in
+# 2.3.4. Since then CI checks the bundle against hisab, goonj, sakshi, the
+# stdlib and the newest tag of all 15 siblings dhvani links with naad,
+# `public` declarations and enum members included. Re-measure rather than
+# trusting this, in bash (zsh does not split $SIBLINGS), in two steps so that a
+# failed fetch stops it:
+#   SIBLINGS="$(./scripts/fetch-sibling-bundles.sh build/siblings)"
+#   ./scripts/symbol-collision-check.sh $SIBLINGS
 # `tests/bundle.tcyr` pins the de-collision.
 [lib]
 modules = [
@@ -100,8 +104,9 @@ stdlib = [
 # physical, wavetable) and HComplex + num_fft/num_ifft/num_dct/num_idct/
 # num_rk4/calc_bspline/calc_catmull_rom (dsp_spectral, additive, wavetable)
 # from the single distlib bundle, same pattern goonj uses. Pinned to the
-# released tag for reproducible builds. 3.4.1 pins exactly cyrius 6.7.18 and
-# declares sakshi 2.5.10, the copy 6.7.18 folds.
+# released tag for reproducible builds. 3.5.0 pins exactly cyrius 6.7.18.
+# From 3.4.2 hisab no longer declares a `[deps.sakshi]` package: sakshi is a
+# stdlib leaf, and goonj's `dist/goonj.deps` sidecar names it (see below).
 #   NOTE the least-squares path (`ganita_mat_*`, used by `fit_polynomial`)
 #   is NOT hisab's — it comes from the stdlib `ganita` leaf declared in
 #   [deps].stdlib above. `lib/hisab.cyr` defines no `ganita_mat_*`. Earlier
@@ -109,16 +114,18 @@ stdlib = [
 #   to hisab; that is where the 2.1.2 null-deref actually originated.
 [deps.hisab]
 git = "https://github.com/MacCracken/hisab.git"
-tag = "3.4.1"
+tag = "3.5.0"
 modules = ["dist/hisab.cyr"]
 
 # goonj — acoustics engine. Consumed by the `acoustics/*` wrapper modules
 # (room, impulse, binaural, material, analysis, coupled, portal, fdn,
-# directivity, ambisonics). Its bundle references sakshi (goonj's logging)
-# + hisab; both resolve from naad's own deps (sakshi arrives transitively
-# via hisab). Pinned to the released tag. 2.3.1 pins cyrius 6.7.18 and hisab
-# 3.4.1, so the two agree.
+# directivity, ambisonics). Its bundle references sakshi (goonj's logging),
+# simd + hisab. hisab resolves from naad's own `[deps.hisab]`; sakshi and simd
+# are stdlib leaves that goonj's `dist/goonj.deps` sidecar names, so `cyrius
+# deps` vendors them without naad declaring either. Pinned to the released
+# tag. 2.3.2 pins cyrius 6.7.18 and hisab 3.5.0, so the two agree, and its BVH
+# query needs hisab >= 3.4.2 (`hisab_alloc_scope`).
 [deps.goonj]
 git = "https://github.com/MacCracken/goonj.git"
-tag = "2.3.1"
+tag = "2.3.2"
 modules = ["dist/goonj.cyr"]

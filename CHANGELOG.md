@@ -5,6 +5,160 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.4] - Newest hisab and goonj, the abaco collision, and refused allocations garjan can handle
+
+Dependency release, plus the two issues consumers filed against 2.3.3. `hisab` 3.4.1 ->
+**3.5.0**, `goonj` 2.3.1 -> **2.3.2**. cyrius stays **6.7.18**, still its newest tag, with
+ganita 1.2.15 and sakshi 2.5.10, now a stdlib leaf rather than a package. **No result on
+valid input moves**: 90,521 values are byte-identical to 2.3.3, and 975 hostile cases give
+the same exit code and output. **One public name changes**: `power_spectrum` is now
+`naad_power_spectrum`. Suite: **42 suites / 3,500 assertions**.
+
+### Breaking
+
+- **`power_spectrum` is now `naad_power_spectrum`**
+  ([issue](docs/development/issues/2026-11-08-power-spectrum-clashes-with-abaco-2-8-0.md)).
+  abaco 2.8.0 defines `power_spectrum(re, im, out, n)`, and cycc refuses a duplicate fn
+  whose arity disagrees, so dhvani, which links both, could not move to abaco 2.8.0. abaco
+  keeps the name, by the maintainer's decision of 2026-11-08. This is the same prefix
+  `naad_chromagram` already carries. Behaviour is unchanged.
+
+  | 2.3.3 | 2.3.4 |
+  |---|---|
+  | `power_spectrum(input)` | `naad_power_spectrum(input)` |
+
+  No bundle in dhvani's closure calls it, and neither does dhvani.
+
+### Fixed
+
+- **`naad_vec_zeros(n)` wrote far past its allocation when `n * 8` wrapped.** At
+  `n = 2^61 + 1` it allocated 8 bytes and zeroed 2^61 slots after them, overwriting live
+  heap before anything faulted. It now returns 0, as `vec_new` does, for `n` outside
+  `[0, VEC_CAP_MAX]`. No naad caller passes such a size, since each bounds it first, but the
+  function is public. Found while reproducing the next item.
+- **Five constructors wrote through a refused allocation**
+  ([issue](docs/development/issues/2026-11-07-constructors-write-through-a-refused-allocation.md),
+  [ADR-0010](docs/adr/0010-five-constructors-report-a-refused-allocation.md)). `noise_new`,
+  `filter_biquad_with_gain` (and `filter_biquad_new`), `filter_svf_new` and
+  `modulation_lfo_new` now return the new **`NAAD_ERR_ALLOCATION` (-6)**, and
+  `naad_vec_zeros` returns 0. garjan's fault-injection sweep found this. garjan already
+  treats `<= 0` as failure, but died inside naad before its check ran. It also happened
+  without a hook: `noise_new` faulted on a heap exhausted under `ulimit -v`.
+  - `osc_new` kept `noise_new`'s result as its generator, so a refusal would have become a
+    handle of -6. It now returns the code. The other eleven internal call sites already
+    passed any negative result on.
+  - **Nothing else changes.** naad's 28 other callers of `naad_vec_zeros` still stop inside
+    the constructor, through `_naad_vec_zeros_or_stop`. Passing the 0 on would have moved
+    the stop to the first sample of an object that looked whole: measured on
+    `naad_fdn_matrix_new` at 2^31 Hz under a 4 GiB limit. Every other allocation is still
+    fail-stop, as [ADR-0006](docs/adr/0006-refused-allocation-stops-at-the-null-page.md)
+    decided, now narrowed by ADR-0010.
+- **The symbol-collision gate missed most of hisab.** Its pattern was
+  `^(fn|var|const|struct)`, which never matched a `public` declaration or an enum. It saw
+  1,673 of hisab's 2,783 top-level names. It now reads `public`/`pub` declarations, enums
+  and every enum member. Planted collisions of each form fail it, and a clean control
+  passes. Re-measured with the fix: naad still shares no name with hisab, goonj, sakshi or
+  the stdlib.
+
+### Added
+
+- `NAAD_ERR_ALLOCATION` (-6), and its name `"allocation refused"` in `naad_err_name`.
+- **CI checks the bundle against every sibling naad is linked with.**
+  `scripts/fetch-sibling-bundles.sh` fetches the newest x.y.z tag of the 15 siblings dhvani
+  links: abaco, sankoch, shravan, svara, nidhi, ghurni, garjan, prani, varna, shabdakosh,
+  shabda, patra, yukti, vani and dhvani. Before this, a collision with a library naad does
+  not depend on, like abaco's, could not show in naad's CI. A fetch that fails fails the
+  step: the fetch is a separate assignment, because under `bash -e` a failing `$(...)` in
+  argument position does not stop it. Against those tags the only collision was
+  `power_spectrum`, and with the rename there are none.
+- `tests/alloc_refused.tcyr` (126 assertions). It replaces the stdlib `alloc` and refuses
+  each allocation of the five, singly and from then on, then one past the last as a
+  control. It refuses one inside each of 13 callers. It also refuses each request of the
+  12 constructors behind the converted call sites, one at a time and each in a child
+  process, and none may report success. Allocation counts are measured, and each loop
+  has a floor so it cannot pass by refusing nothing.
+- [ADR-0010](docs/adr/0010-five-constructors-report-a-refused-allocation.md): which
+  constructors report a refused allocation, and why the list stops there.
+
+### Dependencies
+
+- **hisab 3.4.1 -> 3.5.0.** 3.5.0 retires 16 public names. naad calls none of them, and none
+  of the 23 constants that became enum members. naad calls seven hisab functions:
+  `calc_bspline`, `f64_fmod`, `hvec3_new`, `num_dct`, `num_fft`, `num_idct` and `num_ifft`.
+  In their call trees, 17 functions changed body. The changes are allocation routing
+  through `hisab_alloc`, stack scratch in `calc_bspline`, a 0-handle answer in the
+  `hvec3_*` functions, and the DCT's cap moved behind a parameter. None moves a value.
+- **goonj 2.3.1 -> 2.3.2.** Of what naad reaches, only the BVH ray query changed (its scratch
+  moved into the query's frame through hisab's allocation scope). goonj's grid solvers
+  moved to f32, but naad calls none of them. goonj needs hisab >= 3.4.2, so the two move
+  together.
+- **sakshi is a stdlib leaf.** hisab 3.4.2 dropped its `[deps.sakshi]` package, and goonj's
+  `dist/goonj.deps` sidecar now names the leaf, so `cyrius.lock` drops sakshi's commit row.
+  `lib/sakshi.cyr` is the same bytes as before.
+- **Size:** `dist/hisab.cyr` grows 3.66 -> 4.24 MB, `dist/goonj.cyr` 381 -> 397 KB, and the
+  smoke binary 2.74 -> 3.07 MB.
+- **Consumers are not forced to move.** The 2.3.4 bundle builds and passes
+  `tests/bundle.tcyr` against hisab 3.4.1 and goonj 2.3.1 as well.
+
+### Verified
+
+- **Output is byte-identical to 2.3.3.** Two dump harnesses were built against both trees,
+  with inputs made of integer arithmetic and power-of-two scaling only. One drives every
+  naad path that reaches hisab or goonj: FFT, power spectrum, STFT, chroma, onsets, pitch,
+  B-splines, the additive DCT, granular, seven room materials through reverb, convolution
+  and absorption advice, coupled rooms, IR analysis, binaural, both FDNs, directivity and
+  ambisonics. That is 61,218 values. The other drives the modules whose source changed:
+  every noise type, every biquad type, the SVF's four outputs, every LFO shape, every
+  oscillator waveform, subtractive with a noise osc2, the drums, the vocoder, every vowel,
+  EQ and de-esser. That is 29,303 values.
+- **Hostile input.** 975 cases drive the wrapper parameters, a bad IR sample, B-spline
+  degree and t, the DCT's coefficient count and spectral samples through NaN, ±Inf, ±0,
+  subnormal, `f64::MAX` and integer rates up to `INT64_MAX`. Each runs in its own
+  4 GiB-limited process. Exit codes and output hashes match 2.3.3 in all 975. The one abort,
+  an FDN at 2^31 Hz, is the documented memory limit, and it is still in the constructor.
+- **Every new check is shown to discriminate.** All 14 were reverted one at a time, and
+  each revert fails `tests/alloc_refused.tcyr`. Of the 21 converted call sites the suite
+  reaches, reverting each to the plain `naad_vec_zeros` fails it for 18. The other 3
+  write their vec in the same function, so they stop there either way. Reverting the `naad_vec_zeros` bound also
+  fails `cyrius fuzz`, which now drives `naad_vec_zeros` with wrapping sizes. Defining
+  abaco's 4-argument `power_spectrum` in `tests/bundle.tcyr` stops the suite compiling
+  against the 2.3.3 bundle, with the arity error dhvani hit.
+- **Consumer floor re-measured: still cyrius 6.7.2.** With hisab 3.5.0 and goonj 2.3.2,
+  6.7.2, 6.7.9 and 6.7.17 build the smoke binary, run it and pass the bundle suite. 6.7.1
+  fails at compile time.
+- **Independent review of the merged diff**, by a reader given only the code and the
+  intent. It found nothing wrong in `src/`, and four problems in the new test and scripts,
+  all fixed:
+  - A child-process case could not fail: it armed the refusal before building its own
+    input. That is what led to the per-constructor test above.
+  - The gate passed when a bundle named on its command line was missing. It now fails.
+  - The fetch script's "no tag" message could not print under `pipefail`. Each failure now
+    names the repo and the step.
+  - A test buffer was declared `[2]`, which is 2 bytes, not 2 entries.
+- `lib/`: 34 of 36 files are byte-identical to the 6.7.18 snapshot. The other two are the
+  git+tag bundles, each byte-identical to its tag's `dist/`, and `cyrius deps --locked`
+  agrees. `cyrius audit` exits 0, and `cyrius deny` and `cyrius fuzz` (1,586 checks) pass.
+
+### Known
+
+- ⚠ **Three constructors build an object around a refused allocation and stop later.**
+  `mod_matrix_new` (its routings vec and its 16 routing slots), `physical_moog_new` (its
+  scratch) and `wavetable_morph_new` (its two scratch buffers) keep a raw `alloc` or
+  `vec_new` without touching it. A refusal there still returns the object, which stops at
+  the null page on first use rather than in the constructor. That is unchanged since 2.3.3
+  and within ADR-0006, and it is the same shape the converted sites were kept out of.
+  Found by the new per-constructor test, which pins these 23 requests so that fixing
+  one, or adding one, shows. Not fixed here.
+
+### Migration
+
+- Rename calls to `power_spectrum(input)` to `naad_power_spectrum(input)`.
+- A caller that handles constructor failure needs no change: `NAAD_ERR_ALLOCATION` is
+  negative, so `naad_is_err` and `<= 0` both catch it. A `switch` over every
+  `NAAD_ERR_*` code should gain a case for -6.
+- A unit that takes goonj 2.3.2 needs hisab >= 3.4.2, and drops any `[deps.sakshi]`
+  package in favour of the stdlib leaf.
+
 ## [2.3.3] - Block forms: the hot modules render in real loops
 
 **No output moves.** Every form below is bit-identical to calling its per-sample function

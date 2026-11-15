@@ -65,7 +65,8 @@ struct Lfo { shape; frequency; sample_rate; phase; mode; depth; sh_value; rng; }
 
 # ================================================================
 # modulation_lfo_new -- construct. Returns the struct pointer on success, or a
-# negative NAAD_ERR_* (NAAD_ERR_INVALID_SAMPLE_RATE / NAAD_ERR_INVALID_PARAMETER) on failure.
+# negative NAAD_ERR_* (NAAD_ERR_INVALID_SAMPLE_RATE / NAAD_ERR_INVALID_PARAMETER) on failure,
+# or NAAD_ERR_ALLOCATION when either of its two allocations is refused (ADR-0010).
 # The oracle seeds rng=42, advances it once, and derives the initial S&H value
 # from that first step so the first cycle isn't silent.
 # ================================================================
@@ -84,10 +85,12 @@ fn modulation_lfo_new(shape, frequency, sample_rate) {
 
     # Seed the PRNG and take the first step for the initial S&H value.
     var rng = alloc(8);
+    if (rng == 0) { return NAAD_ERR_ALLOCATION; }
     store64(rng, MODULATION_SH_SEED);
     var initial_sh = xorshift32_signed_f32(rng);
 
     var self = alloc(sizeof(Lfo));
+    if (self == 0) { return NAAD_ERR_ALLOCATION; }
     Lfo_set_shape(self, shape);
     Lfo_set_frequency(self, frequency);
     Lfo_set_sample_rate(self, sample_rate);

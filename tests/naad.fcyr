@@ -324,8 +324,8 @@ fn main(): i64 {
         while (j < n) { vec_push(sig, fz_val(i + j)); j = j + 1; }
         var mags = fft_magnitudes(sig);
         fz_check(vec_len(mags) >= 0, "fft_magnitudes returned a negative length");
-        var ps = power_spectrum(sig);
-        fz_check(vec_len(ps) >= 0, "power_spectrum returned a negative length");
+        var ps = naad_power_spectrum(sig);
+        fz_check(vec_len(ps) >= 0, "naad_power_spectrum returned a negative length");
         i = i + 1;
     }
 
@@ -387,6 +387,24 @@ fn main(): i64 {
     while (i < 60) {
         var nn = tuning_note_name(fz_int(i));
         fz_check(strlen(nn) <= 4, "tuning_note_name produced an over-long name");
+        i = i + 1;
+    }
+
+    # --- naad_vec_zeros: sizes whose n * 8 wraps, and every interesting int ---
+    # Through 2.3.3, 2^61 + 1 allocated 8 bytes and zeroed 2^61 slots past them.
+    i = 0;
+    while (i < 14) {
+        var vn = fz_int(i);
+        if (i == 10) { vn = 0x2000000000000001; }   # n * 8 wraps to 8
+        if (i == 11) { vn = 0x4000000000000000; }   # n * 8 wraps to 0
+        if (i == 12) { vn = VEC_CAP_MAX + 1; }
+        if (i == 13) { vn = 0x7FFFFFFFFFFFFFFF; }
+        var vz = naad_vec_zeros(vn);
+        if (vn < 0 || vn > VEC_CAP_MAX) {
+            fz_check(vz == 0, "naad_vec_zeros accepted a size outside [0, VEC_CAP_MAX]");
+        } else {
+            fz_check(vz > 0 && vec_len(vz) == vn, "naad_vec_zeros refused a size it can hold");
+        }
         i = i + 1;
     }
 
