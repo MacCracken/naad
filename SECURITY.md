@@ -92,7 +92,9 @@ there, with no silent wrong answer and no hang. See
 constructors report the refusal instead: `noise_new`, `filter_biquad_with_gain`,
 `filter_svf_new` and `modulation_lfo_new` return `NAAD_ERR_ALLOCATION`, and
 `naad_vec_zeros` returns 0
-([ADR-0010](docs/adr/0010-five-constructors-report-a-refused-allocation.md)).
+([ADR-0010](docs/adr/0010-five-constructors-report-a-refused-allocation.md)). Since 2.3.5
+every other refusal stops inside the constructor that made the request. Before that, five
+constructors could build an object that stopped at its first sample instead.
 
 2.3.4 also closed a heap overrun in `naad_vec_zeros(n)`, which is public: `n * 8` was
 never bounded, so `n = 2^61 + 1` allocated 8 bytes and zeroed 2^61 slots past them. It

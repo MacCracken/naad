@@ -136,7 +136,7 @@ struct GranularEngine {
 #must_use
 fn granular_new(sample_rate) {
     var e = alloc(sizeof(GranularEngine));
-    GranularEngine_set_source(e, vec_new());
+    GranularEngine_set_source(e, _naad_vec_new_or_stop());
 
     var grains = vec_new();
     var i = 0;

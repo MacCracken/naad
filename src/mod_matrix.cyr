@@ -101,13 +101,13 @@ struct ModMatrix { routings; source_values; destination_values; slots; }
 #must_use
 fn mod_matrix_new() {
     var m = alloc(sizeof(ModMatrix));
-    ModMatrix_set_routings(m, vec_new());
+    ModMatrix_set_routings(m, _naad_vec_new_or_stop());
     ModMatrix_set_source_values(m, _naad_vec_zeros_or_stop(MOD_MATRIX_NUM_SOURCES));
     ModMatrix_set_destination_values(m, _naad_vec_zeros_or_stop(MOD_MATRIX_NUM_DESTINATIONS));
     var slots = vec_new();
     var i = 0;
     while (i < MOD_MATRIX_MAX_ROUTINGS) {
-        vec_push(slots, alloc(sizeof(ModRouting)));
+        vec_push(slots, _naad_alloc_or_stop(sizeof(ModRouting)));
         i = i + 1;
     }
     ModMatrix_set_slots(m, slots);

@@ -426,8 +426,8 @@ fn wavetable_morph_new(tables, frequency, sample_rate) {
     # (n_knots = nt + 3 + 1). Reused every sample by
     # wavetable_morph_next_sample_smooth via _bspline_eval_1d_into.
     MorphWavetable_set_scratch_cps(self, _naad_vec_zeros_or_stop(nt));
-    MorphWavetable_set_scratch_knots(self, alloc((nt + 4) * 8));
-    MorphWavetable_set_scratch_cps_arr(self, alloc(nt * 8));
+    MorphWavetable_set_scratch_knots(self, _naad_alloc_or_stop((nt + 4) * 8));
+    MorphWavetable_set_scratch_cps_arr(self, _naad_alloc_or_stop(nt * 8));
     return self;
 }
 

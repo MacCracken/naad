@@ -402,7 +402,7 @@ These are items U1 and U1b in garjan's 2.6.3 audit (`docs/audit/2026-11-07-audit
 ## Resolution
 
 Resolved in **2.3.4**, as suggested, with one change. Recorded in
-[ADR-0010](../../adr/0010-five-constructors-report-a-refused-allocation.md), which narrows
+[ADR-0010](../../../adr/0010-five-constructors-report-a-refused-allocation.md), which narrows
 ADR-0006.
 
 - `NAAD_ERR_ALLOCATION = (0 - 6)` is in `src/error.cyr`, named `"allocation refused"`.

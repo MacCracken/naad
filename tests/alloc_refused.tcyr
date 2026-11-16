@@ -374,11 +374,12 @@ assert_eq(c_ds, NAAD_ERR_ALLOCATION, "eq_deesser_new");
 
 # ================================================================
 test_group("every other caller of naad_vec_zeros still stops in its constructor");
-# naad's other 28 callers go through _naad_vec_zeros_or_stop. Passing the 0 on
-# would build an object that looks whole and stops at its first sample. So each
-# case below runs in a child, which exits 7 if a constructor reports success
-# while an allocation it made was refused, and 3 if it reports an error. A signal
-# is the 2.3.3 behaviour this keeps.
+# naad's other 28 callers go through _naad_vec_zeros_or_stop, and storage a
+# constructor keeps without touching goes through _naad_alloc_or_stop or
+# _naad_vec_new_or_stop (2.3.5). Passing a 0 on would build an object that looks
+# whole and stops at its first sample. So each case below runs in a child, which
+# exits 7 if a constructor reports success while an allocation it made was
+# refused, and 3 if it reports an error. A signal is a stop in place.
 
 # Exit code of a child running `fn_case(arg)`, or -1 if a signal ended it.
 fn ar_child2(fn_case, which, n) {
@@ -445,8 +446,9 @@ while (ar_i < 40) { vec_push(AR_IR, f64_div(F64_ONE, f64_from(ar_i + 1))); ar_i 
 # dsp_spectral and naad_fdn_hadamard8, which fill their vec in the same function,
 # so a 0 there stops at once whichever helper it came from. A 4-table morph has
 # no interior knots, so its knot vec is empty and kept unwritten; an empty IR
-# takes the ring's one-slot branch.
-var AR_LAST = 13;
+# takes the ring's one-slot branch. granular_new and eq_parametric_new keep an
+# empty vec for later, which is why 2.3.5 added them.
+var AR_LAST = 15;
 # Build constructor `which` (0 to AR_LAST) and return what it returns.
 fn ar_build(which) {
     if (which == 0) { return delay_line_new(100); }
@@ -462,7 +464,9 @@ fn ar_build(which) {
     if (which == 10) { return naad_convolution_from_ir(AR_IR, F64_HALF); }
     if (which == 11) { return naad_vec_copy(AR_IR); }
     if (which == 12) { return wavetable_morph_new(AR_TABLES4, f64_from(440), SR); }
-    return naad_convolution_from_ir(AR_EMPTY, F64_HALF);
+    if (which == 13) { return naad_convolution_from_ir(AR_EMPTY, F64_HALF); }
+    if (which == 14) { return granular_new(SR); }
+    return eq_parametric_new(SR);
 }
 
 # Build `which` with request n, and only request n, refused. A single refusal is
@@ -476,32 +480,16 @@ fn ar_build_case(which, n) {
     return 3;
 }
 
-# 1 when request n of k is a raw allocation the constructor keeps for later, so a
-# refusal there still builds the object, which then stops at the null page on
-# first use. These predate 2.3.4 and are ADR-0006's: mod_matrix_new's routings
-# vec (requests 2 and 3, its header and storage) and its 16 routing slots,
-# physical_moog_new's scratch, and wavetable_morph_new's two scratch buffers.
-# They are pinned so that fixing one, or adding one, shows.
-fn ar_kept(which, n, k) {
-    if (which == 4) {
-        if (n == 2 || n == 3) { return 1; }
-        if (n > k - MOD_MATRIX_MAX_ROUTINGS) { return 1; }
-    }
-    if (which == 6) {
-        if (n == k) { return 1; }
-    }
-    if (which == 8 || which == 12) {
-        if (n >= k - 1) { return 1; }
-    }
-    return 0;
-}
-
+# Through 2.3.4, 23 of these requests still built an object: mod_matrix_new's
+# routings vec and 16 routing slots, physical_moog_new's scratch,
+# wavetable_morph_new's two scratch buffers, granular_new's source vec and
+# eq_parametric_new's band list. Each was kept without being touched, so the
+# refusal surfaced at first use. 2.3.5 makes them stop in place, and there is no
+# exception left.
 var ar_w = 0;
 var ar_ok = 1;
 var ar_stops = 0;
 var ar_tried = 0;
-var ar_kept_built = 0;
-var ar_kept_want = 0;
 while (ar_w <= AR_LAST) {
     fi_arm(FI_ONE, 0);
     var ar_ref = ar_build(ar_w);
@@ -510,23 +498,16 @@ while (ar_w <= AR_LAST) {
     var ar_n = 1;
     while (ar_n <= ar_k) {
         var ar_rc = ar_child2(&ar_build_case, ar_w, ar_n);
-        if (ar_kept(ar_w, ar_n, ar_k) == 1) {
-            ar_kept_want = ar_kept_want + 1;
-            if (ar_rc == 7) { ar_kept_built = ar_kept_built + 1; }
-        } else {
-            if (ar_rc == 7) { ar_ok = 0; }
-            if (ar_rc == 0 - 1) { ar_stops = ar_stops + 1; }
-            ar_tried = ar_tried + 1;
-        }
+        if (ar_rc == 7) { ar_ok = 0; }
+        if (ar_rc == 0 - 1) { ar_stops = ar_stops + 1; }
+        ar_tried = ar_tried + 1;
         ar_n = ar_n + 1;
     }
     ar_w = ar_w + 1;
 }
-assert_eq(ar_ok, 1, "no single refusal leaves one of the 14 cases reporting success");
+assert_eq(ar_ok, 1, "no single refusal leaves one of the 16 cases reporting success");
 assert(ar_tried >= 3 * (AR_LAST + 1), "every constructor was refused at several points");
 assert(ar_stops >= AR_LAST + 1, "and the refusals stopped, not returned");
-assert_eq(ar_kept_want, 2 + MOD_MATRIX_MAX_ROUTINGS + 1 + 2 + 2, "the kept set is the 23 requests named above");
-assert_eq(ar_kept_built, ar_kept_want, "and each of them still builds: ADR-0006 leaves those to first use");
 
 # ================================================================
 test_group("NAAD_ERR_ALLOCATION is its own code");

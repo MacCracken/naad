@@ -160,6 +160,27 @@ fn _naad_vec_zeros_or_stop(n) {
 }
 
 # ================================================================
+# _naad_alloc_or_stop / _naad_vec_new_or_stop -- alloc and vec_new for storage a
+# constructor keeps without touching: scratch, slots, a list filled later. A
+# refusal there used to build an object that stopped at the null page on first
+# use, mid-render. These stop here instead, in the constructor, as every other
+# refused allocation outside ADR-0010's list does.
+# ================================================================
+#must_use
+fn _naad_alloc_or_stop(size) {
+    var p = alloc(size);
+    if (p == 0) { store64(p, 0); }
+    return p;
+}
+
+#must_use
+fn _naad_vec_new_or_stop() {
+    var v = vec_new();
+    if (v == 0) { store64(v, 0); }
+    return v;
+}
+
+# ================================================================
 # naad_vec_copy -- a fresh vec holding `v`'s elements. For anything that keeps a
 # vec past the call: Rust takes these by value, so the caller can no longer reach
 # them, and here the copy is what keeps that true. ADR-0005.

@@ -65,7 +65,7 @@ struct DeEsser { detector_filter; envelope; threshold_db; max_reduction_db; smoo
 #must_use
 fn eq_parametric_new(sample_rate) {
     var self = alloc(sizeof(ParametricEq));
-    ParametricEq_set_bands(self, vec_new());
+    ParametricEq_set_bands(self, _naad_vec_new_or_stop());
     ParametricEq_set_sample_rate(self, sample_rate);
     return self;
 }

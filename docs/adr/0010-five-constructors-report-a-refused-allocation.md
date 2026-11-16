@@ -14,7 +14,7 @@ garjan can act on it. Its 2.6.3 audit refused each allocation in turn across 9,2
 one process per case, and found that its synth constructors already treat `<= 0` from a
 naad constructor as a failure. The process never got that far: it died inside naad first.
 garjan filed this as
-[`2026-11-07-constructors-write-through-a-refused-allocation`](../development/issues/2026-11-07-constructors-write-through-a-refused-allocation.md).
+[`2026-11-07-constructors-write-through-a-refused-allocation`](../development/issues/archived/2026-11-07-constructors-write-through-a-refused-allocation.md).
 It is not only a hook artifact, either. The stdlib's `alloc` returns 0 when it cannot map
 a chunk, so `noise_new` faults on a real exhausted heap under `ulimit -v`.
 
@@ -68,10 +68,13 @@ behaviour.**
   refused band-pass filter, for instance, but stops on its own refused `rng`.
 - **Negative** — a refusal partway through keeps what was allocated before it. The bump
   allocator frees nothing, so this costs nothing it would not have cost anyway.
-- **Negative** — a stop that waits for first use already existed, and still does, for raw
-  allocations kept without being touched: `mod_matrix_new`'s routings vec and slots,
-  `physical_moog_new`'s scratch, `wavetable_morph_new`'s two scratch buffers. They are
-  unchanged since 2.3.3, and `tests/alloc_refused.tcyr` pins them, 23 requests in all.
+- **Negative, then fixed** — a stop that waited for first use already existed for raw
+  allocations kept without being touched. 2.3.4 found `mod_matrix_new`'s routings vec and
+  slots, `physical_moog_new`'s scratch and `wavetable_morph_new`'s two scratch buffers.
+  2.3.5's sweep of every constructor added `granular_new`'s source vec and
+  `eq_parametric_new`'s band list. All five stop in the constructor since 2.3.5, through
+  `_naad_alloc_or_stop` and `_naad_vec_new_or_stop`, the same rule as
+  `_naad_vec_zeros_or_stop`.
 - **Neutral** — `tests/alloc_refused.tcyr` replaces the stdlib `alloc` to refuse chosen
   requests. Each constructor's count is measured, not written down, and each loop has a
   floor so it cannot pass by refusing nothing. All 14 new checks were reverted one at a
@@ -90,5 +93,5 @@ behaviour.**
 - **Return the 0 from `naad_vec_zeros` to every caller.** This is the filing's suggestion
   for the 29 call sites, minus their checks. Without the checks, each caller keeps a 0 vec
   and stops at its first use. That is fail-stop in name only: the constructor reports
-  success, and the crash lands in the render loop. Three constructors already have that
-  shape through raw allocations (see Consequences); this would have added 28 more.
+  success, and the crash lands in the render loop. Five constructors had that shape
+  through raw allocations until 2.3.5 (see Consequences); this would have added 28 more.

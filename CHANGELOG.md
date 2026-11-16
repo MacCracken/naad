@@ -5,6 +5,66 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.5] - A refused allocation stops in the constructor, everywhere
+
+Fixes what 2.3.4 found and listed under *Known*: constructors that kept an allocation
+without touching it, so a refusal built an object that looked whole and then stopped at
+its first use. **There were five, not three.** A sweep of every constructor found two more.
+Each now stops in place, as every other refused allocation outside
+[ADR-0010](docs/adr/0010-five-constructors-report-a-refused-allocation.md)'s list does. **No
+result on valid input moves**: 96,121 values are byte-identical to 2.3.3 and 2.3.4, and so
+are the 975 hostile cases. No public name or return value changes, and no dependency
+moves. Suite: **42 suites / 3,498 assertions**.
+
+### Fixed
+
+- **Five constructors built an object around a refused allocation.** Each stored a raw
+  `alloc` or `vec_new` result without reading it, so the refusal surfaced later, at the
+  null page, from inside a render or an edit:
+
+  | Constructor | Kept allocation | Where it used to stop |
+  |---|---|---|
+  | `mod_matrix_new` | the routings vec, and the 16 routing slots | adding or computing a routing |
+  | `physical_moog_new` | its 128-byte scratch | the first sample |
+  | `wavetable_morph_new` | the two smooth-morph scratch buffers | the first smooth sample |
+  | `granular_new` | the empty source vec | setting a source, or the first sample |
+  | `eq_parametric_new` | the empty band list | the first `eq_add_band` |
+
+  They now go through two new internal helpers, `_naad_alloc_or_stop` and
+  `_naad_vec_new_or_stop`, which stop at the null page in the constructor. That is the
+  same stop as before, only earlier, and it is the rule `_naad_vec_zeros_or_stop` already
+  applied in 2.3.4. 2.3.4 named the first three. `granular_new` and `eq_parametric_new`
+  were found by this release's sweep.
+
+### Verified
+
+- **Every constructor, every refusal.** A sweep refused each allocation of 69 constructors
+  and builders, singly and each in its own process: every `*_new` and the `from_*` and
+  `with_*` forms, 793 refusals in all. On 2.3.4 it found the five above, and no others in
+  naad's code. A static scan for allocations kept untouched found the same five. On 2.3.5
+  it finds none.
+- **What goonj tolerates is not a wrong answer.** The sweep also found refusals inside goonj
+  under which `naad_binaural_new` and `naad_room_reverb_new` still return an object. They
+  are 24-byte requests in goonj's room geometry: 6 for binaural, and 63 of 2,515 for a room
+  reverb. Every one gives output bit-identical to the unrefused object, checked at every
+  request of the room reverb, so these are tolerated refusals, not silent errors. They
+  are goonj's and unchanged.
+  `naad_convolution_from_room` runs the same goonj code, and its refusals fall at the same
+  requests.
+- **The test can fail.** `tests/alloc_refused.tcyr` now holds 16 constructor cases, the five
+  among them, to no success under any single refusal, with no exceptions left. Reverting
+  each of the 7 rewritten call sites, and the stop in each helper, fails it, 9 of 9.
+- **Output.** Two dump harnesses (90,521 values) and a third for moog, smooth morph and the
+  mod matrix (5,600 values) are byte-identical to 2.3.3. The 975-case hostile sweep gives
+  the same exit code and output.
+- `cyrius audit` exits 0, and `cyrius deny`, `cyrius fuzz` (1,586 checks), the collision gate
+  against the 15 siblings and `cyrius deps --locked` all pass.
+
+### Changed
+
+- The two issues 2.3.4 resolved move to `docs/development/issues/archived/`, with their
+  repros.
+
 ## [2.3.4] - Newest hisab and goonj, the abaco collision, and refused allocations garjan can handle
 
 Dependency release, plus the two issues consumers filed against 2.3.3. `hisab` 3.4.1 ->
@@ -17,7 +77,7 @@ the same exit code and output. **One public name changes**: `power_spectrum` is 
 ### Breaking
 
 - **`power_spectrum` is now `naad_power_spectrum`**
-  ([issue](docs/development/issues/2026-11-08-power-spectrum-clashes-with-abaco-2-8-0.md)).
+  ([issue](docs/development/issues/archived/2026-11-08-power-spectrum-clashes-with-abaco-2-8-0.md)).
   abaco 2.8.0 defines `power_spectrum(re, im, out, n)`, and cycc refuses a duplicate fn
   whose arity disagrees, so dhvani, which links both, could not move to abaco 2.8.0. abaco
   keeps the name, by the maintainer's decision of 2026-11-08. This is the same prefix
@@ -37,7 +97,7 @@ the same exit code and output. **One public name changes**: `power_spectrum` is 
   `[0, VEC_CAP_MAX]`. No naad caller passes such a size, since each bounds it first, but the
   function is public. Found while reproducing the next item.
 - **Five constructors wrote through a refused allocation**
-  ([issue](docs/development/issues/2026-11-07-constructors-write-through-a-refused-allocation.md),
+  ([issue](docs/development/issues/archived/2026-11-07-constructors-write-through-a-refused-allocation.md),
   [ADR-0010](docs/adr/0010-five-constructors-report-a-refused-allocation.md)). `noise_new`,
   `filter_biquad_with_gain` (and `filter_biquad_new`), `filter_svf_new` and
   `modulation_lfo_new` now return the new **`NAAD_ERR_ALLOCATION` (-6)**, and

@@ -121,6 +121,10 @@ committed to — nothing here is speculative, and no milestone is invented.
       [ADR-0010](../adr/0010-five-constructors-report-a-refused-allocation.md) narrows
       ADR-0006 to everything else. The same filing found `naad_vec_zeros` wrapping `n * 8`,
       fixed with it.
+- [x] **Every other refusal stops in the constructor.** Shipped in 2.3.5. Five
+      constructors kept an allocation without touching it, so a refusal stopped later, at
+      first use. A sweep of all 69 constructors and builders, 793 single refusals, found
+      them and now finds none.
 
 ### Allocation-free hot paths
 

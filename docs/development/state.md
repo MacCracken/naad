@@ -8,6 +8,16 @@
 `VERSION` at the repo root is the source of truth for the current number. The
 entries below are the release record.
 
+**2.3.5** — a refused allocation now stops in the constructor that made the request,
+everywhere outside ADR-0010's list. Five constructors kept an allocation without touching
+it, so a refusal built an object that stopped at the null page on first use:
+`mod_matrix_new`, `physical_moog_new`, `wavetable_morph_new`, `granular_new` and
+`eq_parametric_new`. 2.3.4 listed the first three. The other two were found by a sweep of
+all 69 constructors and builders, 793 single refusals, which now finds none in naad.
+Refusals goonj tolerates in its room geometry give bit-identical output. No output,
+public name or dependency moves, over 96,121 values and 975 hostile cases. The two issues
+2.3.4 resolved are archived. Suite: **42 suites / 3498 assertions**.
+
 **2.3.4** — hisab 3.4.1 -> **3.5.0**, goonj 2.3.1 -> **2.3.2**, cyrius stays **6.7.18** (its
 newest tag), and sakshi 2.5.10 is a stdlib leaf now. Output on valid input is
 byte-identical to 2.3.3 over 90,521 values, and 975 hostile cases match too. Consumers filed
@@ -351,7 +361,10 @@ consumed.
   binaural), which 6.7.1 accepts only from an enum constant.
 - **A refused allocation is fail-stop**, with five exceptions that report it:
   `noise_new`, `filter_biquad_with_gain`, `filter_svf_new`, `modulation_lfo_new` and
-  `naad_vec_zeros`. ADR-0006 and ADR-0010.
+  `naad_vec_zeros`. ADR-0006 and ADR-0010. Since 2.3.5 the stop is in the constructor that
+  made the request, never at an object's first use. Storage a constructor keeps without
+  touching goes through `_naad_alloc_or_stop`, `_naad_vec_new_or_stop` or
+  `_naad_vec_zeros_or_stop`.
 - **goonj ends the process on a refused allocation** at sizes that depend on input, with
   `goonj: allocation refused` (its ADR-0004, since 2.1.3).
 - stdlib leaves are declared in `[deps].stdlib`. There is no `dist/naad.deps`:
@@ -503,10 +516,10 @@ form, and that suite is what says so
 
 `tests/alloc_refused.tcyr` replaces the stdlib `alloc` with one that refuses chosen
 requests, and holds the five constructors ADR-0010 names to `NAAD_ERR_ALLOCATION`. It
-also holds their callers to passing the code on. The 12 constructors behind the other
-`naad_vec_zeros` call sites must never report success with a request refused, except
-for the 23 kept raw allocations listed under *Known*. Nothing else in the suite may
-define `alloc`: cycc keeps the last definition for the whole unit.
+also holds their callers to passing the code on. 16 constructor cases, those behind the
+other `naad_vec_zeros` call sites and the five that kept untouched storage, must never
+report success with any one request refused, with no exceptions since 2.3.5. Nothing else
+in the suite may define `alloc`: cycc keeps the last definition for the whole unit.
 
 ## Benchmarks
 
@@ -554,14 +567,10 @@ Nothing open in the port itself — 41 / 41 modules are done. The follow-ups
 below are genuinely open; the scheduled view lives in
 [`roadmap.md`](roadmap.md) under *Open gates*.
 
-**Known, found at 2.3.4:**
-
-- **Three constructors stop at first use, not in the constructor, when a kept raw
-  allocation is refused.** `mod_matrix_new` (routings vec, 16 routing slots),
-  `physical_moog_new` (scratch) and `wavetable_morph_new` (two scratch buffers) store an
-  `alloc` or `vec_new` result without touching it. That is within ADR-0006 and unchanged
-  since 2.3.3. `tests/alloc_refused.tcyr` pins the 23 requests. Not fixed: it is
-  pre-existing, and outside ADR-0010's list.
+~~**Known, found at 2.3.4:** three constructors stop at first use when a kept raw
+allocation is refused~~ — **fixed in 2.3.5**, along with two more the sweep found
+(`granular_new`, `eq_parametric_new`). They stop in the constructor now, through
+`_naad_alloc_or_stop` and `_naad_vec_new_or_stop`.
 
 **Known limit, measured at 2.3.1:**
 
